@@ -1,0 +1,43 @@
+// SF32LB52x - Sifli Cortex-M33 big.LITTLE BLE SoC
+// HCPU: Cortex-M33 @ 240MHz, 512KB SRAM
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m33"
+    nvic: nvic
+
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    -> cpu@0
+
+// Memory
+
+sram: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x80000  // 512KB HCPU SRAM
+
+sram_shared: Memory.MappedMemory @ sysbus 0x20400000
+    size: 0x10000  // 64KB shared SRAM (LCPU)
+
+flash: Memory.MappedMemory @ sysbus 0x10000000
+    size: 0x02000000  // 32MB MPI1 (external NOR flash)
+
+// Peripherals
+
+usart1: UART.STM32F7_USART @ sysbus 0x50084000
+    frequency: 48000000
+    IRQ -> nvic@0
+
+usart2: UART.STM32F7_USART @ sysbus 0x50085000
+    frequency: 48000000
+    IRQ -> nvic@1
+
+usart3: UART.STM32F7_USART @ sysbus 0x50086000
+    frequency: 48000000
+    IRQ -> nvic@2
+
+sysbus:
+    init:
+        SilenceRange <0x50000000, 0x50000FFF>  // RCC
+        SilenceRange <0x50003000, 0x500030E7>  // Pin Control
+        SilenceRange <0x5000B000, 0x5000BFFF>  // Syscon
+        SilenceRange <0x500A0000, 0x500A0FFF>  // GPIO
+        SilenceRange <0x500C0000, 0x500C0FFF>  // AON Syscon
+        SilenceRange <0x500CA000, 0x500CAFFF>  // PMUC Syscon

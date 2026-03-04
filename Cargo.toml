@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["fob"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace.metadata.rust-analyzer]
+cargo.target = "thumbv8m.main-none-eabihf"
