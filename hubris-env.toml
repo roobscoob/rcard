@@ -1,0 +1,4 @@
+[system]
+source = "git"
+repo = "https://github.com/cbiffle/exhubris"
+rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"

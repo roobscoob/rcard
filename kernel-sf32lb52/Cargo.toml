@@ -1,0 +1,14 @@
+[package]
+name = "kernel-sf32lb52"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+cortex-m-rt = { version = "0.7.5", features = ["device"] }
+
+[dependencies.hubris-kern]
+package = "kern"
+git = "https://github.com/cbiffle/hubris-fork.git"
+branch = "cbiffle/exhubris-fixes"
+features = ["stack-watermark"]

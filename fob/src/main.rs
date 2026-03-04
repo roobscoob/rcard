@@ -1,19 +1,21 @@
 #![no_std]
 #![no_main]
 
-mod logger;
+use sf32lb52_pac::Usart1;
 
-use cortex_m_rt::entry;
-use sf32lb52_pac as _;
-
-#[entry]
+#[export_name = "main"]
 fn main() -> ! {
-    defmt::error!("hello from fob");
+    let usart = unsafe { Usart1::steal() };
+    // BRR = 48MHz / 115200 = 417 (0x1A1)
+    usart.brr().write(|w| unsafe { w.bits(0x1A1) });
+    usart.cr1().write(|w| w.ue().set_bit().te().set_bit());
 
-    loop {}
-}
+    for &b in b"hello from fob\r\n" {
+        while usart.isr().read().txe().bit_is_clear() {}
+        usart.tdr().write(|w| unsafe { w.bits(b as u32) });
+    }
 
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
+    loop {
+        userlib::sys_recv_notification(0);
+    }
 }

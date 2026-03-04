@@ -4,6 +4,8 @@
 cpu: CPU.CortexM @ sysbus
     cpuType: "cortex-m33"
     nvic: nvic
+    init:
+        VectorTableOffset 0x10000000
 
 nvic: IRQControllers.NVIC @ sysbus 0xE000E000
     -> cpu@0
@@ -23,15 +25,15 @@ flash: Memory.MappedMemory @ sysbus 0x10000000
 
 usart1: UART.STM32F7_USART @ sysbus 0x50084000
     frequency: 48000000
-    IRQ -> nvic@0
+    IRQ -> nvic@59
 
 usart2: UART.STM32F7_USART @ sysbus 0x50085000
     frequency: 48000000
-    IRQ -> nvic@1
+    IRQ -> nvic@74
 
 usart3: UART.STM32F7_USART @ sysbus 0x50086000
     frequency: 48000000
-    IRQ -> nvic@2
+    IRQ -> nvic@95
 
 sysbus:
     init:

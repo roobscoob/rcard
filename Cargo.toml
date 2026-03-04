@@ -1,12 +1,17 @@
 [workspace]
-resolver = "3"
-members = ["fob"]
+resolver = "2"
+members = ["fob", "kernel-sf32lb52"]
+
+[workspace.dependencies]
+userlib = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
 
 [profile.dev]
 panic = "abort"
 
 [profile.release]
+debug = true
 panic = "abort"
+lto = true
 
 [workspace.metadata.rust-analyzer]
 cargo.target = "thumbv8m.main-none-eabihf"

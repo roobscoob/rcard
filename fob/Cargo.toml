@@ -4,7 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cortex-m = "0.7"
-cortex-m-rt = "0.7"
-defmt = "1.0"
 sf32lb52-pac = { version = "0.1", default-features = false }
+userlib.workspace = true

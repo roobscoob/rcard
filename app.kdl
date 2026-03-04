@@ -1,0 +1,38 @@
+app rcard
+
+board sf32lb52-dev {
+    chip "proj:chips/sf32lb52.kdl"
+}
+
+kernel {
+    workspace-crate "kernel-sf32lb52"
+    stack-size 1024
+}
+
+task super {
+    git-crate {
+        repo "https://github.com/cbiffle/exhubris/"
+        package minisuper
+        rev "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+    }
+    priority 0
+    stack-size 256
+}
+
+task fob {
+    workspace-crate "fob"
+    stack-size 2048
+    priority 1
+    uses-peripheral usart1
+}
+
+task idle {
+    git-crate {
+        repo "https://github.com/cbiffle/exhubris/"
+        package idle
+        rev "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+    }
+    stack-size 256
+    priority 2
+    features insomniac
+}

@@ -1,0 +1,21 @@
+using sysbus
+
+mach create "sf32lb52"
+machine LoadPlatformDescription $ORIGIN/sf32lb52.repl
+
+showAnalyzer usart1
+
+sysbus LogPeripheralAccess usart1 true
+
+macro reset
+"""
+    sysbus LoadELF $bin
+    sysbus LoadSymbolsFrom $kernel_elf
+"""
+runMacro $reset
+
+# Halt on kernel panic and print the epitaph (fully automatic).
+# $die_loop is the `b .` at the end of die_impl, AFTER the epitaph is written.
+cpu AddHook $die_loop "a=self.Bus.GetSymbolAddress('KERNEL_EPITAPH'); bs=[self.Bus.ReadByte(a+i) for i in range(128)]; msg=''.join(chr(b) for b in bs if b!=0); print('KERNEL PANIC: '+msg); self.IsHalted=True"
+
+start

@@ -1,0 +1,8 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = ["-C", "link-arg=-Ttask-rlink.x"]
+
+[env]
+HUBRIS_TARGET = "thumbv8m.main-none-eabihf"
