@@ -165,7 +165,8 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 name = "fob"
 version = "0.1.0"
 dependencies = [
- "sf32lb52-pac",
+ "hubris-task-slots",
+ "sysmodule_usart_api",
  "userlib",
 ]
 
@@ -180,6 +181,45 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+
+[[package]]
+name = "hubpack"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61a0b84aeae519f65e0ba3aa998327080993426024edbd5cc38dbaf5ec524303"
+dependencies = [
+ "hubpack_derive",
+ "serde",
+]
+
+[[package]]
+name = "hubpack_derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f928320aff16ee8818ef7309180f8b5897057fd79d9dcb8de3ed1ba6dcc125a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "hubris-task-slots"
+version = "0.1.0"
+source = "git+https://github.com/cbiffle/exhubris?rev=69d2f5ca8017fc3aaf692eae9455ac9fcd883173#69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+dependencies = [
+ "ron",
+ "userlib",
+]
+
+[[package]]
+name = "idyll_runtime"
+version = "0.1.0"
+source = "git+https://github.com/cbiffle/exhubris?rev=69d2f5ca8017fc3aaf692eae9455ac9fcd883173#69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+dependencies = [
+ "userlib",
+ "zerocopy 0.8.40",
+]
 
 [[package]]
 name = "indexmap"
@@ -200,6 +240,27 @@ checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
 dependencies = [
  "equivalent",
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "ipc"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "idyll_runtime",
+ "ipc-macros",
+ "serde",
+ "userlib",
+ "zerocopy 0.8.40",
+]
+
+[[package]]
+name = "ipc-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -249,6 +310,16 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "kern",
+]
+
+[[package]]
+name = "kipc"
+version = "0.1.0"
+source = "git+https://github.com/cbiffle/exhubris?rev=69d2f5ca8017fc3aaf692eae9455ac9fcd883173#69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+dependencies = [
+ "abi",
+ "ssmarshal",
+ "userlib",
 ]
 
 [[package]]
@@ -458,6 +529,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "supervisor"
+version = "0.1.0"
+dependencies = [
+ "kipc",
+ "userlib",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -477,6 +556,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sysmodule_usart"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "idyll_runtime",
+ "ipc",
+ "sf32lb52-pac",
+ "sysmodule_usart_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_usart_api"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "idyll_runtime",
+ "ipc",
+ "serde",
+ "userlib",
+ "zerocopy 0.8.40",
 ]
 
 [[package]]

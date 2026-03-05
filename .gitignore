@@ -1,4 +1,5 @@
 target/
 build/
 *build.zip
-.work
+.work/
+.app.kdl.out

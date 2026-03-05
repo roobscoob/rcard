@@ -4,5 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sf32lb52-pac = { version = "0.1", default-features = false }
+hubris-task-slots.workspace = true
+sysmodule_usart_api = { path = "../sysmodule/usart/api" }
 userlib.workspace = true
+
+[[bin]]
+name = "fob"
+test = false
+bench = false

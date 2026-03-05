@@ -1,5 +1,5 @@
 [toolchain]
-channel = "1.84"
+channel = "1.85"
 targets = ["thumbv8m.main-none-eabihf"]
 profile = "minimal"
 components = ["rustfmt", "rust-analyzer"]

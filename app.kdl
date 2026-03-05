@@ -1,3 +1,10 @@
+define workgroup {
+    kernel
+    sysmodule
+    app
+    idle
+}
+
 app rcard
 
 board sf32lb52-dev {
@@ -10,19 +17,9 @@ kernel {
 }
 
 task super {
-    git-crate {
-        repo "https://github.com/cbiffle/exhubris/"
-        package minisuper
-        rev "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
-    }
-    priority 0
-    stack-size 256
-}
-
-task fob {
-    workspace-crate "fob"
-    stack-size 2048
-    priority 1
+    workspace-crate "supervisor"
+    priority (workgroup)kernel
+    stack-size 8192
     uses-peripheral usart1
 }
 
@@ -33,6 +30,22 @@ task idle {
         rev "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
     }
     stack-size 256
-    priority 2
+    priority (workgroup)idle
     features insomniac
+}
+
+task sysmodule_usart {
+    workspace-crate "sysmodule_usart"
+    stack-size 2048
+    priority (workgroup)sysmodule
+    uses-peripheral usart1
+    uses-peripheral usart2
+    uses-peripheral usart3
+}
+
+task fob {
+    workspace-crate "fob"
+    stack-size 2048
+    priority (workgroup)app
+    uses-task sysmodule_usart
 }

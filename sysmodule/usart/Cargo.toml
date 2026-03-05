@@ -1,0 +1,17 @@
+[package]
+name = "sysmodule_usart"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hubpack = "0.1.2"
+idyll_runtime.workspace = true
+ipc = { path = "../../modules/ipc" }
+sf32lb52-pac = { version = "0.1", default-features = false }
+sysmodule_usart_api = { path = "api" }
+userlib.workspace = true
+
+[[bin]]
+name = "sysmodule_usart"
+test = false
+bench = false

@@ -1,0 +1,13 @@
+[cargo]
+target = "thumbv8m.main-none-eabihf"
+allTargets = false
+
+[cargo.buildScripts]
+enable = true
+
+[check]
+allTargets = false
+targets = ["thumbv8m.main-none-eabihf"]
+
+[cfg]
+setTest = false

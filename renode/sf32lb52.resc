@@ -4,8 +4,7 @@ mach create "sf32lb52"
 machine LoadPlatformDescription $ORIGIN/sf32lb52.repl
 
 showAnalyzer usart1
-
-sysbus LogPeripheralAccess usart1 true
+showAnalyzer usart2
 
 macro reset
 """

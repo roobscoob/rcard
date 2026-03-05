@@ -3,6 +3,11 @@ name = "kernel-sf32lb52"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "kernel-sf32lb52"
+test = false
+bench = false
+
 [dependencies]
 cortex-m = { version = "0.7.7", features = ["inline-asm"] }
 cortex-m-rt = { version = "0.7.5", features = ["device"] }

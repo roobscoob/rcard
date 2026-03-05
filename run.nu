@@ -11,8 +11,11 @@ def main [
         # "hubris-build.exe", causing a full rebuild every time. Create a
         # hardlink so the cache check passes.
         fix-hubake-cache
+        fix-lld-linker
 
-        hubake build app.kdl
+        let app_kdl = ($project | path join .app.kdl.out)
+        python ($project | path join scripts kdl-preprocess.py) ($project | path join app.kdl) $app_kdl
+        hubake build $app_kdl
 
         # Extract ELFs from the build archive
         let build_dir = ($project | path join build)
@@ -35,6 +38,18 @@ def main [
     let die_loop = (python ($project | path join renode find_die_loop.py) ($project | path join build elf kernel) | str trim)
 
     renode --console -e $"set bin \"($bin)\"; set kernel_elf \"($kernel_elf)\"; set die_loop ($die_loop); set resc \"($resc)\"" -e "include $resc"
+}
+
+# Workaround: rustc looks for ld.lld (no extension) but Windows only has
+# ld.lld.exe. Create a hardlink so the linker is found.
+def fix-lld-linker [] {
+    let toolchain = (rustup show active-toolchain | split row ' ' | first)
+    let exe = ([$env.USERPROFILE .rustup toolchains $toolchain lib rustlib x86_64-pc-windows-msvc bin gcc-ld ld.lld.exe] | path join)
+    let noext = ($exe | str replace '.exe' '')
+
+    if ($exe | path exists) and not ($noext | path exists) {
+        ^powershell -Command $"New-Item -ItemType HardLink -Path '($noext)' -Target '($exe)' | Out-Null"
+    }
 }
 
 # Ensure hubris-build hardlink exists alongside hubris-build.exe
