@@ -7,9 +7,7 @@ def main [
     let elf = ($project | path join build img final.elf)
 
     if not $skip_build {
-        # Workaround: hubake checks for "hubris-build" but Windows only has
-        # "hubris-build.exe", causing a full rebuild every time. Create a
-        # hardlink so the cache check passes.
+        ensure-hubake
         fix-hubake-cache
         fix-lld-linker
 
@@ -38,6 +36,14 @@ def main [
     let die_loop = (python ($project | path join renode find_die_loop.py) ($project | path join build elf kernel) | str trim)
 
     renode --console -e $"set bin \"($bin)\"; set kernel_elf \"($kernel_elf)\"; set die_loop ($die_loop); set resc \"($resc)\"" -e "include $resc"
+}
+
+# Install hubake if not already present
+def ensure-hubake [] {
+    if (which hubake | is-empty) {
+        print "hubake not found, installing..."
+        cargo install hubake --git "https://github.com/cbiffle/exhubris" --rev "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+    }
 }
 
 # Workaround: rustc looks for ld.lld (no extension) but Windows only has
