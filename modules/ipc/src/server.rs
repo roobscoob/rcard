@@ -56,10 +56,14 @@ impl<'a, const MAX_RESOURCES: usize, const MAX_CLIENTS: usize>
 
     /// Register a resource dispatcher for a given kind byte.
     pub fn register(&mut self, kind: u8, dispatcher: &'a mut dyn ResourceDispatch) {
-        if self.count < MAX_RESOURCES {
-            self.dispatchers[self.count] = Some((kind, dispatcher));
-            self.count += 1;
-        }
+        assert!(
+            !self.dispatchers[..self.count].iter().any(|e| matches!(e, Some((k, _)) if *k == kind)),
+            "ipc::Server: duplicate dispatcher registered for kind 0x{:02X}",
+            kind,
+        );
+        assert!(self.count < MAX_RESOURCES, "ipc::Server: MAX_RESOURCES ({}) exceeded", MAX_RESOURCES);
+        self.dispatchers[self.count] = Some((kind, dispatcher));
+        self.count += 1;
     }
 
     pub fn with_dispatcher(

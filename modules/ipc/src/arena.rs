@@ -39,6 +39,7 @@ impl<T, const N: usize> Arena<T, N> {
     };
 
     pub const fn new() -> Self {
+        assert!(N <= 255, "Arena: N must be <= 255 (slot index is stored as u8)");
         Self {
             slots: [Self::EMPTY_SLOT; N],
             map: [Self::EMPTY_ENTRY; N],

@@ -1,0 +1,18 @@
+[package]
+name = "sysmodule_log"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hubpack = "0.1.2"
+idyll_runtime.workspace = true
+ipc = { path = "../../modules/ipc" }
+hubris-task-slots.workspace = true
+sysmodule_log_api = { path = "api" }
+sysmodule_usart_api = { path = "../usart/api" }
+userlib.workspace = true
+
+[[bin]]
+name = "sysmodule_log"
+test = false
+bench = false

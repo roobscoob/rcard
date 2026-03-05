@@ -2,7 +2,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::Ident;
 
-use crate::parse::{parse_slice_ref, MethodKind, ParsedMethod, ParsedParam};
+use crate::parse::{parse_slice_ref, ConstructorReturn, MethodKind, ParsedMethod, ParsedParam};
 use crate::util::to_pascal_case;
 
 pub fn gen_server_trait(trait_name: &Ident, methods: &[ParsedMethod]) -> TokenStream2 {
@@ -45,10 +45,10 @@ pub fn gen_server_trait(trait_name: &Ident, methods: &[ParsedMethod]) -> TokenSt
             } else {
                 quote! { () }
             };
-            let ret = quote! { -> core::result::Result<#inner, userlib::ReplyFaultReason> };
+            let ret = quote! { -> #inner };
 
             let receiver = match m.kind {
-                MethodKind::Constructor => quote! {},
+                MethodKind::Constructor | MethodKind::StaticMessage => quote! {},
                 MethodKind::Message => quote! { &mut self, },
                 MethodKind::Destructor => quote! { self, },
             };
@@ -195,35 +195,68 @@ fn gen_dispatch_arm(
         MethodKind::Constructor => {
             let (deserialize, destructure) = gen_deserialize_args(&non_lease_params, false);
 
-            let ctor_body = if m.return_type.is_some() {
-                // User specified a return type (e.g. Result<Self, E>).
-                // Use ConstructorResult to extract Self or serialize the error.
-                // On success: reply with raw handle bytes (matching infallible path).
-                // On domain error: reply fault (BadMessageContents) — the client
-                // sees this as a failed open.  Proper domain-error propagation
-                // can be added later.
-                quote! {
-                    let ctor_result = T::#method_name(meta, #(#call_args),*)?;
-                    match ipc::ConstructorResult::into_resource(ctor_result) {
-                        Ok(value) => {
-                            let handle = self.arena.alloc(value, msg.sender.task_index())
-                                .ok_or(userlib::ReplyFaultReason::BadMessageContents)?;
-                            let reply = zerocopy::IntoBytes::as_bytes(&handle);
-                            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, reply);
-                        }
-                        Err(_e) => {
-                            return Err(userlib::ReplyFaultReason::BadMessageContents);
-                        }
+            let ctor_return = m.ctor_return.as_ref().expect("constructor must have ctor_return");
+            let ctor_body = match ctor_return {
+                ConstructorReturn::Bare => {
+                    quote! {
+                        let value = T::#method_name(meta, #(#call_args),*);
+                        let result: core::result::Result<ipc::RawHandle, ipc::Error> =
+                            match self.arena.alloc(value, msg.sender.task_index()) {
+                                Some(handle) => Ok(handle),
+                                None => Err(ipc::Error::ArenaFull),
+                            };
+                        let mut reply_buf = [0u8;
+                            <core::result::Result<ipc::RawHandle, ipc::Error>
+                                as hubpack::SerializedSize>::MAX_SIZE];
+                        let n = hubpack::serialize(&mut reply_buf, &result).unwrap_or(0);
+                        userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
                     }
                 }
-            } else {
-                // No return type (-> Self) — alloc directly, reply with raw handle.
-                quote! {
-                    let value = T::#method_name(meta, #(#call_args),*)?;
-                    let handle = self.arena.alloc(value)
-                        .ok_or(userlib::ReplyFaultReason::BadMessageContents)?;
-                    let reply = zerocopy::IntoBytes::as_bytes(&handle);
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, reply);
+                ConstructorReturn::Result(error_type) => {
+                    quote! {
+                        let ctor_result = T::#method_name(meta, #(#call_args),*);
+                        // Outer Err = IPC error (ArenaFull); inner Err = domain error from ctor.
+                        let result: core::result::Result<
+                            core::result::Result<ipc::RawHandle, #error_type>,
+                            ipc::Error,
+                        > = match ctor_result {
+                            Ok(value) => match self.arena.alloc(value, msg.sender.task_index()) {
+                                Some(handle) => Ok(Ok(handle)),
+                                None => Err(ipc::Error::ArenaFull),
+                            },
+                            Err(e) => Ok(Err(e)),
+                        };
+                        let mut reply_buf = [0u8;
+                            <core::result::Result<
+                                core::result::Result<ipc::RawHandle, #error_type>,
+                                ipc::Error,
+                            > as hubpack::SerializedSize>::MAX_SIZE];
+                        let n = hubpack::serialize(&mut reply_buf, &result).unwrap_or(0);
+                        userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                    }
+                }
+                ConstructorReturn::OptionSelf => {
+                    quote! {
+                        let ctor_result = T::#method_name(meta, #(#call_args),*);
+                        // Outer Err = IPC error (ArenaFull); Ok(None) = ctor returned None.
+                        let result: core::result::Result<
+                            core::option::Option<ipc::RawHandle>,
+                            ipc::Error,
+                        > = match ctor_result {
+                            Some(value) => match self.arena.alloc(value, msg.sender.task_index()) {
+                                Some(handle) => Ok(Some(handle)),
+                                None => Err(ipc::Error::ArenaFull),
+                            },
+                            None => Ok(None),
+                        };
+                        let mut reply_buf = [0u8;
+                            <core::result::Result<
+                                core::option::Option<ipc::RawHandle>,
+                                ipc::Error,
+                            > as hubpack::SerializedSize>::MAX_SIZE];
+                        let n = hubpack::serialize(&mut reply_buf, &result).unwrap_or(0);
+                        userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                    }
                 }
             };
 
@@ -240,15 +273,13 @@ fn gen_dispatch_arm(
 
         MethodKind::Message => {
             let (deserialize, destructure) = gen_deserialize_args(&non_lease_params, true);
-            let handle_result = gen_reply(method_name, &call_args, m.return_type.as_ref());
+            let handle_result = gen_reply(method_name, &call_args, m.return_type.as_ref(), false);
 
             quote! {
                 #enum_name::#variant => {
                     #deserialize
                     #destructure
                     #(#lease_bindings)*
-                    let resource = self.arena.get_mut(handle)
-                        .ok_or(userlib::ReplyFaultReason::BadMessageContents)?;
                     #handle_result
                     Ok(())
                 }
@@ -257,15 +288,28 @@ fn gen_dispatch_arm(
 
         MethodKind::Destructor => {
             let (deserialize, destructure) = gen_deserialize_args(&non_lease_params, true);
-            let handle_result = gen_reply(method_name, &call_args, m.return_type.as_ref());
+            let handle_result = gen_reply(method_name, &call_args, m.return_type.as_ref(), true);
 
             quote! {
                 #enum_name::#variant => {
                     #deserialize
                     #destructure
-                    let resource = self.arena.remove(handle)
-                        .ok_or(userlib::ReplyFaultReason::BadMessageContents)?;
                     #handle_result
+                    Ok(())
+                }
+            }
+        }
+
+        MethodKind::StaticMessage => {
+            let (deserialize, destructure) = gen_deserialize_args(&non_lease_params, false);
+            let static_reply = gen_static_reply(method_name, &call_args, m.return_type.as_ref());
+
+            quote! {
+                #enum_name::#variant => {
+                    #deserialize
+                    #destructure
+                    #(#lease_bindings)*
+                    #static_reply
                     Ok(())
                 }
             }
@@ -361,22 +405,95 @@ fn gen_call_args(m: &ParsedMethod) -> Vec<TokenStream2> {
         .collect()
 }
 
-fn gen_reply(
+fn gen_static_reply(
     method_name: &Ident,
     call_args: &[TokenStream2],
     return_type: Option<&syn::Type>,
 ) -> TokenStream2 {
-    if return_type.is_some() {
+    if let Some(rt) = return_type {
         quote! {
-            let result = resource.#method_name(meta, #(#call_args),*)?;
-            let mut reply_buf = [0u8; 64];
-            let n = hubpack::serialize(&mut reply_buf, &result).unwrap_or(0);
+            const _: () = assert!(
+                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE
+                    <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
+                "return type exceeds Hubris message size limit (256 bytes)",
+            );
+            let result_value = T::#method_name(meta, #(#call_args),*);
+            let mut reply_buf = [0u8;
+                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+            let n = hubpack::serialize(
+                &mut reply_buf,
+                &core::result::Result::<#rt, ipc::Error>::Ok(result_value),
+            ).unwrap_or(0);
             userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
         }
     } else {
         quote! {
-            resource.#method_name(meta, #(#call_args),*)?;
-            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
+            T::#method_name(meta, #(#call_args),*);
+            let mut reply_buf =
+                [0u8; <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+            let n = hubpack::serialize(
+                &mut reply_buf,
+                &core::result::Result::<(), ipc::Error>::Ok(()),
+            ).unwrap_or(0);
+            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+        }
+    }
+}
+
+fn gen_reply(
+    method_name: &Ident,
+    call_args: &[TokenStream2],
+    return_type: Option<&syn::Type>,
+    is_destructor: bool,
+) -> TokenStream2 {
+    let arena_op = if is_destructor {
+        quote! { self.arena.remove(handle) }
+    } else {
+        quote! { self.arena.get_mut(handle) }
+    };
+
+    if let Some(rt) = return_type {
+        quote! {
+            const _: () = assert!(
+                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE
+                    <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
+                "return type exceeds Hubris message size limit (256 bytes)",
+            );
+            let mut reply_buf = [0u8;
+                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+            let Some(resource) = #arena_op else {
+                let n = hubpack::serialize(
+                    &mut reply_buf,
+                    &core::result::Result::<#rt, ipc::Error>::Err(ipc::Error::InvalidHandle),
+                ).unwrap_or(0);
+                userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                return Ok(());
+            };
+            let result_value = resource.#method_name(meta, #(#call_args),*);
+            let n = hubpack::serialize(
+                &mut reply_buf,
+                &core::result::Result::<#rt, ipc::Error>::Ok(result_value),
+            ).unwrap_or(0);
+            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+        }
+    } else {
+        quote! {
+            let mut reply_buf =
+                [0u8; <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+            let Some(resource) = #arena_op else {
+                let n = hubpack::serialize(
+                    &mut reply_buf,
+                    &core::result::Result::<(), ipc::Error>::Err(ipc::Error::InvalidHandle),
+                ).unwrap_or(0);
+                userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                return Ok(());
+            };
+            resource.#method_name(meta, #(#call_args),*);
+            let n = hubpack::serialize(
+                &mut reply_buf,
+                &core::result::Result::<(), ipc::Error>::Ok(()),
+            ).unwrap_or(0);
+            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
         }
     }
 }

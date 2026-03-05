@@ -1,0 +1,4 @@
+# exhubris userlib
+
+This is a task library for interfacing with the Hubris kernel, compatible with
+the original Hubris ABI but rewritten to be more compact and efficient.

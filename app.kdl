@@ -38,14 +38,31 @@ task sysmodule_usart {
     workspace-crate "sysmodule_usart"
     stack-size 2048
     priority (workgroup)sysmodule
-    uses-peripheral usart1
+
+    // can't use USART1 - it's used by the supervisor for logging
     uses-peripheral usart2
     uses-peripheral usart3
 }
 
+task sysmodule_display {
+    workspace-crate "sysmodule_display"
+    stack-size 2048
+    priority (workgroup)sysmodule
+    uses-peripheral lcdc
+}
+
+task sysmodule_log {
+    workspace-crate "sysmodule_log"
+    stack-size 2048
+    priority (workgroup)sysmodule
+    uses-task sysmodule_usart
+}
+
 task fob {
     workspace-crate "fob"
-    stack-size 2048
+    stack-size 8192
     priority (workgroup)app
     uses-task sysmodule_usart
+    uses-task sysmodule_display
+    uses-task sysmodule_log
 }

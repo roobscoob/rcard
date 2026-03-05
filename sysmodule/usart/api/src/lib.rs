@@ -1,6 +1,6 @@
 #![no_std]
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
+#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
 pub enum UsartOpenError {
     ReservedUsart,
     InvalidIndex,

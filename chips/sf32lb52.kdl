@@ -76,3 +76,8 @@ peripheral "pmuc_syscon" {
     base 0x500C_A000
     size 0x1000
 }
+
+peripheral "lcdc" {
+    base 0x5000_8000
+    size 0x128
+}

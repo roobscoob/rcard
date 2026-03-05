@@ -35,6 +35,8 @@ usart3: UART.STM32F7_USART @ sysbus 0x50086000
     frequency: 48000000
     IRQ -> nvic@95
 
+lcdc: Display.SF32LB52_LCDC @ sysbus 0x50008000
+
 sysbus:
     init:
         SilenceRange <0x50000000, 0x50000FFF>  // RCC

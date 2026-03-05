@@ -166,6 +166,9 @@ name = "fob"
 version = "0.1.0"
 dependencies = [
  "hubris-task-slots",
+ "ipc",
+ "sysmodule_display_api",
+ "sysmodule_log_api",
  "sysmodule_usart_api",
  "userlib",
 ]
@@ -559,6 +562,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_display"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "idyll_runtime",
+ "ipc",
+ "sysmodule_display_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_display_api"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "idyll_runtime",
+ "ipc",
+ "serde",
+ "userlib",
+ "zerocopy 0.8.40",
+]
+
+[[package]]
+name = "sysmodule_log"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "hubris-task-slots",
+ "idyll_runtime",
+ "ipc",
+ "sysmodule_log_api",
+ "sysmodule_usart_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_log_api"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "idyll_runtime",
+ "ipc",
+ "serde",
+ "userlib",
+ "zerocopy 0.8.40",
+]
+
+[[package]]
 name = "sysmodule_usart"
 version = "0.1.0"
 dependencies = [
@@ -641,7 +692,6 @@ source = "git+https://github.com/cbiffle/hubris-fork.git?branch=cbiffle%2Fexhubr
 [[package]]
 name = "userlib"
 version = "0.1.0"
-source = "git+https://github.com/cbiffle/exhubris?rev=69d2f5ca8017fc3aaf692eae9455ac9fcd883173#69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
 dependencies = [
  "bitflags",
  "cfg-if",

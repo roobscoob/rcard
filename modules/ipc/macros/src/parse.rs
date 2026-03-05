@@ -1,8 +1,8 @@
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Expr, FnArg, Ident, ItemTrait, Lit, Meta, Pat, ReturnType, Token, TraitItem,
-    TraitItemFn, Type,
+    Expr, FnArg, GenericArgument, Ident, ItemTrait, Lit, Meta, Pat, PathArguments,
+    ReturnType, Token, TraitItem, TraitItemFn, Type,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,7 +58,19 @@ impl Parse for ResourceAttr {
 pub enum MethodKind {
     Constructor,
     Message,
+    StaticMessage,
     Destructor,
+}
+
+/// Parsed constructor return type. Constructors may only return one of these
+/// three forms; any other return type is a compile error.
+pub enum ConstructorReturn {
+    /// `-> Self` (or no return type) — infallible.
+    Bare,
+    /// `-> Result<Self, E>` — may fail with domain error `E`.
+    Result(Type),
+    /// `-> Option<Self>` — may return None.
+    OptionSelf,
 }
 
 pub struct ParsedParam {
@@ -73,7 +85,13 @@ pub struct ParsedMethod {
     pub name: Ident,
     pub params: Vec<ParsedParam>,
     pub return_type: Option<Type>,
+    /// Only set for constructors.
+    pub ctor_return: Option<ConstructorReturn>,
     pub method_id: u8,
+}
+
+fn has_receiver(method: &TraitItemFn) -> bool {
+    method.sig.inputs.iter().any(|arg| matches!(arg, FnArg::Receiver(_)))
 }
 
 fn classify_method(method: &TraitItemFn) -> Option<MethodKind> {
@@ -82,7 +100,11 @@ fn classify_method(method: &TraitItemFn) -> Option<MethodKind> {
             return Some(MethodKind::Constructor);
         }
         if attr.path().is_ident("message") {
-            return Some(MethodKind::Message);
+            if has_receiver(method) {
+                return Some(MethodKind::Message);
+            } else {
+                return Some(MethodKind::StaticMessage);
+            }
         }
         if attr.path().is_ident("destructor") {
             return Some(MethodKind::Destructor);
@@ -148,12 +170,67 @@ fn extract_return_type(ret: &ReturnType) -> Option<Type> {
                     return None;
                 }
             }
-            Some((*ty.clone()).clone())
+            Some((**ty).clone())
         }
     }
 }
 
-pub fn parse_methods(trait_def: &ItemTrait) -> Vec<ParsedMethod> {
+/// Parse a constructor's return type into a validated `ConstructorReturn`.
+/// Only `Self`, `Result<Self, E>`, and `Option<Self>` are accepted.
+fn parse_ctor_return(ret: &ReturnType) -> syn::Result<ConstructorReturn> {
+    match ret {
+        ReturnType::Default => Ok(ConstructorReturn::Bare),
+        ReturnType::Type(_, ty) => classify_ctor_type(ty),
+    }
+}
+
+fn classify_ctor_type(ty: &Type) -> syn::Result<ConstructorReturn> {
+    if let Type::Path(p) = ty {
+        // Bare `Self`
+        if p.path.is_ident("Self") {
+            return Ok(ConstructorReturn::Bare);
+        }
+
+        if let Some(seg) = p.path.segments.last() {
+            // `Result<Self, E>`
+            if seg.ident == "Result" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let args: Vec<_> = args.args.iter().collect();
+                    if args.len() == 2 {
+                        if let GenericArgument::Type(Type::Path(first)) = &args[0] {
+                            if first.path.is_ident("Self") {
+                                if let GenericArgument::Type(err_ty) = &args[1] {
+                                    return Ok(ConstructorReturn::Result(err_ty.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // `Option<Self>`
+            if seg.ident == "Option" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let args: Vec<_> = args.args.iter().collect();
+                    if args.len() == 1 {
+                        if let GenericArgument::Type(Type::Path(inner)) = &args[0] {
+                            if inner.path.is_ident("Self") {
+                                return Ok(ConstructorReturn::OptionSelf);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(syn::Error::new_spanned(
+        ty,
+        "constructor must return `Self`, `Result<Self, E>`, or `Option<Self>`",
+    ))
+}
+
+pub fn parse_methods(trait_def: &ItemTrait) -> syn::Result<Vec<ParsedMethod>> {
     let mut methods = Vec::new();
     let mut next_id: u8 = 0;
 
@@ -175,11 +252,25 @@ pub fn parse_methods(trait_def: &ItemTrait) -> Vec<ParsedMethod> {
 
             let return_type = extract_return_type(&method.sig.output);
 
+            let ctor_return = if kind == MethodKind::Constructor {
+                Some(parse_ctor_return(&method.sig.output)?)
+            } else {
+                None
+            };
+
+            if next_id == 0xFF {
+                return Err(syn::Error::new(
+                    method.sig.ident.span(),
+                    "too many methods: method ID 0xFF is reserved for implicit destroy",
+                ));
+            }
+
             methods.push(ParsedMethod {
                 kind,
                 name: method.sig.ident.clone(),
                 params,
                 return_type,
+                ctor_return,
                 method_id: next_id,
             });
 
@@ -187,5 +278,5 @@ pub fn parse_methods(trait_def: &ItemTrait) -> Vec<ParsedMethod> {
         }
     }
 
-    methods
+    Ok(methods)
 }

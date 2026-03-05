@@ -6,8 +6,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use sf32lb52_pac::usart1::RegisterBlock;
 use sf32lb52_pac::{Usart1, Usart2, Usart3};
+
 use sysmodule_usart_api::{Usart, UsartDispatcher, UsartOpenError};
-use userlib::ReplyFaultReason;
 
 static USART_IN_USE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
@@ -31,35 +31,34 @@ struct UsartResource {
 }
 
 impl Usart for UsartResource {
-    fn open(_meta: ipc::Meta, index: u8) -> Result<Result<Self, UsartOpenError>, ReplyFaultReason> {
+    fn open(_meta: ipc::Meta, index: u8) -> Result<Self, UsartOpenError> {
         if index == 1 {
-            return Ok(Err(UsartOpenError::ReservedUsart));
+            return Err(UsartOpenError::ReservedUsart);
         }
 
         let Some(regs) = usart_register_block(index) else {
-            return Ok(Err(UsartOpenError::InvalidIndex));
+            return Err(UsartOpenError::InvalidIndex);
         };
 
         if USART_IN_USE[(index - 2) as usize].swap(true, Ordering::Acquire) {
-            return Ok(Err(UsartOpenError::AlreadyOpen));
+            return Err(UsartOpenError::AlreadyOpen);
         }
 
         init_usart(regs);
 
-        Ok(Ok(UsartResource { index, regs }))
+        Ok(UsartResource { index, regs })
     }
 
     fn write(
         &mut self,
         _meta: ipc::Meta,
         data: idyll_runtime::Leased<idyll_runtime::Read, u8>,
-    ) -> Result<(), ReplyFaultReason> {
+    ) {
         for i in 0..data.len() {
             let b = data.read(i).unwrap_or(0);
             while self.regs.isr().read().txe().bit_is_clear() {}
             self.regs.tdr().write(|w| unsafe { w.bits(b as u32) });
         }
-        Ok(())
     }
 }
 

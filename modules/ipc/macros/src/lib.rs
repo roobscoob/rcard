@@ -17,7 +17,10 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let trait_def = parse_macro_input!(item as syn::ItemTrait);
     let trait_name = &trait_def.ident;
 
-    let methods = parse_methods(&trait_def);
+    let methods = match parse_methods(&trait_def) {
+        Ok(m) => m,
+        Err(e) => return e.to_compile_error().into(),
+    };
 
     let server_trait = gen_server_trait(trait_name, &methods);
     let op_enum = gen_operation_enum(trait_name, &methods);
