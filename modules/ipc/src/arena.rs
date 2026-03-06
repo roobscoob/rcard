@@ -1,16 +1,27 @@
 use crate::RawHandle;
 
+/// Error returned by `Arena::clone_handle`.
+#[derive(Debug)]
+pub enum CloneError {
+    /// The source handle doesn't exist or isn't owned by the caller.
+    InvalidHandle,
+    /// The map has no free entries or the refcount would overflow.
+    ArenaFull,
+}
+
 struct HandleEntry {
     key: u64,
     slot: u8,
     generation: u32,
     occupied: bool,
     owner: u16,
+    parent: Option<RawHandle>,
 }
 
 struct Slot<T> {
     value: Option<T>,
     generation: u32,
+    refcount: u16,
 }
 
 /// Fixed-size generational arena with opaque handle mapping.
@@ -18,9 +29,14 @@ struct Slot<T> {
 /// Externally, handles are opaque `u64` keys. Internally, each key maps
 /// to a `(slot_index, generation)` pair. The generation prevents stale
 /// handles from resolving after a slot is freed and reused.
+///
+/// Supports refcounting: multiple `HandleEntry` rows can point to the same
+/// slot. The slot's value is only dropped when the last reference is removed.
 pub struct Arena<T, const N: usize> {
     slots: [Slot<T>; N],
     map: [HandleEntry; N],
+    // TODO: Replace with hardware PRNG when available. Currently a
+    // deterministic LCG — handle keys are predictable across servers.
     next_key: u64,
 }
 
@@ -28,6 +44,7 @@ impl<T, const N: usize> Arena<T, N> {
     const EMPTY_SLOT: Slot<T> = Slot {
         value: None,
         generation: 0,
+        refcount: 0,
     };
 
     const EMPTY_ENTRY: HandleEntry = HandleEntry {
@@ -36,30 +53,58 @@ impl<T, const N: usize> Arena<T, N> {
         generation: 0,
         occupied: false,
         owner: 0,
+        parent: None,
     };
 
-    pub const fn new() -> Self {
+    pub const fn new(kind: u8) -> Self {
         assert!(N <= 255, "Arena: N must be <= 255 (slot index is stored as u8)");
         Self {
             slots: [Self::EMPTY_SLOT; N],
             map: [Self::EMPTY_ENTRY; N],
-            next_key: 1,
+            // Seed with kind byte so different arenas produce different key sequences.
+            next_key: (kind as u64) << 56 | 1,
         }
     }
 
-    /// Allocate a new slot, returning a handle to it.
-    pub fn alloc(&mut self, value: T, owner: u16) -> Option<RawHandle> {
-        let slot_idx = self.slots.iter().position(|s| s.value.is_none())?;
-        let map_idx = self.map.iter().position(|e| !e.occupied)?;
-
-        let generation = self.slots[slot_idx].generation;
-        self.slots[slot_idx].value = Some(value);
-
+    fn next_key(&mut self) -> u64 {
         let key = self.next_key;
         self.next_key = self
             .next_key
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
+        key
+    }
+
+    /// Allocate a new slot, returning a handle to it.
+    pub fn alloc(&mut self, value: T, owner: u16) -> Option<RawHandle> {
+        self.alloc_inner(value, owner, None)
+    }
+
+    /// Allocate a new slot with a parent handle reference.
+    /// When the parent is destroyed, `remove_by_parent` can cascade-delete children.
+    pub fn alloc_with_parent(
+        &mut self,
+        value: T,
+        owner: u16,
+        parent: RawHandle,
+    ) -> Option<RawHandle> {
+        self.alloc_inner(value, owner, Some(parent))
+    }
+
+    fn alloc_inner(
+        &mut self,
+        value: T,
+        owner: u16,
+        parent: Option<RawHandle>,
+    ) -> Option<RawHandle> {
+        let slot_idx = self.slots.iter().position(|s| s.value.is_none())?;
+        let map_idx = self.map.iter().position(|e| !e.occupied)?;
+
+        let generation = self.slots[slot_idx].generation;
+        self.slots[slot_idx].value = Some(value);
+        self.slots[slot_idx].refcount = 1;
+
+        let key = self.next_key();
 
         self.map[map_idx] = HandleEntry {
             key,
@@ -67,6 +112,7 @@ impl<T, const N: usize> Arena<T, N> {
             generation,
             occupied: true,
             owner,
+            parent,
         };
 
         Some(RawHandle(key))
@@ -74,6 +120,15 @@ impl<T, const N: usize> Arena<T, N> {
 
     fn lookup(&self, handle: RawHandle) -> Option<usize> {
         let entry = self.map.iter().find(|e| e.occupied && e.key == handle.0)?;
+        let slot = &self.slots[entry.slot as usize];
+        if slot.generation != entry.generation || slot.value.is_none() {
+            return None;
+        }
+        Some(entry.slot as usize)
+    }
+
+    fn lookup_owned(&self, handle: RawHandle, owner: u16) -> Option<usize> {
+        let entry = self.map.iter().find(|e| e.occupied && e.key == handle.0 && e.owner == owner)?;
         let slot = &self.slots[entry.slot as usize];
         if slot.generation != entry.generation || slot.value.is_none() {
             return None;
@@ -91,37 +146,168 @@ impl<T, const N: usize> Arena<T, N> {
         self.slots[idx].value.as_mut()
     }
 
-    /// Remove a value from the arena, returning it.
+    /// Get a mutable reference, but only if `owner` owns the handle.
+    pub fn get_mut_owned(&mut self, handle: RawHandle, owner: u16) -> Option<&mut T> {
+        let idx = self.lookup_owned(handle, owner)?;
+        self.slots[idx].value.as_mut()
+    }
+
+    /// Release a handle entry and decrement the slot's refcount.
+    /// If this was the last reference, the value is dropped and the slot's
+    /// generation is incremented. Returns `Some(value)` only on last release.
+    fn release_entry(&mut self, entry_idx: usize) -> Option<T> {
+        let slot_idx = self.map[entry_idx].slot as usize;
+        let entry_gen = self.map[entry_idx].generation;
+        self.map[entry_idx].occupied = false;
+
+        let slot = &mut self.slots[slot_idx];
+        if slot.generation != entry_gen || slot.value.is_none() {
+            return None;
+        }
+        slot.refcount = slot.refcount.saturating_sub(1);
+        if slot.refcount == 0 {
+            let value = slot.value.take();
+            slot.generation = slot.generation.wrapping_add(1);
+            value
+        } else {
+            None
+        }
+    }
+
+    /// Remove a handle entry. If this was the last reference (refcount hits 0),
+    /// the value is dropped and returned. Otherwise returns `None` (value still alive).
     pub fn remove(&mut self, handle: RawHandle) -> Option<T> {
         let entry_idx = self
             .map
             .iter()
             .position(|e| e.occupied && e.key == handle.0)?;
-        let slot_idx = self.map[entry_idx].slot as usize;
-        let slot = &mut self.slots[slot_idx];
+        self.release_entry(entry_idx)
+    }
 
-        if slot.generation != self.map[entry_idx].generation || slot.value.is_none() {
-            return None;
-        }
-
-        let value = slot.value.take();
-        slot.generation = slot.generation.wrapping_add(1);
-        self.map[entry_idx].occupied = false;
-        value
+    /// Remove a handle entry, but only if `owner` owns it.
+    pub fn remove_owned(&mut self, handle: RawHandle, owner: u16) -> Option<T> {
+        let entry_idx = self
+            .map
+            .iter()
+            .position(|e| e.occupied && e.key == handle.0 && e.owner == owner)?;
+        self.release_entry(entry_idx)
     }
 
     /// Remove all resources owned by the given task index.
-    /// Drops each removed value (triggering `Drop` impls).
+    /// Drops each removed value only when its refcount hits zero.
+    /// Cascades: also removes children of each removed handle.
     pub fn remove_by_owner(&mut self, task_index: u16) {
         for i in 0..N {
             if self.map[i].occupied && self.map[i].owner == task_index {
-                let slot_idx = self.map[i].slot as usize;
-                let slot = &mut self.slots[slot_idx];
-                if slot.generation == self.map[i].generation {
-                    let _ = slot.value.take(); // drops the value
-                    slot.generation = slot.generation.wrapping_add(1);
+                let handle = RawHandle(self.map[i].key);
+                self.release_entry(i);
+                self.remove_by_parent(handle);
+            }
+        }
+    }
+
+    /// Transfer ownership of a handle to a new task.
+    /// Returns `false` if the handle doesn't exist or isn't owned by `current_owner`.
+    pub fn transfer(
+        &mut self,
+        handle: RawHandle,
+        current_owner: u16,
+        new_owner: u16,
+    ) -> bool {
+        if let Some(entry) = self
+            .map
+            .iter_mut()
+            .find(|e| e.occupied && e.key == handle.0 && e.owner == current_owner)
+        {
+            entry.owner = new_owner;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clone a handle for a new owner. Creates a new map entry pointing to the
+    /// same slot and increments the slot's refcount.
+    pub fn clone_handle(
+        &mut self,
+        handle: RawHandle,
+        owner: u16,
+        new_owner: u16,
+    ) -> Result<RawHandle, CloneError> {
+        // Find source entry — only if the caller owns it.
+        let (slot_idx, generation, parent) = {
+            let src = self
+                .map
+                .iter()
+                .find(|e| e.occupied && e.key == handle.0 && e.owner == owner)
+                .ok_or(CloneError::InvalidHandle)?;
+            (src.slot, src.generation, src.parent)
+        };
+
+        // Verify slot is valid.
+        let slot = &self.slots[slot_idx as usize];
+        if slot.generation != generation || slot.value.is_none() {
+            return Err(CloneError::InvalidHandle);
+        }
+
+        // Check for refcount overflow.
+        if slot.refcount == u16::MAX {
+            return Err(CloneError::ArenaFull);
+        }
+
+        // Find free map entry.
+        let map_idx = self
+            .map
+            .iter()
+            .position(|e| !e.occupied)
+            .ok_or(CloneError::ArenaFull)?;
+
+        // Increment refcount (overflow checked above).
+        self.slots[slot_idx as usize].refcount += 1;
+
+        let key = self.next_key();
+        self.map[map_idx] = HandleEntry {
+            key,
+            slot: slot_idx,
+            generation,
+            occupied: true,
+            owner: new_owner,
+            parent,
+        };
+
+        Ok(RawHandle(key))
+    }
+
+    /// Remove all entries whose parent matches the given handle.
+    /// Cascades: children of removed entries are also removed.
+    /// Values are dropped when their refcount hits zero.
+    ///
+    /// Uses an iterative approach to avoid stack overflow on deep hierarchies.
+    pub fn remove_by_parent(&mut self, parent: RawHandle) {
+        // Pending parents whose children need removal. N entries is the
+        // theoretical max since each entry can be a parent at most once.
+        let mut pending = [RawHandle(0); N];
+        let mut pending_len = 1;
+        pending[0] = parent;
+
+        while pending_len > 0 {
+            pending_len -= 1;
+            let current_parent = pending[pending_len];
+
+            for i in 0..N {
+                if self.map[i].occupied {
+                    if let Some(p) = self.map[i].parent {
+                        if p == current_parent {
+                            let child = RawHandle(self.map[i].key);
+                            self.release_entry(i);
+                            // Queue this child as a parent for cascade.
+                            if pending_len < N {
+                                pending[pending_len] = child;
+                                pending_len += 1;
+                            }
+                        }
+                    }
                 }
-                self.map[i].occupied = false;
             }
         }
     }

@@ -35,7 +35,13 @@ usart3: UART.STM32F7_USART @ sysbus 0x50086000
     frequency: 48000000
     IRQ -> nvic@95
 
+rtc: Timers.SF32LB52_RTC @ sysbus 0x500CB000
+
 lcdc: Display.SF32LB52_LCDC @ sysbus 0x50008000
+
+sdmmc1: SD.SF32LB52_SDMMC @ sysbus 0x50045000
+    cardSizeBytes: 0x8000000  // 128MB
+    IRQ -> nvic@57
 
 sysbus:
     init:

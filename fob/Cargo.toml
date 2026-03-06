@@ -7,9 +7,12 @@ edition = "2021"
 hubris-task-slots.workspace = true
 ipc = { path = "../modules/ipc" }
 sysmodule_display_api = { path = "../sysmodule/display/api" }
-sysmodule_log_api = { path = "../sysmodule/log/api" }
+sysmodule_log_api = { path = "../sysmodule/log/api", features = ["logger"] }
+log = { version = "0.4", default-features = false }
+sysmodule_sdmmc_api = { path = "../sysmodule/sdmmc/api" }
+sysmodule_fs_api = { path = "../sysmodule/fs/api" }
 sysmodule_usart_api = { path = "../sysmodule/usart/api" }
-userlib.workspace = true
+userlib = { workspace = true, features = ["no-panic-handler"] }
 
 [[bin]]
 name = "fob"

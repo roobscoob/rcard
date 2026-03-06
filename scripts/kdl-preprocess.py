@@ -57,6 +57,55 @@ def parse_defines(text):
     return defines, pattern
 
 
+def ensure_supervisor_first(text):
+    """Move the task with a `supervisor` flag to be the first task block.
+
+    The `supervisor` line is stripped from the output since hubake doesn't
+    understand it — it's purely a preprocessor directive.
+    """
+    # Match all task blocks (handling nested braces one level deep for git-crate)
+    task_pattern = re.compile(
+        r'(task\s+[\w-]+\s*\{(?:[^{}]*(?:\{[^{}]*\})?)*[^{}]*\})',
+        re.DOTALL,
+    )
+    tasks = list(task_pattern.finditer(text))
+    if not tasks:
+        return text
+
+    supervisor_match = None
+    for m in tasks:
+        if re.search(r'^\s*supervisor\s*$', m.group(0), re.MULTILINE):
+            supervisor_match = m
+            break
+
+    if supervisor_match is None:
+        return text
+
+    # Remove the supervisor line from the block
+    cleaned_block = re.sub(
+        r'\n\s*supervisor\s*\n', '\n', supervisor_match.group(0),
+    )
+
+    # Remove the original supervisor task from the text
+    before = text[:supervisor_match.start()]
+    after = text[supervisor_match.end():]
+
+    # Find where the first task starts and insert the supervisor there
+    first_task = tasks[0]
+    if first_task == supervisor_match:
+        # Already first — just strip the supervisor line
+        return text[:supervisor_match.start()] + cleaned_block + after
+
+    insert_pos = first_task.start()
+    return (
+        text[:insert_pos]
+        + cleaned_block + '\n\n'
+        + text[insert_pos:supervisor_match.start()].rstrip()
+        + '\n'
+        + after.lstrip('\n')
+    )
+
+
 def resolve(text, defines, define_pattern):
     """Remove define blocks and substitute (type)name annotations with values."""
     out = define_pattern.sub('', text)
@@ -78,6 +127,8 @@ def resolve(text, defines, define_pattern):
             replacer,
             out,
         )
+
+    out = ensure_supervisor_first(out)
 
     # Clean up excessive blank lines left by removed blocks
     out = re.sub(r'\n{3,}', '\n\n', out)

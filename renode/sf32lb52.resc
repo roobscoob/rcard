@@ -1,6 +1,8 @@
 using sysbus
 
 i @renode/SSD1312.cs
+i @renode/SF32LB52_RTC.cs
+i @renode/SF32LB52_SDMMC.cs
 
 mach create "sf32lb52"
 machine LoadPlatformDescription $ORIGIN/sf32lb52.repl

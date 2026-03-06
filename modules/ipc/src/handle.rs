@@ -39,6 +39,12 @@ pub const fn split_opcode(op: u16) -> (u8, u8) {
 /// Reserved method ID used by the implicit Drop destructor on client handles.
 pub const IMPLICIT_DESTROY_METHOD: u8 = 0xFF;
 
+/// Reserved method ID for transferring handle ownership to another task.
+pub const TRANSFER_METHOD: u8 = 0xFE;
+
+/// Reserved method ID for cloning a refcounted handle to another task.
+pub const CLONE_METHOD: u8 = 0xFD;
+
 /// Metadata about the incoming message, passed to handler methods.
 #[derive(Copy, Clone, Debug)]
 pub struct Meta {

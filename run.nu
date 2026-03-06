@@ -30,12 +30,24 @@ def main [
     let kernel_elf = ($project | path join build elf kernel | str replace --all '\' '/')
     let resc = ($project | path join renode sf32lb52.resc | str replace --all '\' '/')
 
+    ensure-rust-objdump
+
     # Find die_impl's post-epitaph infinite loop by disassembling the kernel.
     # This is the last `b .` (self-branch) in die_impl, reached after
     # KERNEL_EPITAPH has been fully written.
     let die_loop = (python ($project | path join renode find_die_loop.py) ($project | path join build elf kernel) | str trim)
 
+    mkdir .state
+    $env.RCARD_SDCARD_IMG = ($project | path join .state sdcard.img)
     renode --console -e $"set bin \"($bin)\"; set kernel_elf \"($kernel_elf)\"; set die_loop ($die_loop); set resc \"($resc)\"" -e "include $resc"
+}
+
+# Install cargo-binutils (provides rust-objdump) if not already present
+def ensure-rust-objdump [] {
+    if (which rust-objdump | is-empty) {
+        print "rust-objdump not found, installing cargo-binutils..."
+        cargo install cargo-binutils
+    }
 }
 
 # Install hubake if not already present

@@ -3,6 +3,9 @@ target = "thumbv8m.main-none-eabihf"
 
 [env]
 HUBRIS_TARGET = "thumbv8m.main-none-eabihf"
+CC_thumbv8m_main_none_eabihf = "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/12.2 mpacbti-rel1/bin/arm-none-eabi-gcc"
+AR_thumbv8m_main_none_eabihf = "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/12.2 mpacbti-rel1/bin/arm-none-eabi-ar"
 # Defaults so rust-analyzer can build kernel-sf32lb52; hubake overrides with real values.
 HUBRIS_KCONFIG = { value = "(tasks:[],shared_regions:{},irqs:{})", force = false }
 HUBRIS_IMAGE_ID = { value = "0", force = false }
+HUBRIS_TASKS = { value = "", force = false }

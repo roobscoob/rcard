@@ -16,13 +16,6 @@ kernel {
     stack-size 1024
 }
 
-task super {
-    workspace-crate "supervisor"
-    priority (workgroup)kernel
-    stack-size 8192
-    uses-peripheral usart1
-}
-
 task idle {
     git-crate {
         repo "https://github.com/cbiffle/exhubris/"
@@ -32,6 +25,14 @@ task idle {
     stack-size 256
     priority (workgroup)idle
     features insomniac
+}
+
+task super {
+    supervisor
+    workspace-crate "supervisor"
+    priority (workgroup)kernel
+    stack-size 8192
+    uses-peripheral usart1
 }
 
 task sysmodule_usart {
@@ -56,13 +57,38 @@ task sysmodule_log {
     stack-size 2048
     priority (workgroup)sysmodule
     uses-task sysmodule_usart
+    uses-task sysmodule_time
+}
+
+task sysmodule_time {
+    workspace-crate "sysmodule_time"
+    stack-size 1024
+    priority (workgroup)sysmodule
+    uses-peripheral rtc
+}
+
+task sysmodule_sdmmc {
+    workspace-crate "sysmodule_sdmmc"
+    stack-size 2048
+    priority (workgroup)sysmodule
+    uses-peripheral sdmmc1
+    uses-task sysmodule_log
+}
+
+task sysmodule_fs {
+    workspace-crate "sysmodule_fs"
+    stack-size 131072
+    priority (workgroup)sysmodule
+    uses-task sysmodule_sdmmc
+    uses-task sysmodule_log
 }
 
 task fob {
     workspace-crate "fob"
     stack-size 8192
     priority (workgroup)app
-    uses-task sysmodule_usart
     uses-task sysmodule_display
     uses-task sysmodule_log
+    uses-task sysmodule_sdmmc
+    uses-task sysmodule_fs
 }

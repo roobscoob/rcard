@@ -13,12 +13,6 @@ pub trait ResourceDispatch {
     fn cleanup_client(&mut self, task_index: u16);
 }
 
-/// Maximum number of resource kinds a server can handle.
-const BASE_MAX_RESOURCES: usize = 16;
-
-/// Maximum number of client task generations tracked.
-const BASE_MAX_CLIENTS: usize = 16;
-
 /// Per-client generation tracker entry.
 struct ClientGen {
     task_index: u16,
@@ -27,19 +21,16 @@ struct ClientGen {
 }
 
 /// IPC server that routes incoming messages to resource dispatchers.
-pub struct Server<
-    'a,
-    const MAX_RESOURCES: usize = BASE_MAX_RESOURCES,
-    const MAX_CLIENTS: usize = BASE_MAX_CLIENTS,
-> {
+///
+/// The client tracking array is sized to `TASK_COUNT`, which is set by
+/// the Hubris build system via the `HUBRIS_TASKS` environment variable.
+pub struct Server<'a, const MAX_RESOURCES: usize> {
     dispatchers: [Option<(u8, &'a mut dyn ResourceDispatch)>; MAX_RESOURCES],
     count: usize,
-    clients: [ClientGen; MAX_CLIENTS],
+    clients: [ClientGen; crate::TASK_COUNT],
 }
 
-impl<'a, const MAX_RESOURCES: usize, const MAX_CLIENTS: usize>
-    Server<'a, MAX_RESOURCES, MAX_CLIENTS>
-{
+impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
     pub fn new() -> Self {
         Self {
             dispatchers: [const { None }; MAX_RESOURCES],
@@ -50,27 +41,29 @@ impl<'a, const MAX_RESOURCES: usize, const MAX_CLIENTS: usize>
                     generation: userlib::Gen::DEFAULT,
                     active: false,
                 }
-            }; MAX_CLIENTS],
+            }; crate::TASK_COUNT],
         }
     }
 
     /// Register a resource dispatcher for a given kind byte.
     pub fn register(&mut self, kind: u8, dispatcher: &'a mut dyn ResourceDispatch) {
         assert!(
-            !self.dispatchers[..self.count].iter().any(|e| matches!(e, Some((k, _)) if *k == kind)),
+            !self.dispatchers[..self.count]
+                .iter()
+                .any(|e| matches!(e, Some((k, _)) if *k == kind)),
             "ipc::Server: duplicate dispatcher registered for kind 0x{:02X}",
             kind,
         );
-        assert!(self.count < MAX_RESOURCES, "ipc::Server: MAX_RESOURCES ({}) exceeded", MAX_RESOURCES);
+        assert!(
+            self.count < MAX_RESOURCES,
+            "ipc::Server: MAX_RESOURCES ({}) exceeded",
+            MAX_RESOURCES
+        );
         self.dispatchers[self.count] = Some((kind, dispatcher));
         self.count += 1;
     }
 
-    pub fn with_dispatcher(
-        mut self,
-        kind: u8,
-        dispatcher: &'a mut dyn ResourceDispatch,
-    ) -> Self {
+    pub fn with_dispatcher(mut self, kind: u8, dispatcher: &'a mut dyn ResourceDispatch) -> Self {
         self.register(kind, dispatcher);
         self
     }
@@ -106,7 +99,10 @@ impl<'a, const MAX_RESOURCES: usize, const MAX_CLIENTS: usize>
                 return;
             }
         }
-        // No free slot — silently ignore (generation tracking is best-effort).
+        panic!(
+            "ipc::Server: TASK_COUNT ({}) exceeded — task index {} has no tracking slot",
+            crate::TASK_COUNT, task_index,
+        );
     }
 
     /// Run the server loop forever, dispatching incoming messages.
@@ -129,11 +125,22 @@ impl<'a, const MAX_RESOURCES: usize, const MAX_CLIENTS: usize>
                     } else {
                         None
                     }
-                })
-                .unwrap_or(Err(ReplyFaultReason::UndefinedOperation));
+                });
 
-            if let Err(e) = result {
-                userlib::sys_reply_fault(msg.sender, e);
+            match result {
+                Some(Ok(())) => {}
+                Some(Err(e)) => {
+                    panic!(
+                        "ipc::Server: dispatch error for kind=0x{:02X} method=0x{:02X}: {:?}",
+                        kind, method, e,
+                    );
+                }
+                None => {
+                    panic!(
+                        "ipc::Server: no dispatcher for kind=0x{:02X} (method=0x{:02X})",
+                        kind, method,
+                    );
+                }
             }
         }
     }

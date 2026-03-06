@@ -3,6 +3,8 @@
 
 use core::fmt::Write;
 
+include!(concat!(env!("OUT_DIR"), "/task_names.rs"));
+
 const FAULT_NOTIFICATION: u32 = 1;
 
 fn usart_init() {
@@ -46,7 +48,8 @@ fn main() -> ! {
             let state = kipc::read_task_status(fault_index);
 
             let mut w = UsartWriter;
-            let _ = write!(w, "[super] task {} faulted: {:?}\r\n", fault_index, state);
+            let name = TASK_NAMES.get(fault_index).unwrap_or(&"?");
+            let _ = write!(w, "[super] task {} ({}) faulted: {:?}\r\n", fault_index, name, state);
 
             kipc::reinitialize_task(fault_index, kipc::NewState::Runnable);
             next_task = fault_index.wrapping_add(1);

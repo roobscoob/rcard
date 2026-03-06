@@ -170,6 +170,12 @@ impl From<TaskId> for u16 {
     }
 }
 
+impl From<u16> for TaskId {
+    fn from(raw: u16) -> TaskId {
+        TaskId(raw)
+    }
+}
+
 /// A generation number for a task.
 ///
 /// This represents the generation number used in IPCs and `TaskId`s, which is a

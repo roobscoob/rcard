@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sysmodule/usart", "sysmodule/usart/api", "sysmodule/display", "sysmodule/display/api", "sysmodule/log", "sysmodule/log/api", "fob", "modules/ipc", "modules/ipc/macros", "kernel-sf32lb52", "supervisor"]
+members = ["sysmodule/usart", "sysmodule/usart/api", "sysmodule/display", "sysmodule/display/api", "sysmodule/log", "sysmodule/log/api", "sysmodule/time", "sysmodule/time/api", "sysmodule/sdmmc", "sysmodule/sdmmc/api", "sysmodule/fs", "sysmodule/fs/api", "modules/storage_api", "fob", "modules/ipc", "modules/ipc/macros", "kernel-sf32lb52", "supervisor"]
 
 [workspace.dependencies]
 userlib = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }

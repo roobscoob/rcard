@@ -1,0 +1,21 @@
+[package]
+name = "sysmodule_fs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hubpack = "0.1.2"
+hubris-task-slots.workspace = true
+idyll_runtime.workspace = true
+ipc = { path = "../../modules/ipc" }
+littlefs2-sys = "0.3"
+log = { version = "0.4", default-features = false }
+sysmodule_fs_api = { path = "api" }
+sysmodule_log_api = { path = "../../sysmodule/log/api", features = ["logger"] }
+storage_api = { path = "../../modules/storage_api" }
+userlib = { workspace = true, features = ["no-panic-handler"] }
+
+[[bin]]
+name = "sysmodule_fs"
+test = false
+bench = false

@@ -81,3 +81,14 @@ peripheral "lcdc" {
     base 0x5000_8000
     size 0x128
 }
+
+peripheral "sdmmc1" {
+    base 0x5004_5000
+    size 0x400
+    irq "irq" 57
+}
+
+peripheral "rtc" {
+    base 0x500C_B000
+    size 0x78
+}

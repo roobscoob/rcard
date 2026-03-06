@@ -53,10 +53,10 @@ impl DisplayConfiguration {
         }
     }
 
-    pub fn open<S: super::client::DisplayServer>(
+    pub fn open<S: super::display_client::DisplayServer>(
         self,
-    ) -> Result<Result<super::client::DisplayHandle<S>, DisplayOpenError>, ipc::Error> {
-        super::client::DisplayHandle::<S>::open(self)
+    ) -> Result<Result<super::display_client::DisplayHandle<S>, DisplayOpenError>, ipc::Error> {
+        super::display_client::DisplayHandle::<S>::open(self)
     }
 }
 

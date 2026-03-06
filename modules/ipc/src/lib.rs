@@ -39,13 +39,36 @@ impl<E: hubpack::SerializedSize> hubpack::SerializedSize for Error<E> {
     const MAX_SIZE: usize = 1 + E::MAX_SIZE;
 }
 
+impl Error {
+    /// Convert an `Error<()>` (from the wire) into an `Error<E>` for any `E`.
+    /// The `ReconstructionFailed` variant cannot exist on the wire, so this
+    /// conversion is total.
+    pub fn upcast<E>(self) -> Error<E> {
+        match self {
+            Error::ServerDied => Error::ServerDied,
+            Error::ArenaFull => Error::ArenaFull,
+            Error::InvalidHandle => Error::InvalidHandle,
+            Error::ReconstructionReturnedNone => Error::ReconstructionReturnedNone,
+            Error::ReconstructionFailed(()) => Error::ReconstructionReturnedNone,
+        }
+    }
+}
+
 mod arena;
+mod dyn_handle;
 mod handle;
 mod server;
+mod task_count {
+    include!(concat!(env!("OUT_DIR"), "/task_count.rs"));
+}
+pub use task_count::TASK_COUNT;
 
-pub use arena::Arena;
-pub use handle::{IMPLICIT_DESTROY_METHOD, Meta, RawHandle, opcode, split_opcode};
-pub use ipc_macros::resource;
+pub use arena::{Arena, CloneError};
+pub use dyn_handle::DynHandle;
+pub use handle::{
+    CLONE_METHOD, IMPLICIT_DESTROY_METHOD, TRANSFER_METHOD, Meta, RawHandle, opcode, split_opcode,
+};
+pub use ipc_macros::{interface, resource};
 pub use server::{ResourceDispatch, Server};
 
 /// Trait used by generated dispatcher code to extract a resource from a
@@ -70,6 +93,25 @@ impl<T, E> ConstructorResult<T> for Result<T, E> {
     fn into_resource(self) -> Result<T, Self::Error> {
         self
     }
+}
+
+/// Implemented by every generated client handle. Enables `#[handle(move)]`.
+///
+/// Transfers ownership of this handle to `new_owner` by sending a `0xFE`
+/// message to the handle's server. Consumes `self` and returns a `DynHandle`
+/// that the recipient can use to interact with the resource.
+pub trait Transferable {
+    fn transfer_to(self, new_owner: userlib::TaskId) -> Result<DynHandle, Error>;
+}
+
+/// Implemented by generated client handles for refcounted resources.
+/// Enables `#[handle(clone)]`.
+///
+/// Clones this handle for `new_owner` by sending a `0xFD` message to the
+/// handle's server. Does NOT consume `self`. Returns a `DynHandle` with the
+/// new handle key.
+pub trait Cloneable {
+    fn clone_for(&self, new_owner: userlib::TaskId) -> Result<DynHandle, Error>;
 }
 
 /// A `Sync` wrapper around a `TaskId` for use in statics. Safe because Hubris
