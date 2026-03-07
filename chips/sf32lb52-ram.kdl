@@ -1,0 +1,103 @@
+// Memory layout for RAM execution.
+// The bootloader loads the image from SDMMC into RAM at 0x20020000
+// and starts execution from there. We describe that runtime layout here:
+// - "vectors" and "flash" live in upper RAM (0x20020000+)
+// - "ram" lives in lower RAM (0x20000000..0x20020000)
+
+chip "SF32LB52"
+target-triple "thumbv8m.main-none-eabihf"
+vector-table-size 0x1CC
+
+compatible {
+    - "SF32LB52"
+    - "SF32LB52x"
+    - "arm-cortex-m33"
+}
+
+memory {
+    region "vectors" {
+        base 0x2002_0000
+        size 0x400
+        read
+    }
+    // "flash" is a exhubris convention meaning "where code lives."
+    // In this configuration, code lives in RAM — the bootloader
+    // copies it here from SDMMC before starting execution.
+    region "flash" {
+        base 0x2002_0400
+        size 0x0005_FC00
+        read
+        execute
+    }
+    region "ram" {
+        base 0x2000_0000
+        size 0x0002_0000
+        read
+        write
+    }
+}
+
+peripheral "usart1" {
+    base 0x5008_4000
+    size 0x1000
+    irq "irq" 59
+}
+
+peripheral "usart2" {
+    base 0x5008_5000
+    size 0x1000
+    irq "irq" 74
+}
+
+peripheral "usart3" {
+    base 0x5008_6000
+    size 0x1000
+    irq "irq" 95
+}
+
+peripheral "rcc" {
+    base 0x5000_0000
+    size 0x1000
+}
+
+peripheral "gpios" {
+    base 0x500A_0000
+    size 0x1000
+    irq "irq" 84
+}
+
+peripheral "pinctrl" {
+    base 0x5000_3000
+    size 0x1000
+}
+
+peripheral "syscon" {
+    base 0x5000_B000
+    size 0x1000
+}
+
+peripheral "aon_syscon" {
+    base 0x500C_0000
+    size 0x1000
+}
+
+peripheral "pmuc_syscon" {
+    base 0x500C_A000
+    size 0x1000
+}
+
+peripheral "lcdc" {
+    base 0x5000_8000
+    size 0x128
+}
+
+peripheral "sdmmc1" {
+    base 0x5004_5000
+    size 0x400
+    irq "irq" 57
+}
+
+peripheral "rtc" {
+    base 0x500C_B000
+    size 0x78
+}

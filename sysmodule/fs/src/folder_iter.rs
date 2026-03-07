@@ -5,19 +5,20 @@ use core::mem::MaybeUninit;
 use littlefs2_sys::*;
 use sysmodule_fs_api::{DirEntry, EntryType, FolderIterator};
 
+use crate::folder::FolderResource;
 use crate::state;
 
 pub struct FolderIteratorResource {
     fs_id: u8,
-    /// Raw pointer to the lfs_dir_t inside the parent FolderResource (in its arena).
     dir_ptr: *mut lfs_dir_t,
 }
 
-impl FolderIterator for FolderIteratorResource {
-    fn iter(_meta: ipc::Meta, folder: ipc::DynHandle) -> Self {
-        let (fs_id, dir_ptr) = state::resolve_folder(folder.handle)
-            .unwrap_or((0, core::ptr::null_mut()));
-        FolderIteratorResource { fs_id, dir_ptr }
+impl FolderIterator<FolderResource> for FolderIteratorResource {
+    fn iter(_meta: ipc::Meta, folder: &FolderResource) -> Self {
+        FolderIteratorResource {
+            fs_id: folder.fs_id(),
+            dir_ptr: folder.dir_ptr(),
+        }
     }
 
     fn next(&mut self, _meta: ipc::Meta) -> Option<DirEntry> {

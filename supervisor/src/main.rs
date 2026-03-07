@@ -34,10 +34,27 @@ impl Write for UsartWriter {
     }
 }
 
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    use core::fmt::Write;
+
+    usart_init();
+    usart_write_bytes(b"\r\nSUPERVISOR PANIC: ");
+    let _ = write!(UsartWriter, "{}\r\n", info);
+
+    // SCB.AIRCR: request a full system reset
+    const SCB_AIRCR: *mut u32 = 0xE000_ED0C as *mut u32;
+    unsafe {
+        SCB_AIRCR.write_volatile(0x05FA_0004);
+    }
+
+    loop {}
+}
+
 #[export_name = "main"]
 fn main() -> ! {
     usart_init();
-    usart_write_bytes(b"[super] started\r\n");
+    usart_write_bytes(b"supervisor: Awake\r\n");
 
     loop {
         userlib::sys_recv_notification(FAULT_NOTIFICATION);
@@ -49,7 +66,11 @@ fn main() -> ! {
 
             let mut w = UsartWriter;
             let name = TASK_NAMES.get(fault_index).unwrap_or(&"?");
-            let _ = write!(w, "[super] task {} ({}) faulted: {:?}\r\n", fault_index, name, state);
+            let _ = write!(
+                w,
+                "supervisor: task {} ({}) faulted: {:?}\r\n",
+                fault_index, name, state
+            );
 
             kipc::reinitialize_task(fault_index, kipc::NewState::Runnable);
             next_task = fault_index.wrapping_add(1);

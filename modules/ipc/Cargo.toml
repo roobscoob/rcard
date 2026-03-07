@@ -7,6 +7,9 @@ edition = "2024"
 test = false
 bench = false
 
+[features]
+dangerously_enable_uart3_debugging = []
+
 [dependencies]
 userlib.workspace = true
 zerocopy = { version = "0.8.40", features = ["derive"] }

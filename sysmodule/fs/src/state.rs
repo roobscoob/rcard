@@ -11,9 +11,6 @@ use core::mem::MaybeUninit;
 use littlefs2_sys::*;
 use storage_api::StorageDyn;
 
-use crate::filesystem::FileSystemResource;
-use crate::folder::FolderResource;
-
 /// Maximum number of simultaneously mounted filesystems.
 pub const MAX_FS: usize = 4;
 
@@ -50,13 +47,6 @@ pub struct FsTable {
 /// SAFETY: only accessed from the single-threaded server loop.
 static mut FS_TABLE: FsTable = FsTable::new();
 
-/// Pointer to the FileSystem dispatcher's arena.
-/// Set once in main() before the server loop starts.
-static mut FS_ARENA: Option<*const ipc::Arena<FileSystemResource, 4>> = None;
-
-/// Pointer to the Folder dispatcher's arena.
-static mut FOLDER_ARENA: Option<*const ipc::Arena<FolderResource, 16>> = None;
-
 impl FsTable {
     const fn new() -> Self {
         Self {
@@ -72,69 +62,20 @@ pub unsafe fn table() -> &'static mut FsTable {
     unsafe { &mut *core::ptr::addr_of_mut!(FS_TABLE) }
 }
 
-/// Store a pointer to the FileSystem dispatcher's arena.
-///
-/// SAFETY: must be called once from main() before the server loop.
-pub unsafe fn set_fs_arena(arena: &ipc::Arena<FileSystemResource, 4>) {
-    unsafe { FS_ARENA = Some(arena as *const _) };
-}
-
-/// Store a pointer to the Folder dispatcher's arena.
-pub unsafe fn set_folder_arena(arena: &ipc::Arena<FolderResource, 16>) {
-    unsafe { FOLDER_ARENA = Some(arena as *const _) };
-}
-
-/// Resolve a FileSystem DynHandle to an fs_id by looking up the arena.
-pub fn resolve_fs(handle: ipc::RawHandle) -> Option<u8> {
-    let arena_ptr = unsafe { FS_ARENA };
-    let Some(ptr) = arena_ptr else {
-        log::error!("resolve_fs: FS_ARENA is None");
-        return None;
-    };
-    let Some(arena) = (unsafe { ptr.as_ref() }) else {
-        log::error!("resolve_fs: FS_ARENA pointer is null");
-        return None;
-    };
-    match arena.get(handle) {
-        Some(resource) => {
-            log::debug!("resolve_fs: handle {:?} => fs_id={}", handle, resource.fs_id);
-            Some(resource.fs_id)
-        }
-        None => {
-            log::error!("resolve_fs: handle {:?} not found in arena", handle);
-            None
-        }
-    }
-}
-
-/// Resolve a Folder DynHandle to the FolderResource's (fs_id, dir) by looking up the arena.
-pub fn resolve_folder(handle: ipc::RawHandle) -> Option<(u8, *mut lfs_dir_t)> {
-    let arena = unsafe { FOLDER_ARENA?.as_ref()? };
-    let resource = arena.get(handle)?;
-    // Return a raw pointer to the dir — caller must ensure single-threaded access.
-    Some((resource.fs_id, &resource.dir as *const lfs_dir_t as *mut lfs_dir_t))
-}
-
 impl FsTable {
     /// Allocate a slot and configure littlefs for the given storage, but do NOT
     /// call `lfs_mount`. Returns the slot index (fs_id).
     fn allocate(&mut self, storage: StorageDyn) -> Result<u8, sysmodule_fs_api::FileSystemError> {
-        let idx = self
-            .slots
-            .iter()
-            .position(|s| s.is_none())
-            .ok_or_else(|| {
-                log::error!("allocate: no free slots");
-                sysmodule_fs_api::FileSystemError::TooManyFilesystems
-            })?;
+        let idx = self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
+            log::error!("allocate: no free slots");
+            sysmodule_fs_api::FileSystemError::TooManyFilesystems
+        })?;
         log::info!("allocate: using slot {}", idx);
 
-        let block_count = storage
-            .block_count()
-            .map_err(|_| {
-                log::error!("allocate: block_count() failed");
-                sysmodule_fs_api::FileSystemError::StorageError
-            })?;
+        let block_count = storage.block_count().map_err(|_| {
+            log::error!("allocate: block_count() failed");
+            sysmodule_fs_api::FileSystemError::StorageError
+        })?;
         log::info!("allocate: {} blocks", block_count);
 
         let mut fs = MountedFs {
@@ -156,7 +97,7 @@ impl FsTable {
         fs.config.prog_size = PROG_SIZE;
         fs.config.block_size = BLOCK_SIZE;
         fs.config.block_count = block_count;
-        fs.config.block_cycles = -1; // disable wear leveling (SD cards)
+        fs.config.block_cycles = 500; // wear leveling (eMMC, ~60k P/E cycles)
         fs.config.cache_size = CACHE_SIZE as u32;
         fs.config.lookahead_size = LOOKAHEAD_SIZE as u32;
         fs.config.name_max = 31;
@@ -223,17 +164,15 @@ impl FsTable {
     }
 
     /// Unmount and free a filesystem slot.
-    /// Calls `lfs_unmount` if mounted, then drops the `MountedFs` (which
-    /// releases the underlying `StorageDyn` handle).
     pub fn unmount(&mut self, fs_id: u8) {
         if let Some(slot) = self.slots.get_mut(fs_id as usize) {
             if let Some(fs) = slot.as_mut() {
                 if fs.mounted {
                     log::info!("unmount: unmounting slot {}", fs_id);
+                    unsafe { lfs_unmount(fs.lfs.get()) };
                     fs.mounted = false;
                 }
             }
-            // Drop the MountedFs — releases StorageDyn (sdmmc handle etc.)
             *slot = None;
         }
     }
@@ -278,12 +217,13 @@ fn unlink_table() -> &'static mut [UnlinkEntry; MAX_UNLINK] {
 /// Called when a file/dir is opened. Increments the open count for this path.
 pub fn track_open(fs_id: u8, path: &[u8; 64]) {
     let tbl = unlink_table();
-    // Find existing entry for this (fs_id, path).
-    if let Some(e) = tbl.iter_mut().find(|e| e.occupied && e.fs_id == fs_id && e.path == *path) {
+    if let Some(e) = tbl
+        .iter_mut()
+        .find(|e| e.occupied && e.fs_id == fs_id && e.path == *path)
+    {
         e.open_count = e.open_count.saturating_add(1);
         return;
     }
-    // Allocate a new entry.
     if let Some(e) = tbl.iter_mut().find(|e| !e.occupied) {
         e.fs_id = fs_id;
         e.path = *path;
@@ -296,35 +236,36 @@ pub fn track_open(fs_id: u8, path: &[u8; 64]) {
 /// Mark a path for deferred deletion.
 pub fn track_unlink(fs_id: u8, path: &[u8; 64]) {
     let tbl = unlink_table();
-    if let Some(e) = tbl.iter_mut().find(|e| e.occupied && e.fs_id == fs_id && e.path == *path) {
+    if let Some(e) = tbl
+        .iter_mut()
+        .find(|e| e.occupied && e.fs_id == fs_id && e.path == *path)
+    {
         e.unlinked = true;
     }
 }
 
 /// Called when a file/dir is closed. Decrements the open count.
 /// If the count reaches zero and the path was unlinked, performs `lfs_remove`
-/// and frees the tracking entry. Returns true if the entry was removed from disk.
+/// and frees the tracking entry.
 pub fn track_close(fs_id: u8, path: &[u8; 64]) {
     let tbl = unlink_table();
-    let Some(e) = tbl.iter_mut().find(|e| e.occupied && e.fs_id == fs_id && e.path == *path) else {
+    let Some(e) = tbl
+        .iter_mut()
+        .find(|e| e.occupied && e.fs_id == fs_id && e.path == *path)
+    else {
         return;
     };
     e.open_count = e.open_count.saturating_sub(1);
     if e.open_count == 0 && e.unlinked {
-        // Last handle closed and path was unlinked — remove from disk.
         let fs_tbl = unsafe { table() };
         if let Some(fs) = fs_tbl.get(fs_id) {
             unsafe {
-                lfs_remove(
-                    fs.lfs_ptr(),
-                    e.path.as_ptr() as *const core::ffi::c_char,
-                );
+                lfs_remove(fs.lfs_ptr(), e.path.as_ptr() as *const core::ffi::c_char);
             }
         }
         e.occupied = false;
     }
     if e.open_count == 0 && !e.unlinked {
-        // Nobody has it open and it wasn't unlinked — free the tracking slot.
         e.occupied = false;
     }
 }
@@ -382,7 +323,11 @@ unsafe extern "C" fn lfs_prog_cb(
         let intra = ((byte_start + offset as u32) % 512) as usize;
 
         if intra == 0 && (size as usize - offset) >= 512 {
-            if fs.storage.write_block(phys_block, &data[offset..offset + 512]).is_err() {
+            if fs
+                .storage
+                .write_block(phys_block, &data[offset..offset + 512])
+                .is_err()
+            {
                 return -5;
             }
             offset += 512;
@@ -403,10 +348,7 @@ unsafe extern "C" fn lfs_prog_cb(
     0
 }
 
-unsafe extern "C" fn lfs_erase_cb(
-    _c: *const lfs_config,
-    _block: lfs_block_t,
-) -> c_int {
+unsafe extern "C" fn lfs_erase_cb(_c: *const lfs_config, _block: lfs_block_t) -> c_int {
     0
 }
 

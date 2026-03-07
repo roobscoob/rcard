@@ -161,8 +161,8 @@ macro_rules! panic_handler {
 #[macro_export]
 macro_rules! init_logger {
     ($Log:ty) => {{
-        use $crate::log;
         use core::fmt::Write;
+        use $crate::log;
 
         struct IpcLogger;
 
@@ -203,7 +203,9 @@ macro_rules! init_logger {
         }
 
         static LOGGER: IpcLogger = IpcLogger;
-        let _ = log::set_logger(&LOGGER);
+        log::set_logger(&LOGGER).unwrap();
         log::set_max_level(log::LevelFilter::Trace);
+
+        log::trace!(concat!(env!("CARGO_PKG_NAME"), ": Awake"));
     }};
 }

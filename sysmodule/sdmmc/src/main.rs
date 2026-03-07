@@ -1,14 +1,13 @@
 #![no_std]
 #![no_main]
 
-use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use sf32lb52_pac::sdmmc1::RegisterBlock;
 use sf32lb52_pac::Sdmmc1;
 
 use hubris_task_slots::SLOTS;
-use sysmodule_sdmmc_api::{Sdmmc, SdmmcDispatcher, SdmmcOpenError};
+use sysmodule_sdmmc_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 sysmodule_log_api::panic_handler!(Log);
@@ -33,7 +32,7 @@ fn send_cmd(cmd: u8, arg: u32, has_rsp: bool, long_rsp: bool) -> (u32, u32) {
             | (1 << 2) // cmd_rsp_crc
             | (1 << 3) // cmd_timeout
             | (1 << 5) // data_done
-            | (1 << 12) // cmd_sent
+            | (1 << 12), // cmd_sent
         )
     });
 
@@ -83,14 +82,12 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     }
 
     // Set clock to ~400kHz for identification (240MHz / (599+1) = 400kHz)
-    r.clkcr().write(|w| unsafe {
-        w.div().bits(599).stop_clk().clear_bit()
-    });
+    r.clkcr()
+        .write(|w| unsafe { w.div().bits(599).stop_clk().clear_bit() });
 
     // Set block size to 512, 1-bit bus initially
-    r.dcr().write(|w| unsafe {
-        w.block_size().bits(0x1FF).wire_mode().bits(0)
-    });
+    r.dcr()
+        .write(|w| unsafe { w.block_size().bits(0x1FF).wire_mode().bits(0) });
 
     // CMD0: GO_IDLE_STATE (no response)
     send_cmd(0, 0, false, false);
@@ -138,9 +135,8 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     r.dcr().modify(|_, w| unsafe { w.wire_mode().bits(1) });
 
     // Switch to fast clock: 240MHz / (4+1) = 48MHz
-    r.clkcr().write(|w| unsafe {
-        w.div().bits(4).stop_clk().clear_bit()
-    });
+    r.clkcr()
+        .write(|w| unsafe { w.div().bits(4).stop_clk().clear_bit() });
 
     Ok(CardInfo { block_count })
 }
@@ -155,11 +151,16 @@ fn read_block_hw(block_addr: u32, buf: &mut [u8; 512]) {
 
     // Configure read: tran_data_en, r_wn=read, block mode, 4-wire, start
     r.dcr().write(|w| unsafe {
-        w.block_size().bits(0x1FF)
-            .wire_mode().bits(1)
-            .r_wn().set_bit()
-            .tran_data_en().set_bit()
-            .data_start().set_bit()
+        w.block_size()
+            .bits(0x1FF)
+            .wire_mode()
+            .bits(1)
+            .r_wn()
+            .set_bit()
+            .tran_data_en()
+            .set_bit()
+            .data_start()
+            .set_bit()
     });
 
     // CMD17: READ_SINGLE_BLOCK (SDHC uses block addressing)
@@ -187,11 +188,16 @@ fn write_block_hw(block_addr: u32, buf: &[u8; 512]) {
 
     // Configure write: tran_data_en, r_wn=write, block mode, 4-wire, start
     r.dcr().write(|w| unsafe {
-        w.block_size().bits(0x1FF)
-            .wire_mode().bits(1)
-            .r_wn().clear_bit()
-            .tran_data_en().set_bit()
-            .data_start().set_bit()
+        w.block_size()
+            .bits(0x1FF)
+            .wire_mode()
+            .bits(1)
+            .r_wn()
+            .clear_bit()
+            .tran_data_en()
+            .set_bit()
+            .data_start()
+            .set_bit()
     });
 
     // CMD24: WRITE_BLOCK
@@ -218,20 +224,21 @@ struct SdmmcResource {
 }
 
 impl Sdmmc for SdmmcResource {
-    fn open(_meta: ipc::Meta) -> Result<Self, SdmmcOpenError> {
-        log::info!("sdmmc: open called");
+    fn open(meta: ipc::Meta) -> Result<Self, SdmmcOpenError> {
+        log::trace!("Task {:?} attempting acquire", meta.sender);
+
         if SDMMC_OPEN.swap(true, Ordering::Acquire) {
+            log::error!("Task {:?} failed to acquire (already in use)", meta.sender);
+
             return Err(SdmmcOpenError::ReservedSlot);
         }
 
         match init_card() {
-            Ok(info) => {
-                log::info!("sdmmc: card init ok, {} blocks", info.block_count);
-                Ok(SdmmcResource {
-                    block_count: info.block_count,
-                })
-            }
+            Ok(info) => Ok(SdmmcResource {
+                block_count: info.block_count,
+            }),
             Err(e) => {
+                log::error!("Task {:?} failed to initialize: {:?}", meta.sender, e);
                 SDMMC_OPEN.store(false, Ordering::Release);
                 Err(e)
             }
@@ -244,6 +251,7 @@ impl Sdmmc for SdmmcResource {
         block: u32,
         buf: idyll_runtime::Leased<idyll_runtime::Write, u8>,
     ) {
+        log::trace!("read_block block={} len={}", block, buf.len());
         let mut tmp = [0u8; 512];
         read_block_hw(block, &mut tmp);
         let len = buf.len().min(512);
@@ -258,6 +266,7 @@ impl Sdmmc for SdmmcResource {
         block: u32,
         buf: idyll_runtime::Leased<idyll_runtime::Read, u8>,
     ) {
+        log::trace!("write_block block={} len={}", block, buf.len());
         let mut tmp = [0u8; 512];
         let len = buf.len().min(512);
         for i in 0..len {
@@ -267,13 +276,13 @@ impl Sdmmc for SdmmcResource {
     }
 
     fn block_count(&mut self, _meta: ipc::Meta) -> u32 {
-        log::info!("sdmmc: block_count called, returning {}", self.block_count);
         self.block_count
     }
 }
 
 impl Drop for SdmmcResource {
     fn drop(&mut self) {
+        log::trace!("Released");
         SDMMC_OPEN.store(false, Ordering::Release);
     }
 }
@@ -281,12 +290,8 @@ impl Drop for SdmmcResource {
 #[export_name = "main"]
 fn main() -> ! {
     sysmodule_log_api::init_logger!(Log);
-    log::info!("sdmmc server started");
 
-    let mut dispatcher = SdmmcDispatcher::<SdmmcResource>::new();
-    let mut buf = [MaybeUninit::uninit(); 256];
-
-    ipc::Server::<1>::new()
-        .with_dispatcher(0x11, &mut dispatcher)
-        .run(&mut buf)
+    ipc::server! {
+        Sdmmc: SdmmcResource,
+    }
 }

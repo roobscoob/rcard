@@ -63,12 +63,12 @@ mod task_count {
 }
 pub use task_count::TASK_COUNT;
 
-pub use arena::{Arena, CloneError};
+pub use arena::{Arena, CloneError, SharedArena};
 pub use dyn_handle::DynHandle;
 pub use handle::{
     CLONE_METHOD, IMPLICIT_DESTROY_METHOD, TRANSFER_METHOD, Meta, RawHandle, opcode, split_opcode,
 };
-pub use ipc_macros::{interface, resource};
+pub use ipc_macros::{interface, resource, server};
 pub use server::{ResourceDispatch, Server};
 
 /// Trait used by generated dispatcher code to extract a resource from a

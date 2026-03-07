@@ -9,14 +9,11 @@ machine LoadPlatformDescription $ORIGIN/sf32lb52.repl
 
 showAnalyzer usart1
 showAnalyzer usart2
+showAnalyzer usart3
 showAnalyzer lcdc
 
-macro reset
-"""
-    sysbus LoadELF $bin
-    sysbus LoadSymbolsFrom $kernel_elf
-"""
-runMacro $reset
+sysbus LoadBinary @build/boot.bin 0x20020000
+sysbus LoadSymbolsFrom $kernel_elf
 
 # Halt on kernel panic and print the epitaph (fully automatic).
 # $die_loop is the `b .` at the end of die_impl, AFTER the epitaph is written.

@@ -1,10 +1,9 @@
 #![no_std]
 #![no_main]
 
-use core::mem::MaybeUninit;
 use core::ptr::{read_volatile, write_volatile};
 
-use sysmodule_time_api::{SystemDateTime, Time, TimeDispatcher};
+use sysmodule_time_api::*;
 
 const RTC_BASE: usize = 0x500C_B000;
 const RTC_TR: *mut u32 = RTC_BASE as *mut u32;           // +0x00
@@ -120,12 +119,14 @@ impl Time for TimeImpl {
     }
 }
 
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
+    userlib::sys_panic(b"time panic")
+}
+
 #[export_name = "main"]
 fn main() -> ! {
-    let mut dispatcher = TimeDispatcher::<TimeImpl>::new();
-    let mut buf = [MaybeUninit::uninit(); 256];
-
-    ipc::Server::<1>::new()
-        .with_dispatcher(0x04, &mut dispatcher)
-        .run(&mut buf)
+    ipc::server! {
+        Time: TimeImpl,
+    }
 }

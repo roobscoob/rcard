@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-userlib = { workspace = true, features = ["no-panic-messages"] }
+userlib = { workspace = true }
 kipc.workspace = true
 
 [[bin]]

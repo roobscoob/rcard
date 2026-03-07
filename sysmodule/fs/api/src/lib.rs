@@ -126,16 +126,23 @@ pub trait FileSystem {
 /// An open file within a mounted filesystem.
 #[ipc::resource(arena_size = 64, kind = 0x13)]
 pub trait File {
-    /// Open a file.  `fs_id` is obtained from `FileSystem::id()`.
-    /// `flags` is a bitfield of `flags::*` constants.
     #[constructor]
-    fn get(#[handle(clone)] fs: impl FileSystem, #[lease] path: &[u8]) -> Result<Self, OpenError>;
-
-    #[constructor]
-    fn get_or_create(
+    fn get_in(
         #[handle(clone)] fs: impl FileSystem,
         #[lease] path: &[u8],
     ) -> Result<Self, OpenError>;
+
+    #[constructor]
+    fn get(#[lease] path: &[u8]) -> Result<Self, OpenError>;
+
+    #[constructor]
+    fn get_or_create_in(
+        #[handle(clone)] fs: impl FileSystem,
+        #[lease] path: &[u8],
+    ) -> Result<Self, OpenError>;
+
+    #[constructor]
+    fn get_or_create(#[lease] path: &[u8]) -> Result<Self, OpenError>;
 
     #[message]
     fn read(&self, offset: u32, #[lease] buf: &mut [u8]) -> u32;

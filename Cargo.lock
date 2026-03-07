@@ -240,7 +240,7 @@ dependencies = [
  "sysmodule_display_api",
  "sysmodule_fs_api",
  "sysmodule_log_api",
- "sysmodule_sdmmc_api",
+ "sysmodule_storage_api",
  "sysmodule_usart_api",
  "userlib",
 ]
@@ -754,9 +754,12 @@ name = "sysmodule_display"
 version = "0.1.0"
 dependencies = [
  "hubpack",
+ "hubris-task-slots",
  "idyll_runtime",
  "ipc",
+ "log",
  "sysmodule_display_api",
+ "sysmodule_log_api",
  "userlib",
 ]
 
@@ -782,9 +785,11 @@ dependencies = [
  "ipc",
  "littlefs2-sys",
  "log",
+ "serde_json",
  "storage_api",
  "sysmodule_fs_api",
  "sysmodule_log_api",
+ "sysmodule_storage_api",
  "userlib",
 ]
 
@@ -809,7 +814,9 @@ dependencies = [
  "hubris-task-slots",
  "idyll_runtime",
  "ipc",
+ "storage_api",
  "sysmodule_log_api",
+ "sysmodule_storage_api",
  "sysmodule_time_api",
  "sysmodule_usart_api",
  "userlib",
@@ -851,6 +858,37 @@ dependencies = [
  "idyll_runtime",
  "ipc",
  "serde",
+ "storage_api",
+ "userlib",
+ "zerocopy 0.8.40",
+]
+
+[[package]]
+name = "sysmodule_storage"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "hubris-task-slots",
+ "idyll_runtime",
+ "ipc",
+ "log",
+ "serde_json",
+ "storage_api",
+ "sysmodule_log_api",
+ "sysmodule_sdmmc_api",
+ "sysmodule_storage_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_storage_api"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "idyll_runtime",
+ "ipc",
+ "serde",
+ "serde_json",
  "storage_api",
  "userlib",
  "zerocopy 0.8.40",

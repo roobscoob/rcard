@@ -175,6 +175,27 @@ pub fn gen_client(
         quote! {}
     };
 
+    // Generate Into<DynHandle> if this resource implements an interface.
+    let into_dyn_handle_impl = if attrs.implements.is_some() {
+        let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
+        quote! {
+            impl<S: #server_trait_name> From<#handle_name<S>> for ipc::DynHandle {
+                fn from(h: #handle_name<S>) -> ipc::DynHandle {
+                    let dh = ipc::DynHandle {
+                        server_id: u16::from(h.server.get()),
+                        kind: #kind_lit,
+                        handle: h.handle.get(),
+                    };
+                    // Prevent Drop from sending destroy — caller now owns the handle.
+                    core::mem::forget(h);
+                    dh
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let mod_name = format_ident!("{}_client", to_snake_case(&trait_name.to_string()));
 
     quote! {
@@ -236,6 +257,7 @@ pub fn gen_client(
 
             #transferable_impl
             #cloneable_impl
+            #into_dyn_handle_impl
 
             impl<S: #server_trait_name> Drop for #handle_name<S> {
                 fn drop(&mut self) {

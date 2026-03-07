@@ -312,3 +312,91 @@ impl<T, const N: usize> Arena<T, N> {
         }
     }
 }
+
+/// Shared arena with interior mutability for single-threaded Hubris tasks.
+///
+/// Wraps `Arena<T, N>` in `UnsafeCell` so all methods take `&self`.
+/// This allows multiple dispatchers to hold `&SharedArena` references
+/// simultaneously without borrow conflicts.
+///
+/// # Safety
+///
+/// Sound only in single-threaded contexts (Hubris tasks). No concurrent
+/// access may occur to the same `SharedArena`.
+pub struct SharedArena<T, const N: usize> {
+    inner: core::cell::UnsafeCell<Arena<T, N>>,
+}
+
+// SAFETY: Hubris tasks are single-threaded. No concurrent access.
+unsafe impl<T, const N: usize> Sync for SharedArena<T, N> {}
+
+impl<T, const N: usize> SharedArena<T, N> {
+    pub const fn new(kind: u8) -> Self {
+        Self {
+            inner: core::cell::UnsafeCell::new(Arena::new(kind)),
+        }
+    }
+
+    fn arena(&self) -> &mut Arena<T, N> {
+        unsafe { &mut *self.inner.get() }
+    }
+
+    pub fn get(&self, handle: RawHandle) -> Option<&T> {
+        self.arena().get(handle)
+    }
+
+    pub fn get_mut(&self, handle: RawHandle) -> Option<&mut T> {
+        self.arena().get_mut(handle)
+    }
+
+    pub fn get_mut_owned(&self, handle: RawHandle, owner: u16) -> Option<&mut T> {
+        self.arena().get_mut_owned(handle, owner)
+    }
+
+    pub fn alloc(&self, value: T, owner: u16) -> Option<RawHandle> {
+        self.arena().alloc(value, owner)
+    }
+
+    pub fn alloc_with_parent(
+        &self,
+        value: T,
+        owner: u16,
+        parent: RawHandle,
+    ) -> Option<RawHandle> {
+        self.arena().alloc_with_parent(value, owner, parent)
+    }
+
+    pub fn remove(&self, handle: RawHandle) -> Option<T> {
+        self.arena().remove(handle)
+    }
+
+    pub fn remove_owned(&self, handle: RawHandle, owner: u16) -> Option<T> {
+        self.arena().remove_owned(handle, owner)
+    }
+
+    pub fn remove_by_owner(&self, task_index: u16) {
+        self.arena().remove_by_owner(task_index);
+    }
+
+    pub fn remove_by_parent(&self, parent: RawHandle) {
+        self.arena().remove_by_parent(parent);
+    }
+
+    pub fn transfer(
+        &self,
+        handle: RawHandle,
+        current_owner: u16,
+        new_owner: u16,
+    ) -> bool {
+        self.arena().transfer(handle, current_owner, new_owner)
+    }
+
+    pub fn clone_handle(
+        &self,
+        handle: RawHandle,
+        owner: u16,
+        new_owner: u16,
+    ) -> Result<RawHandle, CloneError> {
+        self.arena().clone_handle(handle, owner, new_owner)
+    }
+}

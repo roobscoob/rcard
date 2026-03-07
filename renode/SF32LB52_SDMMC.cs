@@ -46,7 +46,7 @@ namespace Antmicro.Renode.Peripherals.SD
         {
             this.machine = machine;
             this.cardSize = cardSizeBytes;
-            this.imagePath = imagePath ?? Environment.GetEnvironmentVariable("RCARD_SDCARD_IMG");
+            this.imagePath = imagePath ?? Environment.GetEnvironmentVariable("RCARD_SDMMC_IMG");
             fifo = new Queue<uint>();
             IRQ = new GPIO();
 

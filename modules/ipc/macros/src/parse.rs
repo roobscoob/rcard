@@ -509,6 +509,25 @@ pub fn parse_methods(trait_def: &ItemTrait) -> syn::Result<Vec<ParsedMethod>> {
     Ok(methods)
 }
 
+/// Collect unique peer trait names from methods that have `#[handle(clone)] impl Trait`.
+/// Returns `(TraitName, snake_name)` pairs, deduplicated, in order of first appearance.
+pub fn collect_peer_traits(methods: &[ParsedMethod]) -> Vec<(Ident, Ident)> {
+    let mut seen = Vec::new();
+    for m in methods {
+        for p in &m.params {
+            if p.handle_mode == Some(HandleMode::Clone) {
+                if let Some(ref trait_name) = p.impl_trait_name {
+                    if !seen.iter().any(|(name, _): &(Ident, Ident)| name == trait_name) {
+                        let snake = crate::util::to_snake_ident(trait_name);
+                        seen.push((trait_name.clone(), snake));
+                    }
+                }
+            }
+        }
+    }
+    seen
+}
+
 /// Given an interface trait path like `storage_api::Storage`, construct the
 /// corresponding Op enum path: `storage_api::StorageOp`.
 pub fn interface_op_path(iface_path: &syn::Path) -> syn::Path {

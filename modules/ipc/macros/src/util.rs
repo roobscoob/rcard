@@ -69,3 +69,11 @@ pub fn to_snake_case(s: &str) -> String {
     }
     result
 }
+
+pub fn to_screaming_snake_case(s: &str) -> String {
+    to_snake_case(s).to_uppercase()
+}
+
+pub fn to_snake_ident(ident: &Ident) -> Ident {
+    Ident::new(&to_snake_case(&ident.to_string()), ident.span())
+}

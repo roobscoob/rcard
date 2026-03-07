@@ -1,13 +1,12 @@
 #![no_std]
 #![no_main]
 
-use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use sf32lb52_pac::usart1::RegisterBlock;
-use sf32lb52_pac::{Usart1, Usart2, Usart3};
+use sf32lb52_pac::{Usart2, Usart3};
 
-use sysmodule_usart_api::{Usart, UsartDispatcher, UsartOpenError};
+use sysmodule_usart_api::*;
 
 static USART_IN_USE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
@@ -49,11 +48,7 @@ impl Usart for UsartResource {
         Ok(UsartResource { index, regs })
     }
 
-    fn write(
-        &mut self,
-        _meta: ipc::Meta,
-        data: idyll_runtime::Leased<idyll_runtime::Read, u8>,
-    ) {
+    fn write(&mut self, _meta: ipc::Meta, data: idyll_runtime::Leased<idyll_runtime::Read, u8>) {
         for i in 0..data.len() {
             let b = data.read(i).unwrap_or(0);
             while self.regs.isr().read().txe().bit_is_clear() {}
@@ -68,12 +63,14 @@ impl Drop for UsartResource {
     }
 }
 
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
+    userlib::sys_panic(b"usart panic")
+}
+
 #[export_name = "main"]
 fn main() -> ! {
-    let mut dispatcher = UsartDispatcher::<UsartResource>::new();
-    let mut buf = [MaybeUninit::uninit(); 128];
-
-    ipc::Server::<1>::new()
-        .with_dispatcher(0x01, &mut dispatcher)
-        .run(&mut buf)
+    ipc::server! {
+        Usart: UsartResource,
+    }
 }

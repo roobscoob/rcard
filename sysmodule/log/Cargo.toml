@@ -10,7 +10,9 @@ ipc = { path = "../../modules/ipc" }
 hubris-task-slots.workspace = true
 sysmodule_log_api = { path = "api" }
 sysmodule_time_api = { path = "../time/api" }
+sysmodule_storage_api = { path = "../storage/api" }
 sysmodule_usart_api = { path = "../usart/api" }
+storage_api = { path = "../../modules/storage_api" }
 userlib.workspace = true
 
 [[bin]]

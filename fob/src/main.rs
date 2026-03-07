@@ -3,11 +3,12 @@
 
 use hubris_task_slots::SLOTS;
 use sysmodule_display_api::DisplayConfiguration;
+use sysmodule_storage_api::partitions;
 
 sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 sysmodule_log_api::panic_handler!(Log);
-sysmodule_sdmmc_api::bind_sdmmc!(Sdmmc = SLOTS.sysmodule_sdmmc);
+sysmodule_storage_api::bind_partition!(StoragePartition = SLOTS.sysmodule_storage);
 sysmodule_fs_api::bind_file_system!(Fs = SLOTS.sysmodule_fs);
 sysmodule_fs_api::bind_file!(FsFile = SLOTS.sysmodule_fs);
 
@@ -29,51 +30,26 @@ fn main() -> ! {
         }
     }
 
-    log::info!("checkerboard drawing");
     display.draw(&fb).unwrap();
 
-    // ── Open SD card ──
-    log::info!("opening sdmmc...");
-    let sdmmc = Sdmmc::open().unwrap().unwrap();
-
-    log::info!("sdmmc opened successfully");
-
-    let blocks = sdmmc.block_count().unwrap();
-    log::info!("sdmmc: {} blocks", blocks);
-
-    // ── Format and mount filesystem ──
-    log::info!("formatting filesystem...");
-    let fs = Fs::format(sdmmc).unwrap().unwrap();
-    log::info!("filesystem mounted");
-
-    // ── Write a file ──
-    let message = b"Hello from Hubris!";
-    log::info!("creating /hello.txt ...");
-    let file = FsFile::get_or_create(&fs, b"/hello.txt").unwrap().unwrap();
-    let written = file.write(0, message).unwrap();
-    log::info!("wrote {} bytes", written);
-    file.close().unwrap();
-
-    // ── Read it back ──
-    log::info!("reading /hello.txt ...");
-    let file = FsFile::get(&fs, b"/hello.txt").unwrap().unwrap();
+    // files :)
+    let buf = &mut [0u8; 128];
+    let file = FsFile::get(b"main:/demo.txt").unwrap().unwrap();
     let size = file.size().unwrap();
-    log::info!("file size: {} bytes", size);
-
-    let mut buf = [0u8; 64];
     let read = file.read(0, &mut buf[..size as usize]).unwrap();
     file.close().unwrap();
 
-    if &buf[..read as usize] == message {
-        log::info!("fs test PASSED: read back matches");
-    } else {
-        log::error!("fs test FAILED: readback mismatch");
-    }
+    log::info!(
+        "Read {} bytes from demo.txt: {:?}",
+        read,
+        core::str::from_utf8(&buf[..read as usize]).unwrap_or("<invalid utf8>")
+    );
 
     loop {
-        log::info!("tick");
-        for _ in 0..100_000_000 {
-            core::hint::spin_loop();
-        }
+        // log::info!("tick");
+
+        // for _ in 0..100_000_000 {
+        //     core::hint::spin_loop();
+        // }
     }
 }

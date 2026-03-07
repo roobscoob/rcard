@@ -3,15 +3,48 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use crate::parse::{
-    parse_slice_ref, ConstructorReturn, MethodKind, ParsedMethod, ParsedParam, ResourceAttr,
+    collect_peer_traits, parse_slice_ref, ConstructorReturn, HandleMode, MethodKind, ParsedMethod,
+    ParsedParam, ResourceAttr,
 };
-use crate::util::{replace_ident_in_type, to_pascal_case};
+use crate::util::{replace_ident_in_type, to_pascal_case, to_screaming_snake_case, to_snake_case};
+
+/// Build a map from impl_trait_name -> PeerGenericName for resolvable peers.
+fn peer_generic_name(trait_name: &Ident) -> Ident {
+    format_ident!("Peer{}", trait_name)
+}
+
+fn peer_field_name(trait_name: &Ident) -> Ident {
+    format_ident!("peer_{}", to_snake_case(&trait_name.to_string()))
+}
+
+fn peer_const_name(trait_name: &Ident) -> Ident {
+    format_ident!(
+        "__PEER_{}_N",
+        to_screaming_snake_case(&trait_name.to_string())
+    )
+}
+
+/// Check if a parameter is a resolvable peer (clone + impl Trait).
+fn is_resolvable_peer(p: &ParsedParam) -> bool {
+    p.handle_mode == Some(HandleMode::Clone) && p.impl_trait_name.is_some()
+}
 
 pub fn gen_server_trait(
     trait_name: &Ident,
     methods: &[ParsedMethod],
     _attrs: &ResourceAttr,
 ) -> TokenStream2 {
+    let peers = collect_peer_traits(methods);
+
+    // Generic type params for the trait: <PeerFileSystem, PeerFolder, ...>
+    let peer_generics: Vec<TokenStream2> = peers
+        .iter()
+        .map(|(name, _)| {
+            let g = peer_generic_name(name);
+            quote! { #g }
+        })
+        .collect();
+
     let method_fns: Vec<TokenStream2> = methods
         .iter()
         .map(|m| {
@@ -34,9 +67,12 @@ pub fn gen_server_trait(
                             );
                         }
                     }
+                } else if is_resolvable_peer(p) {
+                    // Resolvable peer: becomes &PeerGeneric
+                    let peer_g = peer_generic_name(p.impl_trait_name.as_ref().unwrap());
+                    params.push(quote! { #pname: &#peer_g });
                 } else if p.handle_mode.is_some() {
-                    // Handle params become RawHandle (concrete) or DynHandle (impl Trait)
-                    // on the server side.
+                    // Non-resolvable handle: DynHandle (impl Trait + move) or RawHandle (concrete)
                     if p.impl_trait_name.is_some() {
                         params.push(quote! { #pname: ipc::DynHandle });
                     } else {
@@ -48,11 +84,10 @@ pub fn gen_server_trait(
                 }
             }
 
-            // Wrap the user's original return type in Result<_, ReplyFaultReason>.
-            // For constructs messages, replace the generic ident (e.g. `FS`) with `ipc::RawHandle`.
             let inner = if let Some(rt) = &m.return_type {
                 if let Some((_trait_name, generic_ident)) = &m.constructs {
-                    let replaced = replace_ident_in_type(rt, generic_ident, &quote! { ipc::RawHandle });
+                    let replaced =
+                        replace_ident_in_type(rt, generic_ident, &quote! { ipc::RawHandle });
                     quote! { #replaced }
                 } else {
                     quote! { #rt }
@@ -76,9 +111,17 @@ pub fn gen_server_trait(
         })
         .collect();
 
-    quote! {
-        pub trait #trait_name: Sized {
-            #(#method_fns)*
+    if peer_generics.is_empty() {
+        quote! {
+            pub trait #trait_name: Sized {
+                #(#method_fns)*
+            }
+        }
+    } else {
+        quote! {
+            pub trait #trait_name<#(#peer_generics),*>: Sized {
+                #(#method_fns)*
+            }
         }
     }
 }
@@ -92,8 +135,6 @@ pub fn gen_operation_enum(
     let method_count = methods.len() as u8;
     let method_count_lit = proc_macro2::Literal::u8_suffixed(method_count);
 
-    // When `implements(Trait)` is set, message method discriminants reference
-    // the interface's Op enum, and non-message methods start at METHOD_COUNT.
     let iface_op = attrs
         .implements
         .as_ref()
@@ -107,7 +148,6 @@ pub fn gen_operation_enum(
             let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));
             if let Some(ref iface_op) = iface_op {
                 if m.kind == MethodKind::Message || m.kind == MethodKind::StaticMessage {
-                    // Reference the interface's Op variant directly.
                     quote! { #variant = #iface_op::#variant as u8 }
                 } else {
                     let offset = proc_macro2::Literal::u8_suffixed(non_message_offset);
@@ -121,7 +161,6 @@ pub fn gen_operation_enum(
         })
         .collect();
 
-    // For TryFrom, use const bindings so patterns work with computed discriminants.
     let const_bindings: Vec<TokenStream2> = methods
         .iter()
         .map(|m| {
@@ -172,28 +211,90 @@ pub fn gen_dispatcher(
     let arena_size = attrs.arena_size.unwrap_or(0);
     let dispatcher_name = format_ident!("{}Dispatcher", trait_name);
     let enum_name = format_ident!("{}Op", trait_name);
+    let peers = collect_peer_traits(methods);
 
     let dispatch_arms: Vec<TokenStream2> = methods
         .iter()
         .map(|m| gen_dispatch_arm(trait_name, &enum_name, m))
         .collect();
 
-    let kind_lit = proc_macro2::Literal::u8_suffixed(attrs.kind);
+    // Build generic params, fields, constructor args, and trait bounds
+    let peer_generic_defs: Vec<TokenStream2> = peers
+        .iter()
+        .map(|(name, _)| {
+            let g = peer_generic_name(name);
+            let c = peer_const_name(name);
+            quote! { #g, const #c: usize }
+        })
+        .collect();
+
+    let peer_fields: Vec<TokenStream2> = peers
+        .iter()
+        .map(|(name, _)| {
+            let field = peer_field_name(name);
+            let g = peer_generic_name(name);
+            let c = peer_const_name(name);
+            quote! { #field: &'a ipc::SharedArena<#g, #c> }
+        })
+        .collect();
+
+    let peer_ctor_params: Vec<TokenStream2> = peers
+        .iter()
+        .map(|(name, _)| {
+            let field = peer_field_name(name);
+            let g = peer_generic_name(name);
+            let c = peer_const_name(name);
+            quote! { #field: &'a ipc::SharedArena<#g, #c> }
+        })
+        .collect();
+
+    let peer_ctor_inits: Vec<TokenStream2> = peers
+        .iter()
+        .map(|(name, _)| {
+            let field = peer_field_name(name);
+            quote! { #field }
+        })
+        .collect();
+
+    let peer_generic_names: Vec<TokenStream2> = peers
+        .iter()
+        .map(|(name, _)| {
+            let g = peer_generic_name(name);
+            let c = peer_const_name(name);
+            quote! { #g, #c }
+        })
+        .collect();
+
+    // Trait bound: T: TraitName or T: TraitName<PeerA, PeerB>
+    let trait_bound = if peers.is_empty() {
+        quote! { #trait_name }
+    } else {
+        let peer_gs: Vec<_> = peers
+            .iter()
+            .map(|(name, _)| peer_generic_name(name))
+            .collect();
+        quote! { #trait_name<#(#peer_gs),*> }
+    };
 
     quote! {
-        pub struct #dispatcher_name<T: #trait_name> {
-            pub arena: ipc::Arena<T, #arena_size>,
+        pub struct #dispatcher_name<'a, T: #trait_bound, #(#peer_generic_defs),*> {
+            arena: &'a ipc::SharedArena<T, #arena_size>,
+            #(#peer_fields,)*
         }
 
-        impl<T: #trait_name> #dispatcher_name<T> {
-            pub const fn new() -> Self {
+        impl<'a, T: #trait_bound, #(#peer_generic_defs),*> #dispatcher_name<'a, T, #(#peer_generic_names),*> {
+            pub fn new(
+                arena: &'a ipc::SharedArena<T, #arena_size>,
+                #(#peer_ctor_params,)*
+            ) -> Self {
                 Self {
-                    arena: ipc::Arena::new(#kind_lit),
+                    arena,
+                    #(#peer_ctor_inits,)*
                 }
             }
         }
 
-        impl<T: #trait_name> ipc::ResourceDispatch for #dispatcher_name<T> {
+        impl<'a, T: #trait_bound, #(#peer_generic_defs),*> ipc::ResourceDispatch for #dispatcher_name<'a, T, #(#peer_generic_names),*> {
             fn dispatch(
                 &mut self,
                 method_id: u8,
@@ -289,8 +390,66 @@ pub fn gen_dispatcher(
     }
 }
 
+pub fn gen_constants(trait_name: &Ident, attrs: &ResourceAttr) -> TokenStream2 {
+    let arena_size = attrs.arena_size.unwrap_or(0);
+    let kind = attrs.kind;
+    let screaming = to_screaming_snake_case(&trait_name.to_string());
+    let kind_name = format_ident!("{}_KIND", screaming);
+    let arena_size_name = format_ident!("{}_ARENA_SIZE", screaming);
+    let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
+
+    quote! {
+        pub const #kind_name: u8 = #kind_lit;
+        pub const #arena_size_name: usize = #arena_size;
+    }
+}
+
+pub fn gen_wiring_macro(
+    trait_name: &Ident,
+    methods: &[ParsedMethod],
+) -> TokenStream2 {
+    let peers = collect_peer_traits(methods);
+    let dispatcher_name = format_ident!("{}Dispatcher", trait_name);
+    let macro_name = format_ident!("__new_{}Dispatcher", trait_name);
+
+    if peers.is_empty() {
+        quote! {
+            #[doc(hidden)]
+            #[macro_export]
+            macro_rules! #macro_name {
+                ($own_arena:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {
+                    $crate::#dispatcher_name::new($own_arena)
+                };
+            }
+        }
+    } else {
+        let find_calls: Vec<TokenStream2> = peers
+            .iter()
+            .map(|(name, _)| {
+                quote! { __find!(#name) }
+            })
+            .collect();
+
+        quote! {
+            #[doc(hidden)]
+            #[macro_export]
+            macro_rules! #macro_name {
+                ($own_arena:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {{
+                    macro_rules! __find {
+                        $( ($all_name) => { $all_arena }; )*
+                    }
+                    $crate::#dispatcher_name::new($own_arena, #(#find_calls),*)
+                }};
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch arm generation (mostly unchanged, with peer resolution added)
+// ---------------------------------------------------------------------------
+
 /// Compute the effective return type for a method's server-side serialization.
-/// For `constructs` messages, replaces the generic ident (e.g. `FS`) with `ipc::RawHandle`.
 fn server_return_type(m: &ParsedMethod) -> Option<syn::Type> {
     let rt = m.return_type.as_ref()?;
     if let Some((_trait_name, generic_ident)) = &m.constructs {
@@ -299,6 +458,27 @@ fn server_return_type(m: &ParsedMethod) -> Option<syn::Type> {
     } else {
         Some(rt.clone())
     }
+}
+
+/// Generate resolution statements for resolvable peer params.
+/// After deserialization, each DynHandle param is shadowed with the resolved &PeerType.
+fn gen_peer_resolution(m: &ParsedMethod) -> Vec<TokenStream2> {
+    m.params
+        .iter()
+        .filter_map(|p| {
+            if !is_resolvable_peer(p) {
+                return None;
+            }
+            let name = &p.name;
+            let trait_name = p.impl_trait_name.as_ref().unwrap();
+            let field = peer_field_name(trait_name);
+            let msg = format!("ipc: invalid peer handle for {}", trait_name);
+            Some(quote! {
+                let #name = self.#field.get(#name.handle)
+                    .expect(#msg);
+            })
+        })
+        .collect()
 }
 
 fn gen_dispatch_arm(
@@ -314,6 +494,7 @@ fn gen_dispatch_arm(
         m.params.iter().filter(|p| p.is_lease).collect();
 
     let lease_bindings = gen_lease_bindings(&lease_params);
+    let peer_resolution = gen_peer_resolution(m);
     let call_args = gen_call_args(m);
 
     let method_name = &m.name;
@@ -393,6 +574,7 @@ fn gen_dispatch_arm(
                     #deserialize
                     #destructure
                     #(#lease_bindings)*
+                    #(#peer_resolution)*
                     #ctor_body
                     Ok(())
                 }
@@ -401,7 +583,6 @@ fn gen_dispatch_arm(
 
         MethodKind::Message => {
             let (deserialize, destructure) = gen_deserialize_args(&non_lease_params, true);
-            // For constructs messages, the server returns RawHandle, not the generic ident.
             let effective_rt = server_return_type(m);
             let handle_result = gen_reply(method_name, &call_args, effective_rt.as_ref(), false);
 
@@ -410,6 +591,7 @@ fn gen_dispatch_arm(
                     #deserialize
                     #destructure
                     #(#lease_bindings)*
+                    #(#peer_resolution)*
                     #handle_result
                     Ok(())
                 }
@@ -424,6 +606,7 @@ fn gen_dispatch_arm(
                 #enum_name::#variant => {
                     #deserialize
                     #destructure
+                    #(#peer_resolution)*
                     #handle_result
                     Ok(())
                 }
@@ -440,6 +623,7 @@ fn gen_dispatch_arm(
                     #deserialize
                     #destructure
                     #(#lease_bindings)*
+                    #(#peer_resolution)*
                     #static_reply
                     Ok(())
                 }

@@ -1,10 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use sysmodule_display_api::{Display, DisplayConfiguration, DisplayDispatcher, DisplayOpenError};
+use hubris_task_slots::SLOTS;
+use sysmodule_display_api::*;
 
 static DISPLAY_IN_USE: AtomicBool = AtomicBool::new(false);
 
@@ -15,6 +15,9 @@ const LCD_IF_CONF: u32 = 0x84;
 const LCD_SINGLE: u32 = 0x90;
 const LCD_WR: u32 = 0x94;
 const SPI_IF_CONF: u32 = 0x9C;
+
+sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
+sysmodule_log_api::panic_handler!(Log);
 
 fn lcdc_write(offset: u32, value: u32) {
     unsafe {
@@ -76,10 +79,7 @@ fn lcdc_init_spi() {
     //              PWH[17:12] = 1, PWL[11:6] = 1, TAH[5:3] = 1, TAS[2:0] = 1
     lcdc_write(LCD_IF_CONF, (1 << 12) | (1 << 6) | (1 << 3) | 1);
     // LCD_IF_CONF: bit 23 LCD_RSTB = 1 (release reset), same timing
-    lcdc_write(
-        LCD_IF_CONF,
-        (1 << 23) | (1 << 12) | (1 << 6) | (1 << 3) | 1,
-    );
+    lcdc_write(LCD_IF_CONF, (1 << 23) | (1 << 12) | (1 << 6) | (1 << 3) | 1);
     // Wait for SSD1312 to complete internal reset (~3us minimum)
     busy_wait(1_000);
 }
@@ -116,9 +116,9 @@ fn ssd1312_init(config: &DisplayConfiguration) {
     // Clear GDDRAM to all zeros (black) — contents are undefined after reset
     let pages = config.height / 8;
     for page in 0..pages {
-        ssd1312_cmd(0xB0 | page);  // Set page address
-        ssd1312_cmd(0x00);          // Lower column = 0
-        ssd1312_cmd(0x10);          // Upper column = 0
+        ssd1312_cmd(0xB0 | page); // Set page address
+        ssd1312_cmd(0x00); // Lower column = 0
+        ssd1312_cmd(0x10); // Upper column = 0
         for _ in 0..config.width {
             ssd1312_data(0x00);
         }
@@ -132,11 +132,12 @@ struct DisplayResource {
 }
 
 impl Display for DisplayResource {
-    fn open(
-        _meta: ipc::Meta,
-        config: DisplayConfiguration,
-    ) -> Result<Self, DisplayOpenError> {
+    fn open(meta: ipc::Meta, config: DisplayConfiguration) -> Result<Self, DisplayOpenError> {
+        log::trace!("Task {:?} attempting acquire", meta.sender);
+
         if DISPLAY_IN_USE.swap(true, Ordering::Acquire) {
+            log::error!("Task {:?} failed to acquire (already in use)", meta.sender);
+
             return Err(DisplayOpenError::AlreadyOpen);
         }
 
@@ -167,6 +168,8 @@ impl Display for DisplayResource {
 
 impl Drop for DisplayResource {
     fn drop(&mut self) {
+        log::trace!("DisplayResource dropped, shutting down display");
+
         ssd1312_cmd(0xAE); // Display off
         DISPLAY_IN_USE.store(false, Ordering::Release);
     }
@@ -174,10 +177,9 @@ impl Drop for DisplayResource {
 
 #[export_name = "main"]
 fn main() -> ! {
-    let mut dispatcher = DisplayDispatcher::<DisplayResource>::new();
-    let mut buf = [MaybeUninit::uninit(); 128];
+    sysmodule_log_api::init_logger!(Log);
 
-    ipc::Server::<1>::new()
-        .with_dispatcher(0x02, &mut dispatcher)
-        .run(&mut buf)
+    ipc::server! {
+        Display: DisplayResource,
+    }
 }
