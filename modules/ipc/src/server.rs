@@ -180,10 +180,10 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
                 Some(Err(e)) => {
                     #[cfg(feature = "dangerously_enable_uart3_debugging")]
                     { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc DISPATCH ERR k=0x{kind:02x} m=0x{method:02x}]\n"); }
-                    panic!(
-                        "ipc::Server: dispatch error for kind=0x{:02X} method=0x{:02X}: {:?}",
-                        kind, method, e,
-                    );
+                    // Fault the *client*, not the server. The client sent a
+                    // malformed message (bad size, bad contents, or bad leases)
+                    // and should be killed in isolation. The server continues.
+                    userlib::sys_reply_fault(msg.sender, e);
                 }
                 None => {
                     #[cfg(feature = "dangerously_enable_uart3_debugging")]
