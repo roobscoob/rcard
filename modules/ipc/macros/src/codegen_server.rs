@@ -326,9 +326,10 @@ pub fn gen_dispatcher(
                     let (args, _) = hubpack::deserialize::<(ipc::RawHandle, u16)>(msg_data)
                         .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
                     let (handle, new_owner) = args;
+                    let new_owner_priority = (self.priority_fn)(new_owner);
                     let mut reply_buf = [0u8;
                         <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                    let ok = self.arena.transfer(handle, sender_index, new_owner);
+                    let ok = self.arena.transfer(handle, sender_index, new_owner, new_owner_priority);
                     let result: core::result::Result<(), ipc::Error> = if ok {
                         Ok(())
                     } else {

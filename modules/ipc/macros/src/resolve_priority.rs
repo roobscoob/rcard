@@ -3,8 +3,6 @@
 //! Reads `.work/app.priorities.json` and `HUBRIS_TASKS` to build a mapping
 //! from client task index to eviction priority for the current server crate.
 
-use std::path::PathBuf;
-
 /// A (task_index, priority) pair for a single client.
 pub struct PriorityEntry {
     pub task_index: usize,
@@ -21,15 +19,7 @@ pub struct PriorityEntry {
 /// not running under the Hubris build system). Callers should treat `Err`
 /// as "skip enforcement" rather than a hard error.
 pub fn resolve() -> Result<Vec<PriorityEntry>, String> {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").map_err(|_| "CARGO_MANIFEST_DIR not set")?;
-    let project_root = PathBuf::from(&manifest_dir)
-        .ancestors()
-        .find(|p| p.join(".work").exists())
-        .ok_or("no .work directory found")?
-        .to_path_buf();
-
-    let json_path = project_root.join(".work").join("app.priorities.json");
+    let json_path = crate::resolve_alloc::find_work_dir()?.join("app.priorities.json");
     let content = std::fs::read_to_string(&json_path)
         .map_err(|_| format!("cannot read {}", json_path.display()))?;
 

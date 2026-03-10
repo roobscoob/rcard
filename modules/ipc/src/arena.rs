@@ -301,6 +301,7 @@ impl<T, const N: usize> Arena<T, N> {
         handle: RawHandle,
         current_owner: u16,
         new_owner: u16,
+        new_priority: i8,
     ) -> bool {
         if let Some(entry) = self
             .map
@@ -308,6 +309,7 @@ impl<T, const N: usize> Arena<T, N> {
             .find(|e| e.occupied && e.key == handle.0 && e.owner == current_owner)
         {
             entry.owner = new_owner;
+            entry.priority = new_priority;
             true
         } else {
             false
@@ -438,8 +440,9 @@ impl<T, const N: usize> SharedArena<T, N> {
         handle: RawHandle,
         current_owner: u16,
         new_owner: u16,
+        new_priority: i8,
     ) -> bool {
-        self.arena().transfer(handle, current_owner, new_owner)
+        self.arena().transfer(handle, current_owner, new_owner, new_priority)
     }
 
     pub fn clone_handle(

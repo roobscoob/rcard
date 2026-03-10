@@ -11,15 +11,15 @@ pub struct AllocInfo {
     pub align: u64,
 }
 
-fn find_work_dir() -> Result<PathBuf, String> {
+pub(crate) fn find_work_dir() -> Result<PathBuf, String> {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").map_err(|_| "CARGO_MANIFEST_DIR not set")?;
-    PathBuf::from(&manifest_dir)
+    let work_dir = PathBuf::from(&manifest_dir)
         .ancestors()
         .find(|p| p.join(".work").exists())
         .ok_or("cannot find project root with .work directory")?
-        .join(".work")
-        .pipe(Ok)
+        .join(".work");
+    Ok(work_dir)
 }
 
 fn read_alloc_json() -> Result<serde_json::Value, String> {
@@ -95,15 +95,3 @@ pub fn check_acl(alloc_name: &str) -> Result<Option<String>, String> {
         )))
     }
 }
-
-/// Helper trait for inline pipe operations.
-trait Pipe: Sized {
-    fn pipe<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Self) -> R,
-    {
-        f(self)
-    }
-}
-
-impl<T> Pipe for T {}

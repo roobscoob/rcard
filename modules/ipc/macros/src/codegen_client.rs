@@ -34,34 +34,6 @@ pub fn gen_client(
         }
     };
 
-    let constructors: Vec<&ParsedMethod> = methods
-        .iter()
-        .filter(|m| m.kind == MethodKind::Constructor)
-        .collect();
-
-    // Generate constructor enum variants (store non-lease, non-handle params).
-    let _ctor_variants: Vec<TokenStream2> = constructors
-        .iter()
-        .map(|m| {
-            let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));
-            let fields: Vec<TokenStream2> = m
-                .params
-                .iter()
-                .filter(|p| !p.is_lease && p.handle_mode.is_none())
-                .map(|p| {
-                    let name = &p.name;
-                    let ty = &p.ty;
-                    quote! { #name: #ty }
-                })
-                .collect();
-            if fields.is_empty() {
-                quote! { #variant }
-            } else {
-                quote! { #variant { #(#fields),* } }
-            }
-        })
-        .collect();
-
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
 
     let enum_name = format_ident!("{}Op", trait_name);
