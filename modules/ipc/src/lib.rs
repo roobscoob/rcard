@@ -26,6 +26,9 @@ pub enum Error {
     ServerDied,
     /// The server's resource arena is full; could not allocate.
     ArenaFull,
+    /// The handle was evicted by a higher-priority client, or is otherwise
+    /// stale (freed, wrong owner, etc.).
+    HandleLost,
 }
 
 impl hubpack::SerializedSize for Error {
@@ -37,10 +40,6 @@ impl hubpack::SerializedSize for Error {
 /// The client's generated code panics on any non-SUCCESS response code.
 pub const MALFORMED_MESSAGE: userlib::ResponseCode = userlib::ResponseCode(1);
 
-/// `ResponseCode` sent by the server when a client uses an invalid handle
-/// (stale, wrong owner, or already freed). The client's generated code
-/// panics on any non-SUCCESS response code.
-pub const INVALID_HANDLE: userlib::ResponseCode = userlib::ResponseCode(2);
 
 pub mod alloc_take;
 mod arena;

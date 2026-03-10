@@ -15,6 +15,7 @@ struct HandleEntry {
     generation: u32,
     occupied: bool,
     owner: u16,
+    priority: i8,
 }
 
 struct Slot<T> {
@@ -52,6 +53,7 @@ impl<T, const N: usize> Arena<T, N> {
         generation: 0,
         occupied: false,
         owner: 0,
+        priority: 0,
     };
 
     pub const fn new(kind: u8) -> Self {
@@ -74,9 +76,31 @@ impl<T, const N: usize> Arena<T, N> {
     }
 
     /// Allocate a new slot, returning a handle to it.
-    pub fn alloc(&mut self, value: T, owner: u16) -> Option<RawHandle> {
-        let slot_idx = self.slots.iter().position(|s| s.value.is_none())?;
-        let map_idx = self.map.iter().position(|e| !e.occupied)?;
+    ///
+    /// If the arena is full and `priority` is strictly greater than the
+    /// lowest-priority occupied entry, that entry is evicted (its value is
+    /// dropped and its generation is bumped) to make room.
+    pub fn alloc(&mut self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+        // Find a free slot, or evict the lowest-priority entry to free one.
+        let slot_idx = match self.slots.iter().position(|s| s.value.is_none()) {
+            Some(idx) => idx,
+            None => {
+                let victim = self.find_eviction_victim(priority)?;
+                self.release_entry(victim);
+                // The released slot should now be free.
+                self.slots.iter().position(|s| s.value.is_none())?
+            }
+        };
+
+        // Find a free map entry, or evict to free one.
+        let map_idx = match self.map.iter().position(|e| !e.occupied) {
+            Some(idx) => idx,
+            None => {
+                let victim = self.find_eviction_victim(priority)?;
+                self.release_entry(victim);
+                self.map.iter().position(|e| !e.occupied)?
+            }
+        };
 
         let generation = self.slots[slot_idx].generation;
         self.slots[slot_idx].value = Some(value);
@@ -90,9 +114,30 @@ impl<T, const N: usize> Arena<T, N> {
             generation,
             occupied: true,
             owner,
+            priority,
         };
 
         Some(RawHandle(key))
+    }
+
+    /// Find the map index of the lowest-priority occupied entry whose priority
+    /// is strictly less than `requester_priority`. Returns `None` if no such
+    /// entry exists (all entries are >= requester priority).
+    fn find_eviction_victim(&self, requester_priority: i8) -> Option<usize> {
+        let mut best: Option<(usize, i8)> = None;
+        for i in 0..N {
+            if self.map[i].occupied {
+                let p = self.map[i].priority;
+                if p < requester_priority {
+                    match best {
+                        None => best = Some((i, p)),
+                        Some((_, best_p)) if p < best_p => best = Some((i, p)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        best.map(|(idx, _)| idx)
     }
 
     fn lookup(&self, handle: RawHandle) -> Option<usize> {
@@ -207,6 +252,7 @@ impl<T, const N: usize> Arena<T, N> {
         handle: RawHandle,
         owner: u16,
         new_owner: u16,
+        priority: i8,
     ) -> Result<RawHandle, CloneError> {
         // Find source entry — only if the caller owns it.
         let (slot_idx, generation) = {
@@ -246,6 +292,7 @@ impl<T, const N: usize> Arena<T, N> {
             generation,
             occupied: true,
             owner: new_owner,
+            priority,
         };
 
         Ok(RawHandle(key))
@@ -293,8 +340,8 @@ impl<T, const N: usize> SharedArena<T, N> {
         self.arena().get_mut_owned(handle, owner)
     }
 
-    pub fn alloc(&self, value: T, owner: u16) -> Option<RawHandle> {
-        self.arena().alloc(value, owner)
+    pub fn alloc(&self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+        self.arena().alloc(value, owner, priority)
     }
 
     pub fn remove(&self, handle: RawHandle) -> Option<T> {
@@ -323,7 +370,8 @@ impl<T, const N: usize> SharedArena<T, N> {
         handle: RawHandle,
         owner: u16,
         new_owner: u16,
+        priority: i8,
     ) -> Result<RawHandle, CloneError> {
-        self.arena().clone_handle(handle, owner, new_owner)
+        self.arena().clone_handle(handle, owner, new_owner, priority)
     }
 }

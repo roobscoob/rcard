@@ -1064,22 +1064,38 @@ def check_dependency_cycles(doc):
 def transform_task_directives(doc):
     """Transform preprocessor directives into uses-task lines for hubake.
 
-    Returns (peers_dict, uses_dict).
+    Returns (peers_dict, uses_dict, priorities_dict).
     """
     all_names = collect_task_names(doc)
     all_peers = {}
     all_uses = {}
+    all_priorities = {}
 
     for task_node in find_tasks(doc):
         tname = task_name(task_node)
         uses_tasks = set()
         real_uses = set()
+        task_priorities = {}
 
         # uses-sysmodule X -> sysmodule_X
         for c in find_children(task_node, 'uses-sysmodule'):
             dep = f'sysmodule_{node_arg(c)}'
             uses_tasks.add(dep)
             real_uses.add(dep)
+
+            # Extract with-priority from children if present
+            prio_node = find_child(c, 'with-priority')
+            if prio_node is not None:
+                prio_val = node_arg(prio_node)
+                if prio_val is None:
+                    die(f"with-priority in task '{tname}' uses-sysmodule "
+                        f"'{node_arg(c)}' requires an integer value")
+                task_priorities[dep] = int(prio_val)
+                # Strip children so they don't leak into hubake output
+                c.nodes = []
+
+        if task_priorities:
+            all_priorities[tname] = task_priorities
 
         # peer-sysmodule X -> sysmodule_X (recorded as peer)
         peer_targets = [node_arg(c) for c in find_children(task_node, 'peer-sysmodule')]
@@ -1128,7 +1144,7 @@ def transform_task_directives(doc):
                 kdl.Node(name='uses-task', args=[kdl.String(value=t, tag=None)])
             )
 
-    return all_peers, all_uses
+    return all_peers, all_uses, all_priorities
 
 
 def inject_storage_uses_task(doc, partition_acl):
@@ -1279,7 +1295,7 @@ def main():
         transform_allocation_uses(doc)
 
     # Transform task directives (uses-sysmodule, peer-sysmodule, etc.)
-    peers, uses = transform_task_directives(doc)
+    peers, uses, priorities = transform_task_directives(doc)
 
     # Inject uses-task entries into sysmodule_storage for ACL enforcement
     inject_storage_uses_task(doc, partition_acl)
@@ -1344,6 +1360,12 @@ def main():
         json_path = output_path.rsplit('.', 1)[0] + '.uses.json'
         with open(json_path, 'w') as f:
             json.dump(uses, f, indent=2)
+
+    # Write priorities JSON alongside the output
+    if priorities:
+        json_path = output_path.rsplit('.', 1)[0] + '.priorities.json'
+        with open(json_path, 'w') as f:
+            json.dump(priorities, f, indent=2)
 
     # Write chip memory regions JSON alongside the output
     if chip_regions:
