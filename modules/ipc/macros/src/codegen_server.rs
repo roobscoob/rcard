@@ -323,14 +323,13 @@ pub fn gen_dispatcher(
                         .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
                     let (handle, new_owner) = args;
                     let ok = self.arena.transfer(handle, sender_index, new_owner);
-                    let result: core::result::Result<(), ipc::Error> = if ok {
-                        Ok(())
-                    } else {
-                        Err(ipc::Error::InvalidHandle)
-                    };
+                    if !ok {
+                        userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
+                        return Ok(());
+                    }
                     let mut reply_buf = [0u8;
                         <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                    let n = hubpack::serialize(&mut reply_buf, &result)
+                    let n = hubpack::serialize(&mut reply_buf, &core::result::Result::<(), ipc::Error>::Ok(()))
                         .expect("ipc: failed to serialize transfer reply");
                     userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
                     return Ok(());
@@ -347,7 +346,10 @@ pub fn gen_dispatcher(
                     let result: core::result::Result<ipc::RawHandle, ipc::Error> =
                         match self.arena.clone_handle(handle, sender_index, new_owner) {
                             Ok(new_handle) => Ok(new_handle),
-                            Err(ipc::CloneError::InvalidHandle) => Err(ipc::Error::InvalidHandle),
+                            Err(ipc::CloneError::InvalidHandle) => {
+                                userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
+                                return Ok(());
+                            }
                             Err(ipc::CloneError::ArenaFull) => Err(ipc::Error::ArenaFull),
                         };
                     let mut reply_buf = [0u8;
@@ -791,11 +793,7 @@ fn gen_reply(
             let mut reply_buf = [0u8;
                 <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
             let Some(resource) = #arena_op else {
-                let n = hubpack::serialize(
-                    &mut reply_buf,
-                    &core::result::Result::<#rt, ipc::Error>::Err(ipc::Error::InvalidHandle),
-                ).expect("ipc: failed to serialize reply");
-                userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
                 return Ok(());
             };
             let result_value = resource.#method_name(meta, #(#call_args),*);
@@ -810,11 +808,7 @@ fn gen_reply(
             let mut reply_buf =
                 [0u8; <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
             let Some(resource) = #arena_op else {
-                let n = hubpack::serialize(
-                    &mut reply_buf,
-                    &core::result::Result::<(), ipc::Error>::Err(ipc::Error::InvalidHandle),
-                ).expect("ipc: failed to serialize reply");
-                userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
                 return Ok(());
             };
             resource.#method_name(meta, #(#call_args),*);
