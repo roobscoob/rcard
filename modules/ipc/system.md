@@ -567,81 +567,13 @@ The client deserializes a `RawHandle` from the reply and wraps it in a
 
 ---
 
-## Phase 5: Hierarchical Ownership (parent = X)
+## Phase 5: (removed)
 
-### 5a. Parse parent attribute
-
-**Files:** `parse.rs`
-
-```rust
-pub struct ResourceAttr {
-    pub arena_size: Option<usize>,
-    pub kind: u8,
-    pub supertraits: Vec<Ident>,
-    pub clone_mode: Option<CloneMode>,  // refcount, etc.
-    pub parent: Option<Ident>,          // NEW
-}
-```
-
-Usage: `#[ipc::resource(arena_size = 128, kind = 0x14, parent = FileSystem)]`
-
-### 5b. Arena parent tracking
-
-**Files:** `arena.rs`
-
-Add parent handle to `HandleEntry`:
-
-```rust
-struct HandleEntry {
-    ...
-    parent: Option<RawHandle>,  // NEW: if set, this entry is a child
-}
-```
-
-Add methods:
-
-```rust
-/// Allocate with a parent reference.
-pub fn alloc_with_parent(&mut self, value: T, owner: u16, parent: RawHandle) -> Option<RawHandle>
-
-/// Remove all entries whose parent matches the given handle.
-/// Called when the parent resource is destroyed.
-pub fn remove_by_parent(&mut self, parent: RawHandle)
-```
-
-### 5c. Cascade delete
-
-**Files:** `codegen_server.rs`, `server.rs`
-
-When a resource with children is destroyed (via destructor, implicit destroy,
-or owner cleanup), the server must cascade-delete all children. The server
-needs to know which dispatchers hold child arenas for a given parent kind.
-
-**Approach**: the `Server` struct gets a parent-child relationship table.
-When a resource is removed from a parent arena, the server iterates child
-dispatchers and calls `remove_by_parent(handle)`.
-
-This is configured at server construction time:
-
-```rust
-ipc::Server::new()
-    .with_dispatcher(0x13, &mut fs_dispatcher)
-    .with_dispatcher(0x14, &mut file_dispatcher)
-    .with_parent_child(0x13, 0x14)  // FileSystem is parent of File
-    .run(&mut buf);
-```
-
-Or inferred from the `parent = X` attribute in the macro.
-
-### 5d. Client-side lifetime erasure
-
-The client handle for a child resource has no Rust lifetime tying it to the
-parent. Instead:
-- If the parent is destroyed, the child's next IPC call returns `InvalidHandle`
-  (or a new `ParentDestroyed` error variant)
-- The child handle's `reconstruct()` would need to also reconstruct the parent,
-  which it can't do (same problem as transferred handles). So child handles
-  created via `constructs` have `ctor: None` — server death means they're lost.
+Hierarchical ownership (`parent = X`) was removed. Resource cleanup of
+child resources is handled by the parent resource's `Drop` implementation
+or explicit destructor logic in the server trait. This keeps the arena
+simple and puts relationship knowledge where it belongs — in the server
+author's code.
 
 ---
 
@@ -737,8 +669,8 @@ pub trait FileSystem {
     fn open(&self, path: [u8; 64]) -> Result<impl File, OpenError>;
 }
 
-// Child resource with parent tracking
-#[ipc::resource(arena_size = 128, kind = 0x14, parent = FileSystem)]
+// Child resource — cleanup handled by FileSystem's Drop/destructor
+#[ipc::resource(arena_size = 128, kind = 0x14)]
 pub trait File: Storage {
     #[message]
     fn read(&self, offset: u64, #[lease] into: &mut [u8]) -> Result<usize, ReadErr>;
