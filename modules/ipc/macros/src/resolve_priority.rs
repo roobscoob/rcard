@@ -43,71 +43,19 @@ pub fn resolve() -> Result<Vec<PriorityEntry>, String> {
         .map(|s| s.to_string())
         .collect();
 
-    let task_index = |name: &str| -> Option<usize> {
-        task_names.iter().position(|t| t == name)
-    };
+    // JSON structure: { "client_task": { "sysmodule_x": N, ... }, ... }
+    let root: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("bad priorities JSON: {e}"))?;
+    let obj = root.as_object().ok_or("priorities JSON is not an object")?;
 
-    // Minimal JSON parsing: the format is:
-    // { "client_task": { "sysmodule_x": N, ... }, ... }
-    let entries = parse_priorities_for(&content, &server_name, &task_index)?;
-    Ok(entries)
-}
-
-/// Parse the priorities JSON and extract entries for `server_name`.
-///
-/// Expected JSON format:
-/// ```json
-/// {
-///   "client_task": {
-///     "sysmodule_display": 0,
-///     "sysmodule_log": -1
-///   }
-/// }
-/// ```
-fn parse_priorities_for(
-    json: &str,
-    server_name: &str,
-    task_index: &dyn Fn(&str) -> Option<usize>,
-) -> Result<Vec<PriorityEntry>, String> {
     let mut entries = Vec::new();
-
-    // Find each top-level key (client task name)
-    let mut search_from = 0;
-    while let Some(pos) = json[search_from..].find('"') {
-        let abs_pos = search_from + pos;
-        let after_quote = abs_pos + 1;
-        let end_quote = match json[after_quote..].find('"') {
-            Some(p) => after_quote + p,
-            None => break,
-        };
-        let client_name = &json[after_quote..end_quote];
-        search_from = end_quote + 1;
-
-        // Skip to the colon and opening brace
-        let rest = json[search_from..].trim_start();
-        if !rest.starts_with(':') {
-            continue;
-        }
-        let rest = rest[1..].trim_start();
-        if !rest.starts_with('{') {
-            continue;
-        }
-
-        // Find matching closing brace
-        let brace_start = json.len() - rest.len();
-        let brace_end = match find_matching_brace(&json[brace_start..]) {
-            Some(e) => brace_start + e,
-            None => break,
-        };
-        let inner = &json[brace_start + 1..brace_end];
-        search_from = brace_end + 1;
-
-        // Parse the inner object for our server_name
-        if let Some(priority) = find_int_value(inner, server_name) {
-            if let Some(idx) = task_index(client_name) {
+    for (client_name, inner) in obj {
+        let inner = inner.as_object().ok_or("expected object per client")?;
+        if let Some(priority) = inner.get(&server_name).and_then(|v| v.as_i64()) {
+            if let Some(idx) = task_names.iter().position(|t| t == client_name) {
                 entries.push(PriorityEntry {
                     task_index: idx,
-                    task_name: client_name.to_string(),
+                    task_name: client_name.clone(),
                     priority,
                 });
             }
@@ -115,37 +63,4 @@ fn parse_priorities_for(
     }
 
     Ok(entries)
-}
-
-/// Find a string key in a simple JSON object and return its integer value.
-fn find_int_value(json: &str, key: &str) -> Option<i64> {
-    let needle = format!("\"{}\"", key);
-    let key_pos = json.find(&needle)?;
-    let after_key = &json[key_pos + needle.len()..];
-    let after_colon = after_key.trim_start().strip_prefix(':')?;
-    let after_colon = after_colon.trim_start();
-
-    // Parse integer (possibly negative)
-    let end = after_colon
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(after_colon.len());
-    let num_str = &after_colon[..end];
-    num_str.parse::<i64>().ok()
-}
-
-fn find_matching_brace(s: &str) -> Option<usize> {
-    let mut depth = 0;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
