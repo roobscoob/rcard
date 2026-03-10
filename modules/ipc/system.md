@@ -59,11 +59,12 @@ Update the method ID overflow check in `parse.rs` to cap at `0xFD` instead of `0
 **Files:** `arena.rs`
 
 ```rust
-pub fn transfer(&mut self, handle: RawHandle, current_owner: u16, new_owner: u16) -> bool {
+pub fn transfer(&mut self, handle: RawHandle, current_owner: u16, new_owner: u16, new_priority: i8) -> bool {
     if let Some(entry) = self.map.iter_mut()
         .find(|e| e.occupied && e.key == handle.0 && e.owner == current_owner)
     {
         entry.owner = new_owner;
+        entry.priority = new_priority;
         true
     } else {
         false
@@ -269,7 +270,8 @@ In the generated `ResourceDispatch::dispatch`, alongside the 0xFF handling:
 ```rust
 if method_id == ipc::TRANSFER_METHOD {
     let (handle, new_owner) = deserialize::<(RawHandle, u16)>(msg_data)?;
-    let ok = self.arena.transfer(handle, msg.sender.task_index(), new_owner);
+    let new_owner_priority = (self.priority_fn)(new_owner);
+    let ok = self.arena.transfer(handle, msg.sender.task_index(), new_owner, new_owner_priority);
     // serialize Result<(), ipc::Error>, reply
 }
 

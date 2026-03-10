@@ -15,6 +15,7 @@ struct HandleEntry {
     generation: u32,
     occupied: bool,
     owner: u16,
+    priority: i8,
 }
 
 struct Slot<T> {
@@ -52,6 +53,7 @@ impl<T, const N: usize> Arena<T, N> {
         generation: 0,
         occupied: false,
         owner: 0,
+        priority: 0,
     };
 
     pub const fn new(kind: u8) -> Self {
@@ -74,9 +76,26 @@ impl<T, const N: usize> Arena<T, N> {
     }
 
     /// Allocate a new slot, returning a handle to it.
-    pub fn alloc(&mut self, value: T, owner: u16) -> Option<RawHandle> {
-        let slot_idx = self.slots.iter().position(|s| s.value.is_none())?;
-        let map_idx = self.map.iter().position(|e| !e.occupied)?;
+    ///
+    /// If the arena is full and `priority` is strictly greater than the
+    /// lowest-priority occupied entry, that entry is evicted (its value is
+    /// dropped and its generation is bumped) to make room.
+    pub fn alloc(&mut self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+        // Find a free slot, or evict an entire slot to free one.
+        let slot_idx = match self.slots.iter().position(|s| s.value.is_none()) {
+            Some(idx) => idx,
+            None => self.evict_slot(priority)?,
+        };
+
+        // evict_slot releases all map entries for the victim slot, so at
+        // least one free map entry must exist. If none existed before
+        // eviction (no free slots implies no free map entries for
+        // non-refcounted resources), the eviction freed at least one.
+        let map_idx = self
+            .map
+            .iter()
+            .position(|e| !e.occupied)
+            .expect("ipc: arena has a free slot but no free map entry");
 
         let generation = self.slots[slot_idx].generation;
         self.slots[slot_idx].value = Some(value);
@@ -90,9 +109,104 @@ impl<T, const N: usize> Arena<T, N> {
             generation,
             occupied: true,
             owner,
+            priority,
         };
 
         Some(RawHandle(key))
+    }
+
+    /// Evict an entire slot to free it for a new allocation.
+    ///
+    /// Eligible slots are those whose **max entry priority** is strictly below
+    /// `requester_priority`. Among eligible slots, the one with the lowest
+    /// refcount is chosen (least collateral damage). All map entries pointing
+    /// to the chosen slot are released, dropping the value and bumping the
+    /// generation.
+    ///
+    /// Returns the freed slot index, or `None` if no slot is evictable.
+    fn evict_slot(&mut self, requester_priority: i8) -> Option<usize> {
+        // Pass 1: for each occupied slot, compute max priority across its
+        // map entries. Only consider slots where max_priority < requester.
+        let mut best: Option<(u8, i8, u16)> = None; // (slot_idx, max_priority, refcount)
+        for i in 0..N {
+            if self.slots[i].value.is_none() {
+                continue;
+            }
+            let slot_idx = i as u8;
+            let mut max_prio = i8::MIN;
+            for j in 0..N {
+                if self.map[j].occupied && self.map[j].slot == slot_idx
+                    && self.map[j].generation == self.slots[i].generation
+                {
+                    if self.map[j].priority > max_prio {
+                        max_prio = self.map[j].priority;
+                    }
+                }
+            }
+            if max_prio >= requester_priority {
+                continue;
+            }
+            let refcount = self.slots[i].refcount;
+            let dominated = match best {
+                None => true,
+                Some((_, bp, br)) => {
+                    // Prefer lower refcount (less damage); break ties by
+                    // lower max priority (easier to justify eviction).
+                    refcount < br || (refcount == br && max_prio < bp)
+                }
+            };
+            if dominated {
+                best = Some((slot_idx, max_prio, refcount));
+            }
+        }
+        let (victim_slot, _, _) = best?;
+
+        // Pass 2: release all map entries pointing to the victim slot.
+        for i in 0..N {
+            if self.map[i].occupied && self.map[i].slot == victim_slot
+                && self.map[i].generation == self.slots[victim_slot as usize].generation
+            {
+                self.release_entry(i);
+            }
+        }
+
+        // The slot must now be free.
+        debug_assert!(self.slots[victim_slot as usize].value.is_none());
+        Some(victim_slot as usize)
+    }
+
+    /// Find the map index of the lowest-priority occupied entry whose priority
+    /// is strictly less than `requester_priority`. Returns `None` if no such
+    /// entry exists (all entries are >= requester priority).
+    ///
+    /// Used by `clone_handle` which only needs a free map entry, not a free slot.
+    /// `exclude_slot` prevents eviction of entries pointing to a specific slot
+    /// (used to protect the source slot during clone).
+    fn find_eviction_victim(
+        &self,
+        requester_priority: i8,
+        exclude_slot: Option<(u8, u32)>,
+    ) -> Option<usize> {
+        let mut best: Option<(usize, i8)> = None;
+        for i in 0..N {
+            if self.map[i].occupied {
+                // Skip entries pointing to the excluded slot.
+                if let Some((slot, generation)) = exclude_slot {
+                    if self.map[i].slot == slot && self.map[i].generation == generation {
+                        continue;
+                    }
+                }
+                let p = self.map[i].priority;
+                if p < requester_priority {
+                    match best {
+                        None => best = Some((i, p)),
+                        Some((_, best_p)) if p < best_p => best = Some((i, p)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        best.map(|(idx, _)| idx)
     }
 
     fn lookup(&self, handle: RawHandle) -> Option<usize> {
@@ -187,6 +301,7 @@ impl<T, const N: usize> Arena<T, N> {
         handle: RawHandle,
         current_owner: u16,
         new_owner: u16,
+        new_priority: i8,
     ) -> bool {
         if let Some(entry) = self
             .map
@@ -194,6 +309,7 @@ impl<T, const N: usize> Arena<T, N> {
             .find(|e| e.occupied && e.key == handle.0 && e.owner == current_owner)
         {
             entry.owner = new_owner;
+            entry.priority = new_priority;
             true
         } else {
             false
@@ -207,6 +323,7 @@ impl<T, const N: usize> Arena<T, N> {
         handle: RawHandle,
         owner: u16,
         new_owner: u16,
+        priority: i8,
     ) -> Result<RawHandle, CloneError> {
         // Find source entry — only if the caller owns it.
         let (slot_idx, generation) = {
@@ -229,12 +346,20 @@ impl<T, const N: usize> Arena<T, N> {
             return Err(CloneError::ArenaFull);
         }
 
-        // Find free map entry.
-        let map_idx = self
-            .map
-            .iter()
-            .position(|e| !e.occupied)
-            .ok_or(CloneError::ArenaFull)?;
+        // Find free map entry, evicting a lower-priority entry if needed.
+        let map_idx = match self.map.iter().position(|e| !e.occupied) {
+            Some(idx) => idx,
+            None => {
+                let victim = self
+                    .find_eviction_victim(priority, Some((slot_idx, generation)))
+                    .ok_or(CloneError::ArenaFull)?;
+                self.release_entry(victim);
+                self.map
+                    .iter()
+                    .position(|e| !e.occupied)
+                    .expect("ipc: arena has no free map entry after eviction")
+            }
+        };
 
         // Increment refcount (overflow checked above).
         self.slots[slot_idx as usize].refcount += 1;
@@ -246,6 +371,7 @@ impl<T, const N: usize> Arena<T, N> {
             generation,
             occupied: true,
             owner: new_owner,
+            priority,
         };
 
         Ok(RawHandle(key))
@@ -293,8 +419,8 @@ impl<T, const N: usize> SharedArena<T, N> {
         self.arena().get_mut_owned(handle, owner)
     }
 
-    pub fn alloc(&self, value: T, owner: u16) -> Option<RawHandle> {
-        self.arena().alloc(value, owner)
+    pub fn alloc(&self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+        self.arena().alloc(value, owner, priority)
     }
 
     pub fn remove(&self, handle: RawHandle) -> Option<T> {
@@ -314,8 +440,9 @@ impl<T, const N: usize> SharedArena<T, N> {
         handle: RawHandle,
         current_owner: u16,
         new_owner: u16,
+        new_priority: i8,
     ) -> bool {
-        self.arena().transfer(handle, current_owner, new_owner)
+        self.arena().transfer(handle, current_owner, new_owner, new_priority)
     }
 
     pub fn clone_handle(
@@ -323,7 +450,8 @@ impl<T, const N: usize> SharedArena<T, N> {
         handle: RawHandle,
         owner: u16,
         new_owner: u16,
+        priority: i8,
     ) -> Result<RawHandle, CloneError> {
-        self.arena().clone_handle(handle, owner, new_owner)
+        self.arena().clone_handle(handle, owner, new_owner, priority)
     }
 }

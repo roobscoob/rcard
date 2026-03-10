@@ -7,6 +7,7 @@ mod codegen_client;
 mod codegen_server;
 mod parse;
 mod resolve_alloc;
+mod resolve_priority;
 mod util;
 
 use codegen_client::{gen_client, gen_dyn_client};
@@ -242,7 +243,7 @@ pub fn server(input: TokenStream) -> TokenStream {
 
         dispatcher_decls.push(quote! {
             let mut #disp_var = #wiring_macro!(
-                &#arena_var;
+                &#arena_var, __ipc_priority_for;
                 #(#arena_kvs),*
             );
         });
@@ -275,8 +276,13 @@ pub fn server(input: TokenStream) -> TokenStream {
         quote! { __server.run(&mut __buf) }
     };
 
+    // Generate __ipc_priority_for function from app.priorities.json
+    let priority_fn = gen_priority_fn();
+
     let output = quote! {
         {
+            #priority_fn
+
             #(#arena_decls)*
             #(#dispatcher_decls)*
 
@@ -288,6 +294,41 @@ pub fn server(input: TokenStream) -> TokenStream {
     };
 
     output.into()
+}
+
+/// Generate a `__ipc_priority_for(sender_index: u16) -> i8` function
+/// by reading `.work/app.priorities.json` and `HUBRIS_TASKS` at compile time.
+fn gen_priority_fn() -> proc_macro2::TokenStream {
+    match resolve_priority::resolve() {
+        Ok(entries) if !entries.is_empty() => {
+            let arms: Vec<proc_macro2::TokenStream> = entries
+                .iter()
+                .map(|e| {
+                    let idx = e.task_index as u16;
+                    let prio = e.priority as i8;
+                    let comment = format!(" // {}", e.task_name);
+                    let comment_ident = proc_macro2::Literal::string(&comment);
+                    // We can't emit comments in quote!, so just emit the match arm
+                    let _ = comment_ident;
+                    quote! { #idx => #prio }
+                })
+                .collect();
+            quote! {
+                fn __ipc_priority_for(sender_index: u16) -> i8 {
+                    match sender_index {
+                        #(#arms,)*
+                        _ => 0,
+                    }
+                }
+            }
+        }
+        _ => {
+            // No priorities file or no entries — default everything to 0
+            quote! {
+                fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

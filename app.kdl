@@ -97,7 +97,7 @@ task "sysmodule_log" {
     workspace-crate "sysmodule_log"
     stack-size (KiB)4
     priority (workgroup)"core-sysmodule"
-    uses-sysmodule "usart"
+    uses-sysmodule "usart" { with-priority 0; }
     uses-sysmodule "time"
     uses-sysmodule "reactor"
     pushes-notification "logs"
@@ -114,15 +114,15 @@ task "sysmodule_display" {
     stack-size (KiB)2
     priority (workgroup)"sysmodule"
     uses-peripheral "lcdc"
-    uses-sysmodule "log"
+    uses-sysmodule "log" { with-priority 0; }
 }
 
 task "sysmodule_compositor" {
     workspace-crate "sysmodule_compositor"
     stack-size (KiB)2
     priority (workgroup)"sysmodule"
-    uses-sysmodule "display"
-    uses-sysmodule "log"
+    uses-sysmodule "display" { with-priority 0; }
+    uses-sysmodule "log" { with-priority 0; }
     uses-allocation "frame_buffers" { read; write; }
 }
 
@@ -131,23 +131,23 @@ task "sysmodule_sdmmc" {
     stack-size (KiB)4
     priority (workgroup)"sysmodule"
     uses-peripheral "sdmmc1"
-    uses-sysmodule "log"
+    uses-sysmodule "log" { with-priority 0; }
 }
 
 task "sysmodule_storage" {
     workspace-crate "sysmodule_storage"
     stack-size (KiB)4
     priority (workgroup)"sysmodule"
-    uses-sysmodule "sdmmc"
+    uses-sysmodule "sdmmc" { with-priority 0; }
     peer-sysmodule "fs"
-    uses-sysmodule "log"
+    uses-sysmodule "log" { with-priority 0; }
 }
 
 task "sysmodule_log_sink_storage" {
     workspace-crate "sysmodule_log_sink_storage"
     stack-size (KiB)4
     priority (workgroup)"sysmodule"
-    uses-sysmodule "log"
+    uses-sysmodule "log" { with-priority 0; }
     uses-partition "logs"
     uses-notification "logs"
 }
@@ -156,16 +156,16 @@ task "sysmodule_fs" {
     workspace-crate "sysmodule_fs"
     stack-size (KiB)32
     priority (workgroup)"sysmodule"
-    uses-sysmodule "storage"
-    uses-sysmodule "log"
+    uses-sysmodule "storage" { with-priority 0; }
+    uses-sysmodule "log" { with-priority 0; }
 }
 
 task "fob" {
     workspace-crate "fob"
     stack-size (KiB)8
     priority (workgroup)"app"
-    uses-sysmodule "display"
-    uses-sysmodule "log"
-    uses-sysmodule "storage"
-    uses-sysmodule "fs"
+    uses-sysmodule "display" { with-priority 0; }
+    uses-sysmodule "log" { with-priority -1; }
+    uses-sysmodule "storage" { with-priority 0; }
+    uses-sysmodule "fs" { with-priority 0; }
 }
