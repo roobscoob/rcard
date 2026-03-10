@@ -26,8 +26,6 @@ pub enum Error<E = ()> {
     ServerDied,
     /// The server's resource arena is full; could not allocate.
     ArenaFull,
-    /// The handle is stale or invalid — the resource was already freed.
-    InvalidHandle,
     /// Server died; reconnect attempt ran the constructor, which returned `Err(e)`.
     ReconstructionFailed(E),
     /// Server died; reconnect attempt ran the constructor, which returned `None`.
@@ -47,12 +45,21 @@ impl Error {
         match self {
             Error::ServerDied => Error::ServerDied,
             Error::ArenaFull => Error::ArenaFull,
-            Error::InvalidHandle => Error::InvalidHandle,
             Error::ReconstructionReturnedNone => Error::ReconstructionReturnedNone,
             Error::ReconstructionFailed(()) => Error::ReconstructionReturnedNone,
         }
     }
 }
+
+/// `ResponseCode` sent by the server when a client message is malformed
+/// (bad size, bad contents, or bad leases, or unknown kind byte).
+/// The client's generated code panics on any non-SUCCESS response code.
+pub const MALFORMED_MESSAGE: userlib::ResponseCode = userlib::ResponseCode(1);
+
+/// `ResponseCode` sent by the server when a client uses an invalid handle
+/// (stale, wrong owner, or already freed). The client's generated code
+/// panics on any non-SUCCESS response code.
+pub const INVALID_HANDLE: userlib::ResponseCode = userlib::ResponseCode(2);
 
 mod arena;
 mod dyn_handle;

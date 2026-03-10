@@ -180,18 +180,20 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
                 Some(Err(e)) => {
                     #[cfg(feature = "dangerously_enable_uart3_debugging")]
                     { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc DISPATCH ERR k=0x{kind:02x} m=0x{method:02x}]\n"); }
-                    panic!(
-                        "ipc::Server: dispatch error for kind=0x{:02X} method=0x{:02X}: {:?}",
-                        kind, method, e,
-                    );
+                    // The client sent a malformed message (bad size, bad
+                    // contents, or bad leases). Reply with non-SUCCESS so the
+                    // client's generated panic handler fires — its panic handler
+                    // will log and/or restart the task. The server continues.
+                    let _ = e;
+                    userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
                 }
                 None => {
                     #[cfg(feature = "dangerously_enable_uart3_debugging")]
                     { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc NO DISPATCHER k=0x{kind:02x}]\n"); }
-                    panic!(
-                        "ipc::Server: no dispatcher for kind=0x{:02X} (method=0x{:02X})",
-                        kind, method,
-                    );
+                    // Client sent a kind byte we have no dispatcher for —
+                    // malformed message. Same treatment as bad contents:
+                    // reply non-SUCCESS to fire the client's panic handler.
+                    userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
                 }
             }
         }

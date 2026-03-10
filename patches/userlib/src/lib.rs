@@ -296,7 +296,7 @@ struct AbiLease {
 /// Response code returned from most syscalls.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct ResponseCode(u32);
+pub struct ResponseCode(pub u32);
 
 impl ResponseCode {
     /// The `ResponseCode` used to indicate success.
