@@ -15,7 +15,6 @@ struct HandleEntry {
     generation: u32,
     occupied: bool,
     owner: u16,
-    parent: Option<RawHandle>,
 }
 
 struct Slot<T> {
@@ -53,7 +52,6 @@ impl<T, const N: usize> Arena<T, N> {
         generation: 0,
         occupied: false,
         owner: 0,
-        parent: None,
     };
 
     pub const fn new(kind: u8) -> Self {
@@ -77,26 +75,6 @@ impl<T, const N: usize> Arena<T, N> {
 
     /// Allocate a new slot, returning a handle to it.
     pub fn alloc(&mut self, value: T, owner: u16) -> Option<RawHandle> {
-        self.alloc_inner(value, owner, None)
-    }
-
-    /// Allocate a new slot with a parent handle reference.
-    /// When the parent is destroyed, `remove_by_parent` can cascade-delete children.
-    pub fn alloc_with_parent(
-        &mut self,
-        value: T,
-        owner: u16,
-        parent: RawHandle,
-    ) -> Option<RawHandle> {
-        self.alloc_inner(value, owner, Some(parent))
-    }
-
-    fn alloc_inner(
-        &mut self,
-        value: T,
-        owner: u16,
-        parent: Option<RawHandle>,
-    ) -> Option<RawHandle> {
         let slot_idx = self.slots.iter().position(|s| s.value.is_none())?;
         let map_idx = self.map.iter().position(|e| !e.occupied)?;
 
@@ -112,7 +90,6 @@ impl<T, const N: usize> Arena<T, N> {
             generation,
             occupied: true,
             owner,
-            parent,
         };
 
         Some(RawHandle(key))
@@ -195,13 +172,10 @@ impl<T, const N: usize> Arena<T, N> {
 
     /// Remove all resources owned by the given task index.
     /// Drops each removed value only when its refcount hits zero.
-    /// Cascades: also removes children of each removed handle.
     pub fn remove_by_owner(&mut self, task_index: u16) {
         for i in 0..N {
             if self.map[i].occupied && self.map[i].owner == task_index {
-                let handle = RawHandle(self.map[i].key);
                 self.release_entry(i);
-                self.remove_by_parent(handle);
             }
         }
     }
@@ -235,13 +209,13 @@ impl<T, const N: usize> Arena<T, N> {
         new_owner: u16,
     ) -> Result<RawHandle, CloneError> {
         // Find source entry — only if the caller owns it.
-        let (slot_idx, generation, parent) = {
+        let (slot_idx, generation) = {
             let src = self
                 .map
                 .iter()
                 .find(|e| e.occupied && e.key == handle.0 && e.owner == owner)
                 .ok_or(CloneError::InvalidHandle)?;
-            (src.slot, src.generation, src.parent)
+            (src.slot, src.generation)
         };
 
         // Verify slot is valid.
@@ -272,45 +246,11 @@ impl<T, const N: usize> Arena<T, N> {
             generation,
             occupied: true,
             owner: new_owner,
-            parent,
         };
 
         Ok(RawHandle(key))
     }
 
-    /// Remove all entries whose parent matches the given handle.
-    /// Cascades: children of removed entries are also removed.
-    /// Values are dropped when their refcount hits zero.
-    ///
-    /// Uses an iterative approach to avoid stack overflow on deep hierarchies.
-    pub fn remove_by_parent(&mut self, parent: RawHandle) {
-        // Pending parents whose children need removal. N entries is the
-        // theoretical max since each entry can be a parent at most once.
-        let mut pending = [RawHandle(0); N];
-        let mut pending_len = 1;
-        pending[0] = parent;
-
-        while pending_len > 0 {
-            pending_len -= 1;
-            let current_parent = pending[pending_len];
-
-            for i in 0..N {
-                if self.map[i].occupied {
-                    if let Some(p) = self.map[i].parent {
-                        if p == current_parent {
-                            let child = RawHandle(self.map[i].key);
-                            self.release_entry(i);
-                            // Queue this child as a parent for cascade.
-                            if pending_len < N {
-                                pending[pending_len] = child;
-                                pending_len += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Shared arena with interior mutability for single-threaded Hubris tasks.
@@ -357,15 +297,6 @@ impl<T, const N: usize> SharedArena<T, N> {
         self.arena().alloc(value, owner)
     }
 
-    pub fn alloc_with_parent(
-        &self,
-        value: T,
-        owner: u16,
-        parent: RawHandle,
-    ) -> Option<RawHandle> {
-        self.arena().alloc_with_parent(value, owner, parent)
-    }
-
     pub fn remove(&self, handle: RawHandle) -> Option<T> {
         self.arena().remove(handle)
     }
@@ -376,10 +307,6 @@ impl<T, const N: usize> SharedArena<T, N> {
 
     pub fn remove_by_owner(&self, task_index: u16) {
         self.arena().remove_by_owner(task_index);
-    }
-
-    pub fn remove_by_parent(&self, parent: RawHandle) {
-        self.arena().remove_by_parent(parent);
     }
 
     pub fn transfer(
