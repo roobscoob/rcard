@@ -40,7 +40,7 @@ pub fn gen_client(
         .collect();
 
     // Generate constructor enum variants (store non-lease, non-handle params).
-    let ctor_variants: Vec<TokenStream2> = constructors
+    let _ctor_variants: Vec<TokenStream2> = constructors
         .iter()
         .map(|m| {
             let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));

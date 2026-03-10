@@ -191,8 +191,8 @@ impl<T, const N: usize> Arena<T, N> {
         for i in 0..N {
             if self.map[i].occupied {
                 // Skip entries pointing to the excluded slot.
-                if let Some((slot, gen)) = exclude_slot {
-                    if self.map[i].slot == slot && self.map[i].generation == gen {
+                if let Some((slot, generation)) = exclude_slot {
+                    if self.map[i].slot == slot && self.map[i].generation == generation {
                         continue;
                     }
                 }
