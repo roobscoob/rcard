@@ -274,12 +274,20 @@ impl<T, const N: usize> Arena<T, N> {
             return Err(CloneError::ArenaFull);
         }
 
-        // Find free map entry.
-        let map_idx = self
-            .map
-            .iter()
-            .position(|e| !e.occupied)
-            .ok_or(CloneError::ArenaFull)?;
+        // Find free map entry, evicting a lower-priority entry if needed.
+        let map_idx = match self.map.iter().position(|e| !e.occupied) {
+            Some(idx) => idx,
+            None => {
+                let victim = self
+                    .find_eviction_victim(priority)
+                    .ok_or(CloneError::ArenaFull)?;
+                self.release_entry(victim);
+                self.map
+                    .iter()
+                    .position(|e| !e.occupied)
+                    .expect("ipc: arena has no free map entry after eviction")
+            }
+        };
 
         // Increment refcount (overflow checked above).
         self.slots[slot_idx as usize].refcount += 1;
