@@ -180,10 +180,22 @@ impl<T, const N: usize> Arena<T, N> {
     /// entry exists (all entries are >= requester priority).
     ///
     /// Used by `clone_handle` which only needs a free map entry, not a free slot.
-    fn find_eviction_victim(&self, requester_priority: i8) -> Option<usize> {
+    /// `exclude_slot` prevents eviction of entries pointing to a specific slot
+    /// (used to protect the source slot during clone).
+    fn find_eviction_victim(
+        &self,
+        requester_priority: i8,
+        exclude_slot: Option<(u8, u32)>,
+    ) -> Option<usize> {
         let mut best: Option<(usize, i8)> = None;
         for i in 0..N {
             if self.map[i].occupied {
+                // Skip entries pointing to the excluded slot.
+                if let Some((slot, gen)) = exclude_slot {
+                    if self.map[i].slot == slot && self.map[i].generation == gen {
+                        continue;
+                    }
+                }
                 let p = self.map[i].priority;
                 if p < requester_priority {
                     match best {
@@ -337,7 +349,7 @@ impl<T, const N: usize> Arena<T, N> {
             Some(idx) => idx,
             None => {
                 let victim = self
-                    .find_eviction_victim(priority)
+                    .find_eviction_victim(priority, Some((slot_idx, generation)))
                     .ok_or(CloneError::ArenaFull)?;
                 self.release_entry(victim);
                 self.map
