@@ -81,20 +81,16 @@ impl<T, const N: usize> Arena<T, N> {
     /// lowest-priority occupied entry, that entry is evicted (its value is
     /// dropped and its generation is bumped) to make room.
     pub fn alloc(&mut self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
-        // Find a free slot, or evict the lowest-priority entry to free one.
+        // Find a free slot, or evict an entire slot to free one.
         let slot_idx = match self.slots.iter().position(|s| s.value.is_none()) {
             Some(idx) => idx,
-            None => {
-                let victim = self.find_eviction_victim(priority)?;
-                self.release_entry(victim);
-                // The released slot should now be free.
-                self.slots.iter().position(|s| s.value.is_none())?
-            }
+            None => self.evict_slot(priority)?,
         };
 
-        // release_entry always marks the victim's map entry as unoccupied,
-        // so a free map entry must exist. If it doesn't, the arena is in
-        // an inconsistent state.
+        // evict_slot releases all map entries for the victim slot, so at
+        // least one free map entry must exist. If none existed before
+        // eviction (no free slots implies no free map entries for
+        // non-refcounted resources), the eviction freed at least one.
         let map_idx = self
             .map
             .iter()
@@ -119,9 +115,71 @@ impl<T, const N: usize> Arena<T, N> {
         Some(RawHandle(key))
     }
 
+    /// Evict an entire slot to free it for a new allocation.
+    ///
+    /// Eligible slots are those whose **max entry priority** is strictly below
+    /// `requester_priority`. Among eligible slots, the one with the lowest
+    /// refcount is chosen (least collateral damage). All map entries pointing
+    /// to the chosen slot are released, dropping the value and bumping the
+    /// generation.
+    ///
+    /// Returns the freed slot index, or `None` if no slot is evictable.
+    fn evict_slot(&mut self, requester_priority: i8) -> Option<usize> {
+        // Pass 1: for each occupied slot, compute max priority across its
+        // map entries. Only consider slots where max_priority < requester.
+        let mut best: Option<(u8, i8, u16)> = None; // (slot_idx, max_priority, refcount)
+        for i in 0..N {
+            if self.slots[i].value.is_none() {
+                continue;
+            }
+            let slot_idx = i as u8;
+            let mut max_prio = i8::MIN;
+            for j in 0..N {
+                if self.map[j].occupied && self.map[j].slot == slot_idx
+                    && self.map[j].generation == self.slots[i].generation
+                {
+                    if self.map[j].priority > max_prio {
+                        max_prio = self.map[j].priority;
+                    }
+                }
+            }
+            if max_prio >= requester_priority {
+                continue;
+            }
+            let refcount = self.slots[i].refcount;
+            let dominated = match best {
+                None => true,
+                Some((_, bp, br)) => {
+                    // Prefer lower refcount (less damage); break ties by
+                    // lower max priority (easier to justify eviction).
+                    refcount < br || (refcount == br && max_prio < bp)
+                }
+            };
+            if dominated {
+                best = Some((slot_idx, max_prio, refcount));
+            }
+        }
+        let (victim_slot, _, _) = best?;
+
+        // Pass 2: release all map entries pointing to the victim slot.
+        for i in 0..N {
+            if self.map[i].occupied && self.map[i].slot == victim_slot
+                && self.map[i].generation == self.slots[victim_slot as usize].generation
+            {
+                self.release_entry(i);
+            }
+        }
+
+        // The slot must now be free.
+        debug_assert!(self.slots[victim_slot as usize].value.is_none());
+        Some(victim_slot as usize)
+    }
+
     /// Find the map index of the lowest-priority occupied entry whose priority
     /// is strictly less than `requester_priority`. Returns `None` if no such
     /// entry exists (all entries are >= requester priority).
+    ///
+    /// Used by `clone_handle` which only needs a free map entry, not a free slot.
     fn find_eviction_victim(&self, requester_priority: i8) -> Option<usize> {
         let mut best: Option<(usize, i8)> = None;
         for i in 0..N {
