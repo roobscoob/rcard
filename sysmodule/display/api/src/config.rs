@@ -1,5 +1,7 @@
 use crate::DisplayOpenError;
 
+use ipc::errors::ConstructorError;
+
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
 pub struct DisplayConfiguration {
     /// Display width in pixels. Fixed by the display model (e.g. 128 for
@@ -55,7 +57,8 @@ impl DisplayConfiguration {
 
     pub fn open<S: super::display_client::DisplayServer>(
         self,
-    ) -> Result<Result<super::display_client::DisplayHandle<S>, DisplayOpenError>, ipc::Error> {
+    ) -> Result<Result<super::display_client::DisplayHandle<S>, DisplayOpenError>, ConstructorError>
+    {
         super::display_client::DisplayHandle::<S>::open(self)
     }
 }

@@ -6,7 +6,6 @@
 /// A (task_index, priority) pair for a single client.
 pub struct PriorityEntry {
     pub task_index: usize,
-    pub task_name: String,
     pub priority: i64,
 }
 
@@ -45,7 +44,6 @@ pub fn resolve() -> Result<Vec<PriorityEntry>, String> {
             if let Some(idx) = task_names.iter().position(|t| t == client_name) {
                 entries.push(PriorityEntry {
                     task_index: idx,
-                    task_name: client_name.clone(),
                     priority,
                 });
             }

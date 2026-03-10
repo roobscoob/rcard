@@ -1,12 +1,14 @@
 use crate::RawHandle;
 
-/// Error returned by `Arena::clone_handle`.
+/// Error returned by `Arena::clone_handle` and `Cloneable::clone_for`.
 #[derive(Debug)]
 pub enum CloneError {
     /// The source handle doesn't exist or isn't owned by the caller.
     InvalidHandle,
     /// The map has no free entries or the refcount would overflow.
     ArenaFull,
+    /// The server hosting the handle died (IPC failed).
+    ServerDied,
 }
 
 struct HandleEntry {
@@ -16,6 +18,9 @@ struct HandleEntry {
     occupied: bool,
     owner: u16,
     priority: i8,
+    /// If `Some(target)`, this handle is frozen mid-transfer (2PC pending state).
+    /// `get`/`get_mut` reject pending entries. Eviction still applies normally.
+    pending_to: Option<u16>,
 }
 
 struct Slot<T> {
@@ -54,6 +59,7 @@ impl<T, const N: usize> Arena<T, N> {
         occupied: false,
         owner: 0,
         priority: 0,
+        pending_to: None,
     };
 
     pub const fn new(kind: u8) -> Self {
@@ -110,6 +116,7 @@ impl<T, const N: usize> Arena<T, N> {
             occupied: true,
             owner,
             priority,
+            pending_to: None,
         };
 
         Some(RawHandle(key))
@@ -210,7 +217,7 @@ impl<T, const N: usize> Arena<T, N> {
     }
 
     fn lookup(&self, handle: RawHandle) -> Option<usize> {
-        let entry = self.map.iter().find(|e| e.occupied && e.key == handle.0)?;
+        let entry = self.map.iter().find(|e| e.occupied && e.key == handle.0 && e.pending_to.is_none())?;
         let slot = &self.slots[entry.slot as usize];
         if slot.generation != entry.generation || slot.value.is_none() {
             return None;
@@ -219,7 +226,7 @@ impl<T, const N: usize> Arena<T, N> {
     }
 
     fn lookup_owned(&self, handle: RawHandle, owner: u16) -> Option<usize> {
-        let entry = self.map.iter().find(|e| e.occupied && e.key == handle.0 && e.owner == owner)?;
+        let entry = self.map.iter().find(|e| e.occupied && e.key == handle.0 && e.owner == owner && e.pending_to.is_none())?;
         let slot = &self.slots[entry.slot as usize];
         if slot.generation != entry.generation || slot.value.is_none() {
             return None;
@@ -250,6 +257,7 @@ impl<T, const N: usize> Arena<T, N> {
         let slot_idx = self.map[entry_idx].slot as usize;
         let entry_gen = self.map[entry_idx].generation;
         self.map[entry_idx].occupied = false;
+        self.map[entry_idx].pending_to = None;
 
         let slot = &mut self.slots[slot_idx];
         if slot.generation != entry_gen || slot.value.is_none() {
@@ -294,28 +302,6 @@ impl<T, const N: usize> Arena<T, N> {
         }
     }
 
-    /// Transfer ownership of a handle to a new task.
-    /// Returns `false` if the handle doesn't exist or isn't owned by `current_owner`.
-    pub fn transfer(
-        &mut self,
-        handle: RawHandle,
-        current_owner: u16,
-        new_owner: u16,
-        new_priority: i8,
-    ) -> bool {
-        if let Some(entry) = self
-            .map
-            .iter_mut()
-            .find(|e| e.occupied && e.key == handle.0 && e.owner == current_owner)
-        {
-            entry.owner = new_owner;
-            entry.priority = new_priority;
-            true
-        } else {
-            false
-        }
-    }
-
     /// Clone a handle for a new owner. Creates a new map entry pointing to the
     /// same slot and increments the slot's refcount.
     pub fn clone_handle(
@@ -325,12 +311,12 @@ impl<T, const N: usize> Arena<T, N> {
         new_owner: u16,
         priority: i8,
     ) -> Result<RawHandle, CloneError> {
-        // Find source entry — only if the caller owns it.
+        // Find source entry — only if the caller owns it and not mid-2PC.
         let (slot_idx, generation) = {
             let src = self
                 .map
                 .iter()
-                .find(|e| e.occupied && e.key == handle.0 && e.owner == owner)
+                .find(|e| e.occupied && e.key == handle.0 && e.owner == owner && e.pending_to.is_none())
                 .ok_or(CloneError::InvalidHandle)?;
             (src.slot, src.generation)
         };
@@ -372,9 +358,92 @@ impl<T, const N: usize> Arena<T, N> {
             occupied: true,
             owner: new_owner,
             priority,
+            pending_to: None,
         };
 
         Ok(RawHandle(key))
+    }
+
+    // -----------------------------------------------------------------------
+    // Two-phase commit (2PC) transfer primitives
+    // -----------------------------------------------------------------------
+
+    /// Phase 1: freeze a handle for transfer to `target`.
+    /// Returns `false` if the handle doesn't exist, isn't owned by `owner`,
+    /// or is already pending transfer.
+    pub fn prepare_transfer(&mut self, handle: RawHandle, owner: u16, target: u16) -> bool {
+        if let Some(entry) = self.map.iter_mut().find(|e| {
+            e.occupied && e.key == handle.0 && e.owner == owner && e.pending_to.is_none()
+        }) {
+            let slot = &self.slots[entry.slot as usize];
+            if slot.generation != entry.generation || slot.value.is_none() {
+                return false;
+            }
+            entry.pending_to = Some(target);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cancel a pending transfer, unfreezing the handle.
+    /// Returns `false` if the handle isn't found or isn't pending.
+    pub fn cancel_transfer(&mut self, handle: RawHandle, owner: u16) -> bool {
+        if let Some(entry) = self.map.iter_mut().find(|e| {
+            e.occupied && e.key == handle.0 && e.owner == owner && e.pending_to.is_some()
+        }) {
+            entry.pending_to = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Phase 2: complete a transfer — the acquirer takes ownership.
+    /// Only succeeds if `pending_to == Some(acquirer)`.
+    pub fn acquire(&mut self, handle: RawHandle, acquirer: u16, new_priority: i8) -> bool {
+        if let Some(entry) = self.map.iter_mut().find(|e| {
+            e.occupied && e.key == handle.0 && e.pending_to == Some(acquirer)
+        }) {
+            let slot = &self.slots[entry.slot as usize];
+            if slot.generation != entry.generation || slot.value.is_none() {
+                return false;
+            }
+            entry.owner = acquirer;
+            entry.priority = new_priority;
+            entry.pending_to = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop a handle if it exists and is owned by `owner`, even if pending.
+    /// Used for cleanup after a failed 2PC transfer. Does NOT use `lookup_owned`
+    /// (which rejects pending entries).
+    pub fn try_drop(&mut self, handle: RawHandle, owner: u16) -> bool {
+        if let Some(idx) = self.map.iter().position(|e| {
+            e.occupied && e.key == handle.0 && e.owner == owner
+        }) {
+            self.release_entry(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cancel all pending transfers targeting `target`.
+    /// Called when a target task dies — unfreezes any handles that were
+    /// prepared for transfer to it.
+    pub fn cancel_transfers_to(&mut self, target: u16) {
+        for i in 0..N {
+            if self.map[i].occupied && self.map[i].pending_to == Some(target) {
+                let slot = &self.slots[self.map[i].slot as usize];
+                if slot.generation == self.map[i].generation && slot.value.is_some() {
+                    self.map[i].pending_to = None;
+                }
+            }
+        }
     }
 
 }
@@ -435,16 +504,6 @@ impl<T, const N: usize> SharedArena<T, N> {
         self.arena().remove_by_owner(task_index);
     }
 
-    pub fn transfer(
-        &self,
-        handle: RawHandle,
-        current_owner: u16,
-        new_owner: u16,
-        new_priority: i8,
-    ) -> bool {
-        self.arena().transfer(handle, current_owner, new_owner, new_priority)
-    }
-
     pub fn clone_handle(
         &self,
         handle: RawHandle,
@@ -453,5 +512,25 @@ impl<T, const N: usize> SharedArena<T, N> {
         priority: i8,
     ) -> Result<RawHandle, CloneError> {
         self.arena().clone_handle(handle, owner, new_owner, priority)
+    }
+
+    pub fn prepare_transfer(&self, handle: RawHandle, owner: u16, target: u16) -> bool {
+        self.arena().prepare_transfer(handle, owner, target)
+    }
+
+    pub fn cancel_transfer(&self, handle: RawHandle, owner: u16) -> bool {
+        self.arena().cancel_transfer(handle, owner)
+    }
+
+    pub fn acquire(&self, handle: RawHandle, acquirer: u16, new_priority: i8) -> bool {
+        self.arena().acquire(handle, acquirer, new_priority)
+    }
+
+    pub fn try_drop(&self, handle: RawHandle, owner: u16) -> bool {
+        self.arena().try_drop(handle, owner)
+    }
+
+    pub fn cancel_transfers_to(&self, target: u16) {
+        self.arena().cancel_transfers_to(target);
     }
 }

@@ -14,7 +14,7 @@ use hubris_task_slots::SLOTS;
 use sysmodule_fs_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
-sysmodule_log_api::panic_handler!(Log);
+sysmodule_log_api::panic_handler!(to Log; cleanup StoragePartition);
 sysmodule_storage_api::bind_partition!(StoragePartition = SLOTS.sysmodule_storage);
 
 struct AutoMount {

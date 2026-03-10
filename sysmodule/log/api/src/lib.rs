@@ -147,19 +147,24 @@ pub trait Log {
     fn consume_since(since_id: u32, #[lease] buf: &mut [u8]) -> Result<u32, LogError>;
 }
 
-/// Initialize the global `log` logger backed by the IPC Log sysmodule.
-///
-/// Call this early in your task's `main`, after `bind!` has created the
-/// Log type alias:
+/// Install a `#[panic_handler]` that logs panics via the IPC Log sysmodule
+/// and optionally notifies servers to clean up handles before dying.
 ///
 /// ```ignore
-/// sysmodule_log_api::bind!(Log = SLOTS.sysmodule_log);
-/// sysmodule_log_api::init_logger!(Log);
+/// sysmodule_log_api::panic_handler!(to Log);
+/// sysmodule_log_api::panic_handler!(to Log ; cleanup Time, Reactor);
 /// ```
 #[cfg(feature = "logger")]
 #[macro_export]
 macro_rules! panic_handler {
+    // Backwards-compat: `panic_handler!(Log)` → no cleanup servers.
     ($Log:ty) => {
+        $crate::panic_handler!(to $Log ; cleanup);
+    };
+    (to $Log:ty) => {
+        $crate::panic_handler!(to $Log ; cleanup);
+    };
+    (to $Log:ty ; cleanup $($Server:ty),* $(,)?) => {
         #[panic_handler]
         fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
             use core::fmt::Write;
@@ -181,6 +186,8 @@ macro_rules! panic_handler {
             let mut w = $crate::LogWriter::<Backend>::new($crate::LogLevel::Panic);
             let _ = write!(w, "{}", info);
             w.finish();
+
+            ipc::notify_dead!($($Server),*);
 
             userlib::sys_panic(w.buffer())
         }

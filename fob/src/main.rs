@@ -6,7 +6,7 @@ use sysmodule_display_api::DisplayConfiguration;
 
 sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
-sysmodule_log_api::panic_handler!(Log);
+sysmodule_log_api::panic_handler!(to Log; cleanup Display, StoragePartition, Fs, FsFile);
 sysmodule_storage_api::bind_partition!(StoragePartition = SLOTS.sysmodule_storage);
 sysmodule_fs_api::bind_file_system!(Fs = SLOTS.sysmodule_fs);
 sysmodule_fs_api::bind_file!(FsFile = SLOTS.sysmodule_fs);
@@ -44,16 +44,11 @@ fn main() -> ! {
         core::str::from_utf8(&buf[..read as usize]).unwrap_or("<invalid utf8>")
     );
 
-    // Test that consume_since is rejected for non-subscribers.
-    let mut test_buf = [0u8; 64];
-    let result = Log::consume_since(0, &mut test_buf).unwrap();
-    result.unwrap(); // Should panic: fob is not a logs subscriber
-
     loop {
-        // log::info!("tick");
+        log::info!("tick");
 
-        // for _ in 0..100_000_000 {
-        //     core::hint::spin_loop();
-        // }
+        for _ in 0..100_000_000 {
+            core::hint::spin_loop();
+        }
     }
 }

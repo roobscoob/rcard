@@ -8,7 +8,7 @@ use once_cell::OnceCell;
 use sysmodule_storage_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
-sysmodule_log_api::panic_handler!(Log);
+sysmodule_log_api::panic_handler!(to Log; cleanup Sdmmc);
 sysmodule_sdmmc_api::bind_sdmmc!(Sdmmc = SLOTS.sysmodule_sdmmc);
 
 // ── Build-time partition config ─────────────────────────────────────

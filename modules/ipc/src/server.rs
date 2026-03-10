@@ -62,10 +62,11 @@ pub struct Server<'a, const MAX_RESOURCES: usize> {
     dispatchers: [Option<(u8, &'a mut dyn ResourceDispatch)>; MAX_RESOURCES],
     count: usize,
     clients: [ClientGen; crate::TASK_COUNT],
+    acl_fn: fn(u16) -> bool,
 }
 
 impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
-    pub fn new() -> Self {
+    pub fn new(acl_fn: fn(u16) -> bool) -> Self {
         Self {
             dispatchers: [const { None }; MAX_RESOURCES],
             count: 0,
@@ -76,6 +77,7 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
                     active: false,
                 }
             }; crate::TASK_COUNT],
+            acl_fn,
         }
     }
 
@@ -181,6 +183,11 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
     fn dispatch_message(&mut self, msg: &userlib::Message<'_>) {
         self.check_client_generation(msg.sender);
 
+        if !(self.acl_fn)(msg.sender.task_index()) {
+            userlib::sys_reply(msg.sender, crate::ACCESS_VIOLATION, &[]);
+            return;
+        }
+
         let (kind, method) = split_opcode(msg.operation);
 
         #[cfg(feature = "dangerously_enable_uart3_debugging")]
@@ -191,6 +198,19 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
                 "[ipc k=0x{kind:02x} m=0x{method:02x} from={:?} leases={}]\n",
                 msg.sender, msg.lease_count,
             );
+        }
+
+        // notify_dead: client is about to panic — clean up all its resources
+        // across every dispatcher. Kind byte is ignored.
+        if method == crate::handle::NOTIFY_DEAD_METHOD {
+            let task_index = msg.sender.task_index();
+            for entry in self.dispatchers.iter_mut() {
+                if let Some((_, d)) = entry.as_mut() {
+                    d.cleanup_client(task_index);
+                }
+            }
+            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
+            return;
         }
 
         let result = self.dispatchers.iter_mut().find_map(|entry| {

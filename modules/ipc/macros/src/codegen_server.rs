@@ -280,6 +280,7 @@ pub fn gen_dispatcher(
         pub struct #dispatcher_name<'a, T: #trait_bound, #(#peer_generic_defs),*> {
             arena: &'a ipc::SharedArena<T, #arena_size>,
             priority_fn: fn(u16) -> i8,
+            self_task_index: u16,
             #(#peer_fields,)*
         }
 
@@ -287,11 +288,13 @@ pub fn gen_dispatcher(
             pub fn new(
                 arena: &'a ipc::SharedArena<T, #arena_size>,
                 priority_fn: fn(u16) -> i8,
+                self_task_index: u16,
                 #(#peer_ctor_params,)*
             ) -> Self {
                 Self {
                     arena,
                     priority_fn,
+                    self_task_index,
                     #(#peer_ctor_inits,)*
                 }
             }
@@ -318,29 +321,6 @@ pub fn gen_dispatcher(
                     return Ok(());
                 }
 
-                // Handle ownership transfer.
-                if method_id == ipc::TRANSFER_METHOD {
-                    let Ok(msg_data) = &msg.data else {
-                        return Err(userlib::ReplyFaultReason::BadMessageSize);
-                    };
-                    let (args, _) = hubpack::deserialize::<(ipc::RawHandle, u16)>(msg_data)
-                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
-                    let (handle, new_owner) = args;
-                    let new_owner_priority = (self.priority_fn)(new_owner);
-                    let mut reply_buf = [0u8;
-                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                    let ok = self.arena.transfer(handle, sender_index, new_owner, new_owner_priority);
-                    let result: core::result::Result<(), ipc::Error> = if ok {
-                        Ok(())
-                    } else {
-                        Err(ipc::Error::HandleLost)
-                    };
-                    let n = hubpack::serialize(&mut reply_buf, &result)
-                        .expect("ipc: failed to serialize transfer reply");
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
-                    return Ok(());
-                }
-
                 // Handle clone (refcounted resources).
                 if method_id == ipc::CLONE_METHOD {
                     let Ok(msg_data) = &msg.data else {
@@ -355,6 +335,7 @@ pub fn gen_dispatcher(
                             Ok(new_handle) => Ok(new_handle),
                             Err(ipc::CloneError::InvalidHandle) => Err(ipc::Error::HandleLost),
                             Err(ipc::CloneError::ArenaFull) => Err(ipc::Error::ArenaFull),
+                            Err(ipc::CloneError::ServerDied) => unreachable!(),
                         };
                     let mut reply_buf = [0u8;
                         <core::result::Result<ipc::RawHandle, ipc::Error>
@@ -362,6 +343,73 @@ pub fn gen_dispatcher(
                     let n = hubpack::serialize(&mut reply_buf, &result)
                         .expect("ipc: failed to serialize clone reply");
                     userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                    return Ok(());
+                }
+
+                // 2PC: prepare_transfer — freeze handle for transfer to target.
+                if method_id == ipc::PREPARE_TRANSFER_METHOD {
+                    let Ok(msg_data) = &msg.data else {
+                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    };
+                    let (args, _) = hubpack::deserialize::<(ipc::RawHandle, u16)>(msg_data)
+                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                    let (handle, target) = args;
+                    let mut reply_buf = [0u8;
+                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+                    let result: core::result::Result<(), ipc::Error> =
+                        if self.arena.prepare_transfer(handle, sender_index, target) {
+                            Ok(())
+                        } else {
+                            Err(ipc::Error::HandleLost)
+                        };
+                    let n = hubpack::serialize(&mut reply_buf, &result)
+                        .expect("ipc: failed to serialize prepare_transfer reply");
+                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                    return Ok(());
+                }
+
+                // 2PC: cancel_transfer — unfreeze a pending handle.
+                if method_id == ipc::CANCEL_TRANSFER_METHOD {
+                    let Ok(msg_data) = &msg.data else {
+                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    };
+                    let ((handle,), _) = hubpack::deserialize::<(ipc::RawHandle,)>(msg_data)
+                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                    let _ = self.arena.cancel_transfer(handle, sender_index);
+                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
+                    return Ok(());
+                }
+
+                // 2PC: acquire — complete transfer, acquirer takes ownership.
+                if method_id == ipc::ACQUIRE_METHOD {
+                    let Ok(msg_data) = &msg.data else {
+                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    };
+                    let ((handle,), _) = hubpack::deserialize::<(ipc::RawHandle,)>(msg_data)
+                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                    let mut reply_buf = [0u8;
+                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+                    let result: core::result::Result<(), ipc::Error> =
+                        if self.arena.acquire(handle, sender_index, __priority) {
+                            Ok(())
+                        } else {
+                            Err(ipc::Error::TransferFailed)
+                        };
+                    let n = hubpack::serialize(&mut reply_buf, &result)
+                        .expect("ipc: failed to serialize acquire reply");
+                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                    return Ok(());
+                }
+
+                // 2PC: try_drop — cleanup after failed transfer.
+                if method_id == ipc::TRY_DROP_METHOD {
+                    let Ok(msg_data) = &msg.data else {
+                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    };
+                    let ((handle,), _) = hubpack::deserialize::<(ipc::RawHandle,)>(msg_data)
+                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                    let _ = self.arena.try_drop(handle, sender_index);
+                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
                     return Ok(());
                 }
 
@@ -391,6 +439,7 @@ pub fn gen_dispatcher(
 
             fn cleanup_client(&mut self, task_index: u16) {
                 self.arena.remove_by_owner(task_index);
+                self.arena.cancel_transfers_to(task_index);
             }
         }
     }
@@ -423,8 +472,8 @@ pub fn gen_wiring_macro(
             #[doc(hidden)]
             #[macro_export]
             macro_rules! #macro_name {
-                ($own_arena:expr, $priority_fn:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {
-                    $crate::#dispatcher_name::new($own_arena, $priority_fn)
+                ($own_arena:expr, $priority_fn:expr, $self_task_index:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {
+                    $crate::#dispatcher_name::new($own_arena, $priority_fn, $self_task_index)
                 };
             }
         }
@@ -440,15 +489,157 @@ pub fn gen_wiring_macro(
             #[doc(hidden)]
             #[macro_export]
             macro_rules! #macro_name {
-                ($own_arena:expr, $priority_fn:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {{
+                ($own_arena:expr, $priority_fn:expr, $self_task_index:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {{
                     macro_rules! __find {
                         $( ($all_name) => { $all_arena }; )*
                     }
-                    $crate::#dispatcher_name::new($own_arena, $priority_fn, #(#find_calls),*)
+                    $crate::#dispatcher_name::new($own_arena, $priority_fn, $self_task_index, #(#find_calls),*)
                 }};
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Acquire logic for #[handle(move)] params during dispatch
+// ---------------------------------------------------------------------------
+
+/// Generate acquire statements for move-handle params.
+/// For same-server handles (RawHandle), acquires directly from the arena.
+/// For cross-server handles (DynHandle / impl Trait), sends ACQUIRE_METHOD IPC.
+/// Returns (acquire_stmts, rollback_stmts) token streams.
+fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
+    let move_params: Vec<&ParsedParam> = m
+        .params
+        .iter()
+        .filter(|p| p.handle_mode == Some(HandleMode::Move))
+        .collect();
+
+    if move_params.is_empty() {
+        return (quote! {}, quote! {});
+    }
+
+    let mut acquire_stmts = Vec::new();
+    let mut acquired_names = Vec::new();
+
+    for (i, p) in move_params.iter().enumerate() {
+        let pname = &p.name;
+        let acquired_flag = quote::format_ident!("__acquired_{}", pname);
+
+        if p.impl_trait_name.is_some() {
+            // Cross-server: send ACQUIRE_METHOD IPC to source server
+            acquire_stmts.push(quote! {
+                let #acquired_flag = {
+                    let acquire_args: (ipc::RawHandle,) = (#pname.handle,);
+                    let mut __acq_argbuf = [0u8;
+                        <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
+                    let __acq_n = hubpack::serialize(&mut __acq_argbuf, &acquire_args)
+                        .expect("ipc: serialize acquire args");
+                    let __acq_opcode = ipc::opcode(#pname.kind, ipc::ACQUIRE_METHOD);
+                    let mut __acq_retbuf = [0u8;
+                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+                    let mut __acq_leases = [];
+                    match userlib::sys_send(
+                        #pname.task_id(),
+                        __acq_opcode,
+                        &__acq_argbuf[..__acq_n],
+                        &mut __acq_retbuf,
+                        &mut __acq_leases,
+                    ) {
+                        Ok((__acq_rc, __acq_len)) => {
+                            if __acq_rc == userlib::ResponseCode::SUCCESS {
+                                match hubpack::deserialize::<core::result::Result<(), ipc::Error>>(
+                                    &__acq_retbuf[..__acq_len],
+                                ) {
+                                    Ok((Ok(()), _)) => true,
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        Err(_) => false,
+                    }
+                };
+            });
+        } else {
+            // Same-server: acquire directly from our own arena
+            acquire_stmts.push(quote! {
+                let #acquired_flag = self.arena.acquire(#pname, self.self_task_index, __priority);
+            });
+        }
+
+        acquired_names.push((pname.clone(), acquired_flag, i));
+    }
+
+    // Build the combined acquire block with rollback on failure
+    let all_acquire = quote! { #(#acquire_stmts)* };
+
+    // Check all flags; if any failed, release all previously-acquired handles
+    // and reply with an error.
+    let flag_checks: Vec<TokenStream2> = acquired_names
+        .iter()
+        .enumerate()
+        .map(|(check_idx, (_pname, flag, _idx))| {
+            // Build rollback stmts for all handles acquired *before* this one
+            let rollback_stmts: Vec<TokenStream2> = acquired_names[..check_idx]
+                .iter()
+                .filter_map(|(prev_name, prev_flag, _)| {
+                    let prev_p = move_params.iter().find(|p| &p.name == prev_name).unwrap();
+                    if prev_p.impl_trait_name.is_some() {
+                        // Cross-server: we acquired ownership, so destroy it on the source
+                        Some(quote! {
+                            if #prev_flag {
+                                let __destroy_args: (ipc::RawHandle,) = (#prev_name.handle,);
+                                let mut __destroy_buf = [0u8;
+                                    <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
+                                let __destroy_n = hubpack::serialize(&mut __destroy_buf, &__destroy_args)
+                                    .expect("ipc: serialize destroy args");
+                                let __destroy_op = ipc::opcode(#prev_name.kind, ipc::IMPLICIT_DESTROY_METHOD);
+                                let mut __destroy_retbuf = [0u8; 0];
+                                let mut __destroy_leases = [];
+                                let _ = userlib::sys_send(
+                                    #prev_name.task_id(),
+                                    __destroy_op,
+                                    &__destroy_buf[..__destroy_n],
+                                    &mut __destroy_retbuf,
+                                    &mut __destroy_leases,
+                                );
+                            }
+                        })
+                    } else {
+                        Some(quote! {
+                            if #prev_flag {
+                                let _ = self.arena.remove_owned(#prev_name, self.self_task_index);
+                            }
+                        })
+                    }
+                })
+                .collect();
+            quote! {
+                if !#flag {
+                    // Release all previously acquired handles
+                    #(#rollback_stmts)*
+                    let mut __err_reply_buf = [0u8;
+                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+                    let __err_n = hubpack::serialize(
+                        &mut __err_reply_buf,
+                        &core::result::Result::<(), ipc::Error>::Err(ipc::Error::TransferFailed),
+                    ).expect("ipc: serialize TransferFailed");
+                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &__err_reply_buf[..__err_n]);
+                    return Ok(());
+                }
+            }
+        })
+        .collect();
+
+    let acquire_block = quote! {
+        #all_acquire
+        #(#flag_checks)*
+    };
+
+    // Rollback is empty since we handle it inline above
+    (acquire_block, quote! {})
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +692,7 @@ fn gen_dispatch_arm(
 
     let lease_bindings = gen_lease_bindings(&lease_params);
     let peer_resolution = gen_peer_resolution(m);
+    let (acquire_block, _) = gen_acquire_stmts(m);
     let call_args = gen_call_args(m);
 
     let method_name = &m.name;
@@ -581,6 +773,7 @@ fn gen_dispatch_arm(
                     #destructure
                     #(#lease_bindings)*
                     #(#peer_resolution)*
+                    #acquire_block
                     #ctor_body
                     Ok(())
                 }
@@ -598,6 +791,7 @@ fn gen_dispatch_arm(
                     #destructure
                     #(#lease_bindings)*
                     #(#peer_resolution)*
+                    #acquire_block
                     #handle_result
                     Ok(())
                 }
@@ -613,6 +807,7 @@ fn gen_dispatch_arm(
                     #deserialize
                     #destructure
                     #(#peer_resolution)*
+                    #acquire_block
                     #handle_result
                     Ok(())
                 }
@@ -630,6 +825,7 @@ fn gen_dispatch_arm(
                     #destructure
                     #(#lease_bindings)*
                     #(#peer_resolution)*
+                    #acquire_block
                     #static_reply
                     Ok(())
                 }

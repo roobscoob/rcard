@@ -98,8 +98,8 @@ task "sysmodule_log" {
     stack-size (KiB)4
     priority (workgroup)"core-sysmodule"
     uses-sysmodule "usart" { with-priority 0; }
-    uses-sysmodule "time"
-    uses-sysmodule "reactor"
+    uses-sysmodule "time" { with-priority 0; }
+    uses-sysmodule "reactor" { with-priority 0; }
     pushes-notification "logs"
 }
 
@@ -165,7 +165,7 @@ task "fob" {
     stack-size (KiB)8
     priority (workgroup)"app"
     uses-sysmodule "display" { with-priority 0; }
-    uses-sysmodule "log" { with-priority -1; }
+    uses-sysmodule "log" { with-priority 0; }
     uses-sysmodule "storage" { with-priority 0; }
     uses-sysmodule "fs" { with-priority 0; }
 }

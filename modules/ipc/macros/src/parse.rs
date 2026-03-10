@@ -448,11 +448,11 @@ pub fn parse_methods(trait_def: &ItemTrait) -> syn::Result<Vec<ParsedMethod>> {
                 None
             };
 
-            // 0xFD, 0xFE, 0xFF are reserved.
-            if next_id >= 0xFD {
+            // 0xF8–0xFF are reserved for IPC infrastructure.
+            if next_id >= 0xF8 {
                 return Err(syn::Error::new(
                     method.sig.ident.span(),
-                    "too many methods: method IDs 0xFD-0xFF are reserved",
+                    "too many methods: method IDs 0xF8-0xFF are reserved",
                 ));
             }
 

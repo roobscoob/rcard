@@ -9,7 +9,7 @@ use sysmodule_log_api::log;
 
 sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
-sysmodule_log_api::panic_handler!(Log);
+sysmodule_log_api::panic_handler!(to Log; cleanup Display);
 
 struct CompositorImpl;
 

@@ -39,11 +39,24 @@ pub const fn split_opcode(op: u16) -> (u8, u8) {
 /// Reserved method ID used by the implicit Drop destructor on client handles.
 pub const IMPLICIT_DESTROY_METHOD: u8 = 0xFF;
 
-/// Reserved method ID for transferring handle ownership to another task.
-pub const TRANSFER_METHOD: u8 = 0xFE;
-
 /// Reserved method ID for cloning a refcounted handle to another task.
 pub const CLONE_METHOD: u8 = 0xFD;
+
+/// Reserved method ID for 2PC prepare_transfer.
+pub const PREPARE_TRANSFER_METHOD: u8 = 0xFC;
+
+/// Reserved method ID for 2PC cancel_transfer.
+pub const CANCEL_TRANSFER_METHOD: u8 = 0xFB;
+
+/// Reserved method ID for 2PC acquire (complete transfer).
+pub const ACQUIRE_METHOD: u8 = 0xFA;
+
+/// Reserved method ID for 2PC try_drop (cleanup after failed transfer).
+pub const TRY_DROP_METHOD: u8 = 0xF9;
+
+/// Reserved method ID for notify_dead (panic handler cleanup).
+/// The server runs `cleanup_client` for the sender across all dispatchers.
+pub const NOTIFY_DEAD_METHOD: u8 = 0xF8;
 
 /// Metadata about the incoming message, passed to handler methods.
 #[derive(Copy, Clone, Debug)]

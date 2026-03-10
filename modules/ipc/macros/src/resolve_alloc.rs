@@ -65,8 +65,8 @@ pub fn resolve(alloc_name: &str) -> Result<Option<AllocInfo>, String> {
 pub fn check_acl(alloc_name: &str) -> Result<Option<String>, String> {
     let root = read_alloc_json()?;
 
-    let pkg_name = std::env::var("CARGO_PKG_NAME")
-        .map_err(|_| "CARGO_PKG_NAME not set".to_string())?;
+    let pkg_name =
+        std::env::var("CARGO_PKG_NAME").map_err(|_| "CARGO_PKG_NAME not set".to_string())?;
 
     let acl = match root.get("acl") {
         Some(v) => v,
@@ -85,7 +85,7 @@ pub fn check_acl(alloc_name: &str) -> Result<Option<String>, String> {
 
     if task_grants
         .iter()
-        .any(|v| v.as_str() == Some(alloc_name))
+        .any(|v| v.get("name").unwrap().as_str() == Some(alloc_name))
     {
         Ok(None)
     } else {

@@ -113,6 +113,11 @@ pub fn gen_client(
                     #kind_lit
                 }
 
+                /// Get the server's TaskId (for use in panic handlers / `notify_dead!`).
+                pub fn server_task_id() -> userlib::TaskId {
+                    S::task_id()
+                }
+
                 #(#method_impls)*
             }
 
@@ -228,38 +233,12 @@ pub fn gen_dyn_client(
             }
 
             impl ipc::Transferable for #dyn_name {
-                fn transfer_to(self, new_owner: userlib::TaskId) -> core::result::Result<ipc::DynHandle, ipc::Error> {
-                    let args: (ipc::RawHandle, u16) = (self.handle.get(), new_owner.task_index());
-                    let mut argbuffer = [0u8;
-                        <(ipc::RawHandle, u16) as hubpack::SerializedSize>::MAX_SIZE];
-                    let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
-                    let mut retbuffer = [0u8;
-                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                    let mut leases = [];
-                    let opcode = ipc::opcode(self.kind, ipc::TRANSFER_METHOD);
-                    let (rc, len) = userlib::sys_send(
-                        self.server.get(),
-                        opcode,
-                        &argbuffer[..n],
-                        &mut retbuffer,
-                        &mut leases,
-                    ).map_err(|_| ipc::Error::ServerDied)?;
-                    if rc != userlib::ResponseCode::SUCCESS {
-                        panic!("ipc: transfer got non-SUCCESS response code");
-                    }
-                    let (result, _) = hubpack::deserialize::<
-                        core::result::Result<(), ipc::Error>
-                    >(&retbuffer[..len])
-                        .unwrap_or_else(|_| panic!("ipc: malformed transfer reply"));
-                    result?;
-                    let dh = ipc::DynHandle {
+                fn transfer_info(&self) -> ipc::DynHandle {
+                    ipc::DynHandle {
                         server_id: u16::from(self.server.get()),
                         kind: self.kind,
                         handle: self.handle.get(),
-                    };
-                    // Prevent Drop from sending 0xFF — ownership transferred.
-                    core::mem::forget(self);
-                    Ok(dh)
+                    }
                 }
             }
 
@@ -300,38 +279,12 @@ fn gen_transferable_impl(
 
     quote! {
         impl<S: #server_trait_name> ipc::Transferable for #handle_name<S> {
-            fn transfer_to(self, new_owner: userlib::TaskId) -> core::result::Result<ipc::DynHandle, ipc::Error> {
-                let args: (ipc::RawHandle, u16) = (self.handle.get(), new_owner.task_index());
-                let mut argbuffer = [0u8;
-                    <(ipc::RawHandle, u16) as hubpack::SerializedSize>::MAX_SIZE];
-                let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
-                let mut retbuffer = [0u8;
-                    <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                let mut leases = [];
-                let opcode = ipc::opcode(#kind_lit, ipc::TRANSFER_METHOD);
-                let (rc, len) = userlib::sys_send(
-                    self.server.get(),
-                    opcode,
-                    &argbuffer[..n],
-                    &mut retbuffer,
-                    &mut leases,
-                ).map_err(|_| ipc::Error::ServerDied)?;
-                if rc != userlib::ResponseCode::SUCCESS {
-                    panic!("ipc: transfer got non-SUCCESS response code");
-                }
-                let (result, _) = hubpack::deserialize::<
-                    core::result::Result<(), ipc::Error>
-                >(&retbuffer[..len])
-                    .unwrap_or_else(|_| panic!("ipc: malformed transfer reply"));
-                result?;
-                let dh = ipc::DynHandle {
+            fn transfer_info(&self) -> ipc::DynHandle {
+                ipc::DynHandle {
                     server_id: u16::from(self.server.get()),
                     kind: #kind_lit,
                     handle: self.handle.get(),
-                };
-                // Prevent Drop from sending 0xFF — ownership transferred successfully.
-                core::mem::forget(self);
-                Ok(dh)
+                }
             }
         }
     }
@@ -346,7 +299,7 @@ fn gen_cloneable_impl(
 
     quote! {
         impl<S: #server_trait_name> ipc::Cloneable for #handle_name<S> {
-            fn clone_for(&self, new_owner: userlib::TaskId) -> core::result::Result<ipc::DynHandle, ipc::Error> {
+            fn clone_for(&self, new_owner: userlib::TaskId) -> core::result::Result<ipc::DynHandle, ipc::CloneError> {
                 let args: (ipc::RawHandle, u16) = (self.handle.get(), new_owner.task_index());
                 let mut argbuffer = [0u8;
                     <(ipc::RawHandle, u16) as hubpack::SerializedSize>::MAX_SIZE];
@@ -362,7 +315,11 @@ fn gen_cloneable_impl(
                     &argbuffer[..n],
                     &mut retbuffer,
                     &mut leases,
-                ).map_err(|_| ipc::Error::ServerDied)?;
+                ).map_err(|_| ipc::CloneError::ServerDied)?;
+                if rc == ipc::ACCESS_VIOLATION {
+                    panic!("ipc: clone rejected: access violation \
+                           (this task is not authorized to use this server)");
+                }
                 if rc != userlib::ResponseCode::SUCCESS {
                     panic!("ipc: clone got non-SUCCESS response code");
                 }
@@ -370,7 +327,12 @@ fn gen_cloneable_impl(
                     core::result::Result<ipc::RawHandle, ipc::Error>
                 >(&retbuffer[..len])
                     .unwrap_or_else(|_| panic!("ipc: malformed clone reply"));
-                let new_handle = result?;
+                let new_handle = match result {
+                    Ok(h) => h,
+                    Err(ipc::Error::HandleLost) => return Err(ipc::CloneError::InvalidHandle),
+                    Err(ipc::Error::ArenaFull) => return Err(ipc::CloneError::ArenaFull),
+                    Err(_) => return Err(ipc::CloneError::ServerDied),
+                };
                 Ok(ipc::DynHandle {
                     server_id: u16::from(self.server.get()),
                     kind: #kind_lit,
@@ -393,6 +355,7 @@ fn gen_client_method(
     let method_name = &m.name;
     let variant = format_ident!("{}", to_pascal_case(&method_name.to_string()));
     let method_id_expr = quote! { #enum_name::#variant as u8 };
+    let err_type = error_type_for(m.kind, &m.params);
 
     let non_lease_params: Vec<&ParsedParam> = m.params.iter().filter(|p| !p.is_lease).collect();
     let lease_params: Vec<&ParsedParam> = m.params.iter().filter(|p| p.is_lease).collect();
@@ -434,6 +397,7 @@ fn gen_client_method(
                 &non_lease_params,
                 &lease_params,
                 ctor_return,
+                &err_type,
             )
         }
         MethodKind::Message => gen_message(
@@ -445,6 +409,7 @@ fn gen_client_method(
             &lease_params,
             m.return_type.as_ref(),
             m.constructs.as_ref(),
+            &err_type,
         ),
         MethodKind::StaticMessage => gen_static_message(
             method_name,
@@ -454,6 +419,7 @@ fn gen_client_method(
             &non_lease_params,
             &lease_params,
             m.return_type.as_ref(),
+            &err_type,
         ),
         MethodKind::Destructor => gen_destructor(
             method_name,
@@ -463,6 +429,7 @@ fn gen_client_method(
             &non_lease_params,
             &lease_params,
             m.return_type.as_ref(),
+            &err_type,
         ),
     }
 }
@@ -475,10 +442,11 @@ fn gen_constructor(
     non_lease_params: &[&ParsedParam],
     lease_params: &[&ParsedParam],
     ctor_return: &ConstructorReturn,
+    err_type: &TokenStream2,
 ) -> TokenStream2 {
     // For serialization, we need to handle #[handle(move)] params specially.
     let ctor_server_expr = quote! { server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &ctor_server_expr);
+    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &ctor_server_expr, err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -502,31 +470,31 @@ fn gen_constructor(
 
     let (fn_ret, map_result) = match ctor_return {
         ConstructorReturn::Bare => (
-            quote! { core::result::Result<Self, ipc::Error> },
+            quote! { core::result::Result<Self, #err_type> },
             quote! {
                 match result {
                     Ok(handle) => Ok(#make_self),
-                    Err(e) => Err(e),
+                    Err(e) => Err(#err_type::from_wire(e)),
                 }
             },
         ),
         ConstructorReturn::Result(error_type) => (
-            quote! { core::result::Result<core::result::Result<Self, #error_type>, ipc::Error> },
+            quote! { core::result::Result<core::result::Result<Self, #error_type>, #err_type> },
             quote! {
                 match result {
                     Ok(Ok(handle)) => Ok(Ok(#make_self)),
                     Ok(Err(e)) => Ok(Err(e)),
-                    Err(ipc_err) => Err(ipc_err),
+                    Err(ipc_err) => Err(#err_type::from_wire(ipc_err)),
                 }
             },
         ),
         ConstructorReturn::OptionSelf => (
-            quote! { core::result::Result<core::option::Option<Self>, ipc::Error> },
+            quote! { core::result::Result<core::option::Option<Self>, #err_type> },
             quote! {
                 match result {
                     Ok(Some(handle)) => Ok(Some(#make_self)),
                     Ok(None) => Ok(None),
-                    Err(ipc_err) => Err(ipc_err),
+                    Err(ipc_err) => Err(#err_type::from_wire(ipc_err)),
                 }
             },
         ),
@@ -549,7 +517,14 @@ fn gen_constructor(
                 argbuffer,
                 &mut retbuffer,
                 &mut leases,
-            ).map_err(|_| ipc::Error::ServerDied)?;
+            ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
+            if rc == ipc::ACCESS_VIOLATION {
+                panic!(
+                    "ipc: server {:?} rejected our message: access violation \
+                     (this task is not authorized to use this server)",
+                    server.get(),
+                );
+            }
             if rc != userlib::ResponseCode::SUCCESS {
                 panic!(
                     "ipc: server {:?} sent unexpected non-SUCCESS response code",
@@ -576,9 +551,10 @@ fn gen_message(
     lease_params: &[&ParsedParam],
     return_type: Option<&syn::Type>,
     constructs: Option<&(Ident, Ident)>,
+    err_type: &TokenStream2,
 ) -> TokenStream2 {
     let self_server_expr = quote! { self.server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &self_server_expr);
+    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &self_server_expr, err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -606,22 +582,22 @@ fn gen_message(
 
         quote! {
             pub fn #method_name<#generic_ident: #server_trait>(&self, #(#sig_params),*)
-                -> core::result::Result<#user_rt, ipc::Error>
+                -> core::result::Result<#user_rt, #err_type>
             {
                 #handle_transfer_stmts
                 #serialize
                 #send_body
-                let (rc, len) = send_result.map_err(|_| ipc::Error::ServerDied)?;
-                let wire_result = { #parse_reply };
-                wire_result.map(|v| { #map_handles })
+                let (rc, len) = send_result.map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
+                let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
+                wire_result.map(|v| { #map_handles }).map_err(#err_type::from_wire)
             }
         }
     } else {
         let parse_reply = gen_parse_reply(return_type, quote! { self.server.get() });
 
         let ret_type = match return_type {
-            Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error> },
-            None => quote! { -> core::result::Result<(), ipc::Error> },
+            Some(rt) => quote! { -> core::result::Result<#rt, #err_type> },
+            None => quote! { -> core::result::Result<(), #err_type> },
         };
 
         quote! {
@@ -629,8 +605,9 @@ fn gen_message(
                 #handle_transfer_stmts
                 #serialize
                 #send_body
-                let (rc, len) = send_result.map_err(|_| ipc::Error::ServerDied)?;
-                #parse_reply
+                let (rc, len) = send_result.map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
+                let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
+                wire_result.map_err(#err_type::from_wire)
             }
         }
     }
@@ -644,9 +621,10 @@ fn gen_destructor(
     non_lease_params: &[&ParsedParam],
     lease_params: &[&ParsedParam],
     return_type: Option<&syn::Type>,
+    err_type: &TokenStream2,
 ) -> TokenStream2 {
     let self_server_expr = quote! { self.server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &self_server_expr);
+    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &self_server_expr, err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -658,8 +636,8 @@ fn gen_destructor(
     let parse_reply = gen_parse_reply(return_type, quote! { self.server.get() });
 
     let ret_type = match return_type {
-        Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error> },
-        None => quote! { -> core::result::Result<(), ipc::Error> },
+        Some(rt) => quote! { -> core::result::Result<#rt, #err_type> },
+        None => quote! { -> core::result::Result<(), #err_type> },
     };
 
     quote! {
@@ -668,8 +646,9 @@ fn gen_destructor(
             #handle_transfer_stmts
             #serialize
             #send_body
-            let (rc, len) = send_result.map_err(|_| ipc::Error::ServerDied)?;
-            #parse_reply
+            let (rc, len) = send_result.map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
+            let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
+            wire_result.map_err(#err_type::from_wire)
         }
     }
 }
@@ -682,9 +661,10 @@ fn gen_static_message(
     non_lease_params: &[&ParsedParam],
     lease_params: &[&ParsedParam],
     return_type: Option<&syn::Type>,
+    err_type: &TokenStream2,
 ) -> TokenStream2 {
     let server_expr = quote! { server_id.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &server_expr);
+    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &server_expr, err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -695,8 +675,8 @@ fn gen_static_message(
     let parse_reply = gen_parse_reply(return_type, quote! { server_id.get() });
 
     let ret_type = match return_type {
-        Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error> },
-        None => quote! { -> core::result::Result<(), ipc::Error> },
+        Some(rt) => quote! { -> core::result::Result<#rt, #err_type> },
+        None => quote! { -> core::result::Result<(), #err_type> },
     };
 
     quote! {
@@ -715,7 +695,7 @@ fn gen_static_message(
                 &mut retbuffer,
                 &mut leases,
             );
-            match send_result {
+            let wire_result: core::result::Result<_, ipc::Error> = match send_result {
                 Ok((rc, len)) => {
                     #parse_reply
                 }
@@ -728,10 +708,11 @@ fn gen_static_message(
                         argbuffer,
                         &mut retbuffer,
                         &mut leases,
-                    ).map_err(|_| ipc::Error::ServerDied)?;
+                    ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
                     #parse_reply
                 }
-            }
+            };
+            wire_result.map_err(#err_type::from_wire)
         }
     }
 }
@@ -743,6 +724,7 @@ fn gen_static_message(
 fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
     let method_name = &m.name;
     let method_id_lit = proc_macro2::Literal::u8_suffixed(m.method_id);
+    let err_type = error_type_for(m.kind, &m.params);
 
     let non_lease_params: Vec<&ParsedParam> = m.params.iter().filter(|p| !p.is_lease).collect();
     let lease_params: Vec<&ParsedParam> = m.params.iter().filter(|p| p.is_lease).collect();
@@ -758,7 +740,7 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
         .collect();
 
     let server_expr = quote! { self.server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(&non_lease_params, &server_expr);
+    let handle_transfer_stmts = gen_handle_transfer_stmts(&non_lease_params, &server_expr, &err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -768,8 +750,8 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
     let lease_arr = gen_lease_array(&lease_params);
 
     let ret_type = match &m.return_type {
-        Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error> },
-        None => quote! { -> core::result::Result<(), ipc::Error> },
+        Some(rt) => quote! { -> core::result::Result<#rt, #err_type> },
+        None => quote! { -> core::result::Result<(), #err_type> },
     };
 
     let parse_reply = gen_parse_reply(m.return_type.as_ref(), quote! { self.server.get() });
@@ -789,7 +771,7 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
                 &mut retbuffer,
                 &mut leases,
             );
-            match send_result {
+            let wire_result: core::result::Result<_, ipc::Error> = match send_result {
                 Ok((rc, len)) => {
                     #parse_reply
                 }
@@ -801,10 +783,11 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
                         argbuffer,
                         &mut retbuffer,
                         &mut leases,
-                    ).map_err(|_| ipc::Error::ServerDied)?;
+                    ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
                     #parse_reply
                 }
-            }
+            };
+            wire_result.map_err(#err_type::from_wire)
         }
     }
 }
@@ -817,6 +800,34 @@ fn gen_dyn_static_method(_m: &ParsedMethod) -> TokenStream2 {
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+/// Determine the precise client-side error type for a method based on its
+/// kind and whether it has move/clone handle params.
+fn error_type_for(method_kind: MethodKind, params: &[ParsedParam]) -> TokenStream2 {
+    let has_move = params.iter().any(|p| p.handle_mode == Some(HandleMode::Move));
+    let has_clone = params.iter().any(|p| p.handle_mode == Some(HandleMode::Clone));
+
+    match method_kind {
+        MethodKind::Constructor => match (has_move, has_clone) {
+            (false, false) => quote! { ipc::errors::ConstructorError },
+            (true, false) => quote! { ipc::errors::ConstructorTransferError },
+            (false, true) => quote! { ipc::errors::ConstructorCloneError },
+            (true, true) => quote! { ipc::errors::ConstructorTransferCloneError },
+        },
+        MethodKind::Message | MethodKind::Destructor => match (has_move, has_clone) {
+            (false, false) => quote! { ipc::errors::HandleLostError },
+            (true, false) => quote! { ipc::errors::MessageTransferError },
+            (false, true) => quote! { ipc::errors::MessageCloneError },
+            (true, true) => quote! { ipc::errors::MessageTransferCloneError },
+        },
+        MethodKind::StaticMessage => match (has_move, has_clone) {
+            (false, false) => quote! { ipc::errors::StaticMessageError },
+            (true, false) => quote! { ipc::errors::StaticMessageTransferError },
+            (false, true) => quote! { ipc::errors::StaticMessageCloneError },
+            (true, true) => quote! { ipc::errors::StaticMessageTransferCloneError },
+        },
+    }
+}
 
 /// Determine the wire type for a param. Handle params become RawHandle or DynHandle.
 fn wire_type_for(p: &ParsedParam) -> TokenStream2 {
@@ -832,61 +843,157 @@ fn wire_type_for(p: &ParsedParam) -> TokenStream2 {
     }
 }
 
-/// Generate let-bindings that transfer/clone handle params before serialization.
-/// `server_expr` is the expression for the target server's TaskId
-/// (e.g. `self.server.get()` for instance methods, `server.get()` for constructors).
+/// Generate 2PC prepare/cancel statements for `#[handle(move)]` params and
+/// clone statements for `#[handle(clone)]` params.
+///
+/// For move params, sends `PREPARE_TRANSFER_METHOD` to the source server.
+/// If any prepare fails, sends `CANCEL_TRANSFER_METHOD` for previously
+/// prepared handles and returns an error.
+///
+/// `server_expr` is the expression for the target server's TaskId.
 fn gen_handle_transfer_stmts(
     params: &[&ParsedParam],
     server_expr: &TokenStream2,
+    err_type: &TokenStream2,
 ) -> TokenStream2 {
-    let stmts: Vec<TokenStream2> = params
+    let move_params: Vec<(&ParsedParam, usize)> = params
         .iter()
-        .filter_map(|p| {
-            let pname = &p.name;
-            match p.handle_mode {
-                Some(HandleMode::Move) => {
-                    if p.impl_trait_name.is_some() {
-                        Some(quote! {
-                            let #pname: ipc::DynHandle = ipc::Transferable::transfer_to(
-                                #pname,
-                                #server_expr,
-                            ).map_err(|_| ipc::Error::ServerDied)?;
-                        })
-                    } else {
-                        Some(quote! {
-                            let __dh = ipc::Transferable::transfer_to(
-                                #pname,
-                                #server_expr,
-                            ).map_err(|_| ipc::Error::ServerDied)?;
-                            let #pname: ipc::RawHandle = __dh.handle;
-                        })
-                    }
-                }
-                Some(HandleMode::Clone) => {
-                    if p.impl_trait_name.is_some() {
-                        Some(quote! {
-                            let #pname: ipc::DynHandle = ipc::Cloneable::clone_for(
-                                #pname,
-                                #server_expr,
-                            ).map_err(|_| ipc::Error::ServerDied)?;
-                        })
-                    } else {
-                        Some(quote! {
-                            let __dh = ipc::Cloneable::clone_for(
-                                #pname,
-                                #server_expr,
-                            ).map_err(|_| ipc::Error::ServerDied)?;
-                            let #pname: ipc::RawHandle = __dh.handle;
-                        })
-                    }
-                }
-                None => None,
-            }
-        })
+        .enumerate()
+        .filter(|(_, p)| p.handle_mode == Some(HandleMode::Move))
+        .map(|(i, p)| (*p, i))
         .collect();
+
+    let clone_params: Vec<&ParsedParam> = params
+        .iter()
+        .filter(|p| p.handle_mode == Some(HandleMode::Clone))
+        .copied()
+        .collect();
+
+    let mut stmts = Vec::new();
+
+    // Clone params: keep existing approach (atomic, non-destructive)
+    for p in &clone_params {
+        let pname = &p.name;
+        if p.impl_trait_name.is_some() {
+            stmts.push(quote! {
+                let #pname: ipc::DynHandle = ipc::Cloneable::clone_for(
+                    #pname,
+                    #server_expr,
+                ).map_err(|e| #err_type::CloneFailed(stringify!(#pname), e))?;
+            });
+        } else {
+            stmts.push(quote! {
+                let __dh = ipc::Cloneable::clone_for(
+                    #pname,
+                    #server_expr,
+                ).map_err(|e| #err_type::CloneFailed(stringify!(#pname), e))?;
+                let #pname: ipc::RawHandle = __dh.handle;
+            });
+        }
+    }
+
+    // Move params: 2PC prepare_transfer
+    for (idx, (p, _)) in move_params.iter().enumerate() {
+        let pname = &p.name;
+        // Build cancel stmts for all previously prepared handles (rollback)
+        let cancel_stmts: Vec<TokenStream2> = move_params[..idx]
+            .iter()
+            .map(|(prev_p, _)| {
+                let prev_name = &prev_p.name;
+                let prev_dh = format_ident!("__dh_{}", prev_name);
+                quote! {
+                    {
+                        let __cancel_args: (ipc::RawHandle,) = (#prev_dh.handle,);
+                        let mut __cancel_buf = [0u8;
+                            <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
+                        let __cancel_n = hubpack::serialize(&mut __cancel_buf, &__cancel_args)
+                            .expect("ipc: serialize cancel");
+                        let __cancel_opcode = ipc::opcode(#prev_dh.kind, ipc::CANCEL_TRANSFER_METHOD);
+                        let mut __cancel_ret = [0u8; 0];
+                        let mut __cancel_leases = [];
+                        let _ = userlib::sys_send(
+                            #prev_dh.task_id(),
+                            __cancel_opcode,
+                            &__cancel_buf[..__cancel_n],
+                            &mut __cancel_ret,
+                            &mut __cancel_leases,
+                        );
+                    }
+                }
+            })
+            .collect();
+
+        // For move params, we need to get a DynHandle from the Transferable
+        // without actually transferring — we extract server info and raw handle,
+        // then send PREPARE_TRANSFER_METHOD.
+        let dh_var = format_ident!("__dh_{}", pname);
+
+        stmts.push(quote! {
+            // Extract DynHandle info from the Transferable (consumes it, forgets Drop)
+            let #dh_var: ipc::DynHandle = {
+                let dh = ipc::Transferable::transfer_info(&#pname);
+                core::mem::forget(#pname);
+                dh
+            };
+            // Send PREPARE_TRANSFER to source server
+            {
+                let __prep_args: (ipc::RawHandle, u16) = (#dh_var.handle, #server_expr.task_index());
+                let mut __prep_buf = [0u8;
+                    <(ipc::RawHandle, u16) as hubpack::SerializedSize>::MAX_SIZE];
+                let __prep_n = hubpack::serialize(&mut __prep_buf, &__prep_args)
+                    .expect("ipc: serialize prepare");
+                let __prep_opcode = ipc::opcode(#dh_var.kind, ipc::PREPARE_TRANSFER_METHOD);
+                let mut __prep_ret = [0u8;
+                    <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+                let mut __prep_leases = [];
+                let __prep_ok = match userlib::sys_send(
+                    #dh_var.task_id(),
+                    __prep_opcode,
+                    &__prep_buf[..__prep_n],
+                    &mut __prep_ret,
+                    &mut __prep_leases,
+                ) {
+                    Ok((__prep_rc, __prep_len)) => {
+                        if __prep_rc == userlib::ResponseCode::SUCCESS {
+                            match hubpack::deserialize::<core::result::Result<(), ipc::Error>>(
+                                &__prep_ret[..__prep_len],
+                            ) {
+                                Ok((Ok(()), _)) => true,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    Err(_) => false,
+                };
+                if !__prep_ok {
+                    // Cancel all previously prepared handles
+                    #(#cancel_stmts)*
+                    return Err(#err_type::TransferLost(stringify!(#pname)));
+                }
+            }
+        });
+    }
+
+    // After all prepares succeed, bind the wire-level names
+    for (p, _) in &move_params {
+        let pname = &p.name;
+        let dh_var = format_ident!("__dh_{}", pname);
+        if p.impl_trait_name.is_some() {
+            stmts.push(quote! {
+                let #pname: ipc::DynHandle = #dh_var;
+            });
+        } else {
+            stmts.push(quote! {
+                let #pname: ipc::RawHandle = #dh_var.handle;
+            });
+        }
+    }
 
     quote! { #(#stmts)* }
 }
+
 
 /// Serialize method arguments into `argbuffer`.
 ///
@@ -977,6 +1084,13 @@ fn gen_parse_reply(
     server_expr: TokenStream2,
 ) -> TokenStream2 {
     let rc_check = quote! {
+        if rc == ipc::ACCESS_VIOLATION {
+            panic!(
+                "ipc: server {:?} rejected our message: access violation \
+                 (this task is not authorized to use this server)",
+                #server_expr,
+            );
+        }
         if rc != userlib::ResponseCode::SUCCESS {
             panic!(
                 "ipc: server {:?} sent unexpected non-SUCCESS response code; \

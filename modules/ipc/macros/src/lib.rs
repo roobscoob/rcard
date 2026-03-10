@@ -5,7 +5,9 @@ use syn::parse_macro_input;
 mod check_uses;
 mod codegen_client;
 mod codegen_server;
+mod emit_meta;
 mod parse;
+mod resolve_acl;
 mod resolve_alloc;
 mod resolve_priority;
 mod util;
@@ -52,6 +54,43 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
+    // Emit metadata for post-build handle ACL verification.
+    {
+        let crate_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+        let implements_str = attrs.implements.as_ref().and_then(|p| {
+            p.segments.last().map(|s| s.ident.to_string())
+        });
+        let clone_str = attrs.clone_mode.map(|_| "refcount");
+        let handle_params: Vec<emit_meta::HandleParam> = methods
+            .iter()
+            .flat_map(|m| {
+                m.params.iter().filter_map(|p| {
+                    let mode = p.handle_mode?;
+                    Some(emit_meta::HandleParam {
+                        method: m.name.to_string(),
+                        handle_trait: p
+                            .impl_trait_name
+                            .as_ref()
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| "(concrete)".to_string()),
+                        mode: match mode {
+                            parse::HandleMode::Move => "move".to_string(),
+                            parse::HandleMode::Clone => "clone".to_string(),
+                        },
+                    })
+                })
+            })
+            .collect();
+        emit_meta::emit_resource(
+            &crate_name,
+            &trait_name.to_string(),
+            attrs.kind,
+            implements_str.as_deref(),
+            clone_str,
+            &handle_params,
+        );
+    }
+
     let server_trait = gen_server_trait(trait_name, &methods, &attrs);
     let op_enum = gen_operation_enum(trait_name, &methods, &attrs);
     let dispatcher = gen_dispatcher(trait_name, &methods, &attrs);
@@ -81,6 +120,12 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(m) => m,
         Err(e) => return e.to_compile_error().into(),
     };
+
+    // Emit metadata for post-build handle ACL verification.
+    {
+        let crate_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+        emit_meta::emit_interface(&crate_name, &trait_name.to_string(), iface_attrs.kind);
+    }
 
     // Build a ResourceAttr for codegen compatibility (no arena, no dispatcher).
     let attrs = ResourceAttr {
@@ -203,6 +248,18 @@ impl syn::parse::Parse for ServerInput {
 #[proc_macro]
 pub fn server(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ServerInput);
+
+    // Emit metadata for post-build handle ACL verification.
+    {
+        let task_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+        let serves: Vec<String> = input
+            .entries
+            .iter()
+            .map(|e| e.trait_name.to_string())
+            .collect();
+        emit_meta::emit_server(&task_name, &serves);
+    }
+
     let count = input.entries.len();
 
     let mut arena_decls = Vec::new();
@@ -243,7 +300,7 @@ pub fn server(input: TokenStream) -> TokenStream {
 
         dispatcher_decls.push(quote! {
             let mut #disp_var = #wiring_macro!(
-                &#arena_var, __ipc_priority_for;
+                &#arena_var, __ipc_priority_for, __ipc_self_task_index;
                 #(#arena_kvs),*
             );
         });
@@ -278,16 +335,22 @@ pub fn server(input: TokenStream) -> TokenStream {
 
     // Generate __ipc_priority_for function from app.priorities.json
     let priority_fn = gen_priority_fn();
+    // Generate __ipc_acl_check function from app.uses.json + app.peers.json
+    let acl_fn = gen_acl_fn();
+    // Generate __ipc_self_task_index constant from HUBRIS_TASKS + CARGO_PKG_NAME
+    let self_task_index_const = gen_self_task_index();
 
     let output = quote! {
         {
             #priority_fn
+            #acl_fn
+            #self_task_index_const
 
             #(#arena_decls)*
             #(#dispatcher_decls)*
 
             let mut __buf = [core::mem::MaybeUninit::uninit(); 256];
-            let mut __server = ipc::Server::<#count>::new();
+            let mut __server = ipc::Server::<#count>::new(__ipc_acl_check);
             #(#register_calls)*
             #run_call
         }
@@ -306,10 +369,6 @@ fn gen_priority_fn() -> proc_macro2::TokenStream {
                 .map(|e| {
                     let idx = e.task_index as u16;
                     let prio = e.priority as i8;
-                    let comment = format!(" // {}", e.task_name);
-                    let comment_ident = proc_macro2::Literal::string(&comment);
-                    // We can't emit comments in quote!, so just emit the match arm
-                    let _ = comment_ident;
                     quote! { #idx => #prio }
                 })
                 .collect();
@@ -322,11 +381,89 @@ fn gen_priority_fn() -> proc_macro2::TokenStream {
                 }
             }
         }
-        _ => {
-            // No priorities file or no entries — default everything to 0
+        Ok(_) => {
+            // No entries — default everything to 0
             quote! {
                 fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
             }
+        }
+        Err(msg) => {
+            // File missing (IDE cargo check, no prior build) → silently skip.
+            // Malformed JSON → compile error so it doesn't go unnoticed.
+            if msg.contains("cannot read") {
+                quote! {
+                    fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
+                }
+            } else {
+                let err = format!("ipc: failed to resolve priorities: {}", msg);
+                quote! { compile_error!(#err); }
+            }
+        }
+    }
+}
+
+/// Generate a `__ipc_acl_check(sender_index: u16) -> bool` function
+/// by reading `.work/app.uses.json`, `.work/app.peers.json`, and `HUBRIS_TASKS`
+/// at compile time.
+fn gen_acl_fn() -> proc_macro2::TokenStream {
+    match resolve_acl::resolve() {
+        Ok(allowed) if !allowed.is_empty() => {
+            let arms: Vec<proc_macro2::TokenStream> = allowed
+                .iter()
+                .map(|&idx| {
+                    let idx = idx as u16;
+                    quote! { #idx => true }
+                })
+                .collect();
+            quote! {
+                fn __ipc_acl_check(sender_index: u16) -> bool {
+                    match sender_index {
+                        #(#arms,)*
+                        _ => false,
+                    }
+                }
+            }
+        }
+        Ok(_) => {
+            // No entries — no clients declared. Deny all by default.
+            quote! {
+                fn __ipc_acl_check(_sender_index: u16) -> bool { false }
+            }
+        }
+        Err(msg) => {
+            // File missing (IDE cargo check, no prior build) → silently skip.
+            // Malformed JSON → compile error so it doesn't go unnoticed.
+            if msg.contains("cannot read") {
+                quote! {
+                    fn __ipc_acl_check(_sender_index: u16) -> bool { false }
+                }
+            } else {
+                let err = format!("ipc: failed to resolve ACL: {}", msg);
+                quote! { compile_error!(#err); }
+            }
+        }
+    }
+}
+
+/// Generate a `__ipc_self_task_index: u16` constant by looking up
+/// `CARGO_PKG_NAME` in the `HUBRIS_TASKS` environment variable.
+fn gen_self_task_index() -> proc_macro2::TokenStream {
+    let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+    let task_names: Vec<String> = std::env::var("HUBRIS_TASKS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.to_string())
+        .collect();
+
+    if let Some(idx) = task_names.iter().position(|t| t == &pkg) {
+        let idx = idx as u16;
+        quote! {
+            let __ipc_self_task_index: u16 = #idx;
+        }
+    } else {
+        // Fallback: task not found (IDE cargo check, no HUBRIS_TASKS) → use 0
+        quote! {
+            let __ipc_self_task_index: u16 = 0;
         }
     }
 }

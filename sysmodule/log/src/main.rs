@@ -43,6 +43,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         let _ = write!(PanicWriter, "{}", info);
         usart_write(b"\r\n");
     }
+    ipc::notify_dead!(Time, Reactor);
     userlib::sys_panic(b"log panic")
 }
 

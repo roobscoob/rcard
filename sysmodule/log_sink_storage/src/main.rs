@@ -9,7 +9,7 @@ use once_cell::OnceCell;
 use sysmodule_storage_api::{partitions, ring::RingWriter};
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
-sysmodule_log_api::panic_handler!(Log);
+sysmodule_log_api::panic_handler!(to Log; cleanup Reactor, Partition);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 sysmodule_storage_api::bind_partition!(Partition = SLOTS.sysmodule_storage);
 
@@ -34,7 +34,10 @@ fn drain_logs() {
     let mut buf = [0u8; 512];
 
     loop {
-        let n = Log::consume_since(last, &mut buf).ok().and_then(|r| r.ok()).unwrap_or(0) as usize;
+        let n = Log::consume_since(last, &mut buf)
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(0) as usize;
         if n == 0 {
             break;
         }
