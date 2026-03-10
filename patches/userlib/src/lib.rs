@@ -133,7 +133,7 @@ impl TaskId {
     /// really must be dynamic) the `hubris_num_tasks` crate for validating
     /// them.
     pub const fn new(task_index: u16, generation: Gen) -> Self {
-        Self(task_index & ((1 << GEN_BITS) - 1)
+        Self(task_index & ((1 << (16 - GEN_BITS)) - 1)
             | ((generation.0 as u16) << (16 - GEN_BITS)))
     }
 
@@ -153,7 +153,7 @@ impl TaskId {
 
     /// Extracts the task index from this `TaskId`.
     pub const fn task_index(self) -> u16 {
-        self.0 & ((1 << GEN_BITS) - 1)
+        self.0 & ((1 << (16 - GEN_BITS)) - 1)
     }
 
     /// Extracts the generation from this `TaskId`.

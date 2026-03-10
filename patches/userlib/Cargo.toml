@@ -36,6 +36,9 @@ cortex-m = {version = "0.7", features = ["inline-asm"]}
 [target.thumbv6m-none-eabi.dependencies]
 cortex-m = {version = "0.7", features = ["inline-asm"]}
 
+[lints.rust]
+warnings = "deny"
+
 [lib]
 test = false
 bench = false

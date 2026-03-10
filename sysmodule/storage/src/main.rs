@@ -118,17 +118,18 @@ impl Partition for PartitionResource {
         _meta: ipc::Meta,
         block: u32,
         buf: idyll_runtime::Leased<idyll_runtime::Write, u8>,
-    ) {
+    ) -> Result<(), BlockError> {
         if block >= self.count {
-            return;
+            return Err(BlockError::OutOfRange);
         }
         let mut tmp = [0u8; 512];
-        if sdmmc().read_block(self.offset + block, &mut tmp).is_ok() {
-            let len = buf.len().min(512);
-            for i in 0..len {
-                let _ = buf.write(i, tmp[i]);
-            }
+        sdmmc().read_block(self.offset + block, &mut tmp)
+            .unwrap_or(Err(BlockError::Device(0xFFFF)))?;
+        let len = buf.len().min(512);
+        for i in 0..len {
+            let _ = buf.write(i, tmp[i]);
         }
+        Ok(())
     }
 
     fn write_block(
@@ -136,16 +137,18 @@ impl Partition for PartitionResource {
         _meta: ipc::Meta,
         block: u32,
         buf: idyll_runtime::Leased<idyll_runtime::Read, u8>,
-    ) {
+    ) -> Result<(), BlockError> {
         if block >= self.count {
-            return;
+            return Err(BlockError::OutOfRange);
         }
         let mut tmp = [0u8; 512];
         let len = buf.len().min(512);
         for i in 0..len {
             tmp[i] = buf.read(i).unwrap_or(0);
         }
-        let _ = sdmmc().write_block(self.offset + block, &tmp);
+        sdmmc().write_block(self.offset + block, &tmp)
+            .unwrap_or(Err(BlockError::Device(0xFFFF)))?;
+        Ok(())
     }
 
     fn block_count(&mut self, _meta: ipc::Meta) -> u32 {

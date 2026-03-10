@@ -23,32 +23,41 @@ fn bin_to_bcd(bin: u8) -> u8 {
 }
 
 fn read_time() -> SystemDateTime {
-    let tr = unsafe { read_volatile(RTC_TR) };
-    let dr = unsafe { read_volatile(RTC_DR) };
+    // Double-read strategy: read TR, DR, then TR again. If TR changed
+    // between the two reads (i.e. a second rolled over), retry to ensure
+    // a consistent time/date pair.
+    loop {
+        let tr = unsafe { read_volatile(RTC_TR) };
+        let dr = unsafe { read_volatile(RTC_DR) };
+        let tr2 = unsafe { read_volatile(RTC_TR) };
+        if tr != tr2 {
+            continue;
+        }
 
-    let hour = bcd_to_bin((((tr >> 29) & 0x3) << 4 | ((tr >> 25) & 0xF)) as u8);
-    let minute = bcd_to_bin((((tr >> 22) & 0x7) << 4 | ((tr >> 18) & 0xF)) as u8);
-    let second = bcd_to_bin((((tr >> 15) & 0x7) << 4 | ((tr >> 11) & 0xF)) as u8);
+        let hour = bcd_to_bin((((tr >> 29) & 0x3) << 4 | ((tr >> 25) & 0xF)) as u8);
+        let minute = bcd_to_bin((((tr >> 22) & 0x7) << 4 | ((tr >> 18) & 0xF)) as u8);
+        let second = bcd_to_bin((((tr >> 15) & 0x7) << 4 | ((tr >> 11) & 0xF)) as u8);
 
-    let year_bcd = bcd_to_bin((((dr >> 20) & 0xF) << 4 | ((dr >> 16) & 0xF)) as u8);
-    let cb = (dr >> 24) & 1 != 0;
-    let year = if !cb {
-        2000 + year_bcd as u16
-    } else {
-        2100 + year_bcd as u16
-    };
-    let month = bcd_to_bin((((dr >> 12) & 0x1) << 4 | ((dr >> 8) & 0xF)) as u8);
-    let day = bcd_to_bin((((dr >> 4) & 0x3) << 4 | (dr & 0xF)) as u8);
-    let weekday = ((dr >> 13) & 0x7) as u8;
+        let year_bcd = bcd_to_bin((((dr >> 20) & 0xF) << 4 | ((dr >> 16) & 0xF)) as u8);
+        let cb = (dr >> 24) & 1 != 0;
+        let year = if !cb {
+            2000 + year_bcd as u16
+        } else {
+            2100 + year_bcd as u16
+        };
+        let month = bcd_to_bin((((dr >> 12) & 0x1) << 4 | ((dr >> 8) & 0xF)) as u8);
+        let day = bcd_to_bin((((dr >> 4) & 0x3) << 4 | (dr & 0xF)) as u8);
+        let weekday = ((dr >> 13) & 0x7) as u8;
 
-    SystemDateTime {
-        year,
-        month,
-        day,
-        weekday,
-        hour,
-        minute,
-        second,
+        break SystemDateTime {
+            year,
+            month,
+            day,
+            weekday,
+            hour,
+            minute,
+            second,
+        };
     }
 }
 

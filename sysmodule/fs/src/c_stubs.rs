@@ -18,7 +18,7 @@ extern "C" {
 /// - `dst` must be large enough to hold `src`
 #[no_mangle]
 unsafe fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char {
-    memcpy(dst as *mut c_void, src as *const c_void, strlen(src)) as *mut c_char
+    memcpy(dst as *mut c_void, src as *const c_void, strlen(src) + 1) as *mut c_char
 }
 
 /// # Safety

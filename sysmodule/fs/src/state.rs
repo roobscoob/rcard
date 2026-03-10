@@ -1,18 +1,24 @@
 //! Global shared state for mounted filesystems.
 //!
 //! All resource implementations (FileSystem, File, Folder) access this shared
-//! state.  Since we run in a single-threaded Hubris task, `unsafe` access to
-//! the static is sound — there is no preemption within the server loop.
+//! state through [`with_state`], which provides exclusive `&mut FsState` access
+//! via [`GlobalState`] with reentrance detection.
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_void};
-use core::mem::MaybeUninit;
 
 use littlefs2_sys::*;
+use once_cell::GlobalState;
 use storage_api::StorageDyn;
 
 /// Maximum number of simultaneously mounted filesystems.
 pub const MAX_FS: usize = 4;
+/// Maximum number of simultaneously open files.
+pub const MAX_OPEN_FILES: usize = 4;
+/// Maximum number of simultaneously open directories.
+pub const MAX_OPEN_DIRS: usize = 4;
+/// Maximum number of filesystem registry entries.
+pub const MAX_REGISTRY_ENTRIES: usize = 8;
 
 /// Block size used by littlefs (matches typical SD sector size).
 const BLOCK_SIZE: u32 = 512;
@@ -24,6 +30,10 @@ const PROG_SIZE: u32 = 512;
 const CACHE_SIZE: usize = 512;
 /// Lookahead buffer size in bytes (must be a multiple of 8).
 const LOOKAHEAD_SIZE: usize = 16;
+
+// ---------------------------------------------------------------------------
+// Per-filesystem context
+// ---------------------------------------------------------------------------
 
 /// Per-filesystem context stored alongside the lfs state.
 pub struct MountedFs {
@@ -37,15 +47,60 @@ pub struct MountedFs {
     pub mounted: bool,
 }
 
-/// Global table of mounted filesystems.
-pub struct FsTable {
-    slots: [Option<MountedFs>; MAX_FS],
+impl MountedFs {
+    /// Get a raw pointer to the lfs_t for passing to littlefs functions.
+    pub fn lfs_ptr(&self) -> *mut lfs_t {
+        self.lfs.get()
+    }
 }
 
-/// The single global filesystem table.
-///
-/// SAFETY: only accessed from the single-threaded server loop.
-static mut FS_TABLE: FsTable = FsTable::new();
+// ---------------------------------------------------------------------------
+// Open file slot
+// ---------------------------------------------------------------------------
+
+pub struct OpenFile {
+    pub file: lfs_file_t,
+    pub file_cfg: lfs_file_config,
+    pub file_cache: [u8; 512],
+    pub path: [u8; 64],
+    pub fs_id: u8,
+    pub refcount: u8,
+    pub occupied: bool,
+    pub unlinked: bool,
+    pub lfs_flags: i32,
+}
+
+// ---------------------------------------------------------------------------
+// Open directory slot
+// ---------------------------------------------------------------------------
+
+pub struct OpenDir {
+    pub dir: lfs_dir_t,
+    pub path: [u8; 64],
+    pub fs_id: u8,
+    pub refcount: u8,
+    pub occupied: bool,
+    pub unlinked: bool,
+    pub generation: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Registry entry
+// ---------------------------------------------------------------------------
+
+pub struct RegistryEntry {
+    pub name: [u8; 16],
+    pub fs_id: Option<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// FsTable
+// ---------------------------------------------------------------------------
+
+/// Global table of mounted filesystems.
+pub struct FsTable {
+    pub slots: [Option<MountedFs>; MAX_FS],
+}
 
 impl FsTable {
     const fn new() -> Self {
@@ -53,16 +108,7 @@ impl FsTable {
             slots: [const { None }; MAX_FS],
         }
     }
-}
 
-/// Get a reference to the global table.
-///
-/// SAFETY: must only be called from the server task's main loop (single-threaded).
-pub unsafe fn table() -> &'static mut FsTable {
-    unsafe { &mut *core::ptr::addr_of_mut!(FS_TABLE) }
-}
-
-impl FsTable {
     /// Allocate a slot and configure littlefs for the given storage, but do NOT
     /// call `lfs_mount`. Returns the slot index (fs_id).
     fn allocate(&mut self, storage: StorageDyn) -> Result<u8, sysmodule_fs_api::FileSystemError> {
@@ -79,8 +125,8 @@ impl FsTable {
         log::info!("allocate: {} blocks", block_count);
 
         let mut fs = MountedFs {
-            lfs: UnsafeCell::new(unsafe { MaybeUninit::zeroed().assume_init() }),
-            config: unsafe { MaybeUninit::zeroed().assume_init() },
+            lfs: UnsafeCell::new(unsafe { core::mem::zeroed() }),
+            config: unsafe { core::mem::zeroed() },
             storage,
             read_cache: [0u8; CACHE_SIZE],
             prog_cache: [0u8; CACHE_SIZE],
@@ -178,96 +224,60 @@ impl FsTable {
     }
 }
 
-impl MountedFs {
-    /// Get a raw pointer to the lfs_t for passing to littlefs functions.
-    pub fn lfs_ptr(&self) -> *mut lfs_t {
-        self.lfs.get()
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Deferred-unlink tracking
+// Combined global state
 // ---------------------------------------------------------------------------
 
-const MAX_UNLINK: usize = 16;
-
-struct UnlinkEntry {
-    fs_id: u8,
-    path: [u8; 64],
-    open_count: u8,
-    unlinked: bool,
-    occupied: bool,
+pub struct FsState {
+    pub fs_table: FsTable,
+    pub open_files: [OpenFile; MAX_OPEN_FILES],
+    pub open_dirs: [OpenDir; MAX_OPEN_DIRS],
+    pub registry: [RegistryEntry; MAX_REGISTRY_ENTRIES],
 }
 
-static mut UNLINK_TABLE: [UnlinkEntry; MAX_UNLINK] = {
-    const EMPTY: UnlinkEntry = UnlinkEntry {
-        fs_id: 0,
-        path: [0; 64],
-        open_count: 0,
-        unlinked: false,
-        occupied: false,
-    };
-    [EMPTY; MAX_UNLINK]
-};
+impl FsState {
+    const fn new() -> Self {
+        const EMPTY_FILE: OpenFile = OpenFile {
+            file: unsafe { core::mem::zeroed() },
+            file_cfg: unsafe { core::mem::zeroed() },
+            file_cache: [0u8; 512],
+            path: [0u8; 64],
+            fs_id: 0,
+            refcount: 0,
+            occupied: false,
+            unlinked: false,
+            lfs_flags: 0,
+        };
+        const EMPTY_DIR: OpenDir = OpenDir {
+            dir: unsafe { core::mem::zeroed() },
+            path: [0u8; 64],
+            fs_id: 0,
+            refcount: 0,
+            occupied: false,
+            unlinked: false,
+            generation: 0,
+        };
+        const EMPTY_REG: RegistryEntry = RegistryEntry {
+            name: [0; 16],
+            fs_id: None,
+        };
 
-fn unlink_table() -> &'static mut [UnlinkEntry; MAX_UNLINK] {
-    unsafe { &mut *core::ptr::addr_of_mut!(UNLINK_TABLE) }
-}
-
-/// Called when a file/dir is opened. Increments the open count for this path.
-pub fn track_open(fs_id: u8, path: &[u8; 64]) {
-    let tbl = unlink_table();
-    if let Some(e) = tbl
-        .iter_mut()
-        .find(|e| e.occupied && e.fs_id == fs_id && e.path == *path)
-    {
-        e.open_count = e.open_count.saturating_add(1);
-        return;
-    }
-    if let Some(e) = tbl.iter_mut().find(|e| !e.occupied) {
-        e.fs_id = fs_id;
-        e.path = *path;
-        e.open_count = 1;
-        e.unlinked = false;
-        e.occupied = true;
-    }
-}
-
-/// Mark a path for deferred deletion.
-pub fn track_unlink(fs_id: u8, path: &[u8; 64]) {
-    let tbl = unlink_table();
-    if let Some(e) = tbl
-        .iter_mut()
-        .find(|e| e.occupied && e.fs_id == fs_id && e.path == *path)
-    {
-        e.unlinked = true;
-    }
-}
-
-/// Called when a file/dir is closed. Decrements the open count.
-/// If the count reaches zero and the path was unlinked, performs `lfs_remove`
-/// and frees the tracking entry.
-pub fn track_close(fs_id: u8, path: &[u8; 64]) {
-    let tbl = unlink_table();
-    let Some(e) = tbl
-        .iter_mut()
-        .find(|e| e.occupied && e.fs_id == fs_id && e.path == *path)
-    else {
-        return;
-    };
-    e.open_count = e.open_count.saturating_sub(1);
-    if e.open_count == 0 && e.unlinked {
-        let fs_tbl = unsafe { table() };
-        if let Some(fs) = fs_tbl.get(fs_id) {
-            unsafe {
-                lfs_remove(fs.lfs_ptr(), e.path.as_ptr() as *const core::ffi::c_char);
-            }
+        Self {
+            fs_table: FsTable::new(),
+            open_files: [EMPTY_FILE; MAX_OPEN_FILES],
+            open_dirs: [EMPTY_DIR; MAX_OPEN_DIRS],
+            registry: [EMPTY_REG; MAX_REGISTRY_ENTRIES],
         }
-        e.occupied = false;
     }
-    if e.open_count == 0 && !e.unlinked {
-        e.occupied = false;
-    }
+}
+
+static FS_STATE: GlobalState<FsState> = GlobalState::new(FsState::new());
+
+/// Access the global filesystem state exclusively through a closure.
+///
+/// Panics if called reentrantly (e.g. from within a littlefs callback).
+pub fn with_state<R>(f: impl FnOnce(&mut FsState) -> R) -> R {
+    FS_STATE.with(f)
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +285,12 @@ pub fn track_close(fs_id: u8, path: &[u8; 64]) {
 // ---------------------------------------------------------------------------
 
 /// Recover the `MountedFs` from the config context pointer.
+///
+/// # Safety
+/// Must only be called from littlefs callbacks where `c` is a valid
+/// `lfs_config` whose `context` field points to a live `MountedFs`.
+/// These callbacks run from within a `with_state` closure, so they must
+/// NOT call `with_state` again.
 unsafe fn ctx(c: *const lfs_config) -> &'static mut MountedFs {
     unsafe { &mut *((*c).context as *mut MountedFs) }
 }

@@ -53,7 +53,7 @@ fn auto_mount_filesystems() {
             }
         };
 
-        let fs_id = match unsafe { state::table() }.mount(storage) {
+        let fs_id = match state::with_state(|s| s.fs_table.mount(storage)) {
             Ok(id) => id,
             Err(FileSystemError::CorruptFilesystem) => {
                 log::warn!("auto-mount: {:?} corrupt, formatting", entry.partition);
@@ -77,7 +77,7 @@ fn auto_mount_filesystems() {
                         continue;
                     }
                 };
-                match unsafe { state::table() }.format(storage) {
+                match state::with_state(|s| s.fs_table.format(storage)) {
                     Ok(id) => id,
                     Err(e) => {
                         log::error!("auto-mount: format {:?} failed: {:?}", entry.partition, e);

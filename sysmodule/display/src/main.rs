@@ -85,10 +85,13 @@ fn lcdc_init_spi() {
 }
 
 fn ssd1312_init(config: &DisplayConfiguration) {
+    let width = config.width;
+    let height = config.height;
+
     ssd1312_cmd(0xAE); // Display off
 
     ssd1312_cmd_arg(0xD5, 0x80); // Clock divide / oscillator
-    ssd1312_cmd_arg(0xA8, config.height - 1); // MUX ratio
+    ssd1312_cmd_arg(0xA8, height - 1); // MUX ratio
     ssd1312_cmd_arg(0xD3, 0x00); // Display offset = 0
     ssd1312_cmd(0x40); // Start line = 0
 
@@ -114,12 +117,12 @@ fn ssd1312_init(config: &DisplayConfiguration) {
     ssd1312_cmd(0xA4); // Resume from entire display ON
 
     // Clear GDDRAM to all zeros (black) — contents are undefined after reset
-    let pages = config.height / 8;
+    let pages = height / 8;
     for page in 0..pages {
         ssd1312_cmd(0xB0 | page); // Set page address
         ssd1312_cmd(0x00); // Lower column = 0
         ssd1312_cmd(0x10); // Upper column = 0
-        for _ in 0..config.width {
+        for _ in 0..width {
             ssd1312_data(0x00);
         }
     }
@@ -152,15 +155,18 @@ impl Display for DisplayResource {
         _meta: ipc::Meta,
         framebuffer: idyll_runtime::Leased<idyll_runtime::Read, u8>,
     ) {
-        let pages = self.config.height / 8;
+        let width = self.config.width as usize;
+        let height = self.config.height;
+        let pages = height / 8;
+        let mut row_buf = [0u8; 255];
         for page in 0..pages {
             ssd1312_cmd(0xB0 | page);
             ssd1312_cmd(0x00);
             ssd1312_cmd(0x10);
-            let row_start = (page as usize) * (self.config.width as usize);
-            for col in 0..self.config.width as usize {
-                let b = framebuffer.read(row_start + col).unwrap_or(0);
-                ssd1312_data(b);
+            let row_start = (page as usize) * width;
+            let _ = framebuffer.read_range(row_start, &mut row_buf[..width]);
+            for col in 0..width {
+                ssd1312_data(row_buf[col]);
             }
         }
     }

@@ -92,6 +92,29 @@ impl DirEntry {
 }
 
 // ---------------------------------------------------------------------------
+// FileOffset newtype
+// ---------------------------------------------------------------------------
+
+#[derive(
+    Clone, Copy, Debug, serde::Serialize, serde::Deserialize, hubpack::SerializedSize,
+)]
+pub struct FileOffset(u32);
+
+impl FileOffset {
+    pub fn new(v: u32) -> Option<Self> {
+        (v <= i32::MAX as u32).then_some(Self(v))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn as_i32(self) -> i32 {
+        self.0 as i32
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resource traits
 // ---------------------------------------------------------------------------
 
@@ -122,7 +145,7 @@ pub trait FileSystem {
 }
 
 /// An open file within a mounted filesystem.
-#[ipc::resource(arena_size = 64, kind = 0x13)]
+#[ipc::resource(arena_size = 4, kind = 0x13)]
 pub trait File {
     #[constructor]
     fn get_in(
@@ -143,10 +166,10 @@ pub trait File {
     fn get_or_create(#[lease] path: &[u8]) -> Result<Self, OpenError>;
 
     #[message]
-    fn read(&self, offset: u32, #[lease] buf: &mut [u8]) -> u32;
+    fn read(&self, offset: FileOffset, #[lease] buf: &mut [u8]) -> u32;
 
     #[message]
-    fn write(&self, offset: u32, #[lease] buf: &[u8]) -> u32;
+    fn write(&self, offset: FileOffset, #[lease] buf: &[u8]) -> u32;
 
     #[message]
     fn size(&self) -> u32;
@@ -161,7 +184,7 @@ pub trait File {
 }
 
 /// An open directory for iteration.
-#[ipc::resource(arena_size = 16, kind = 0x15, clone = refcount)]
+#[ipc::resource(arena_size = 4, kind = 0x15, clone = refcount)]
 pub trait Folder {
     /// Open a directory.  `fs_id` is obtained from `FileSystem::id()`.
     #[constructor]
@@ -174,7 +197,7 @@ pub trait Folder {
     ) -> Result<Self, OpenError>;
 }
 
-#[ipc::resource(arena_size = 0, kind = 0x16)]
+#[ipc::resource(arena_size = 4, kind = 0x16)]
 pub trait FolderIterator {
     #[constructor]
     fn iter(#[handle(clone)] folder: impl Folder) -> Self;

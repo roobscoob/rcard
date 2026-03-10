@@ -1,7 +1,7 @@
 #![no_std]
 
 pub mod ring;
-pub use storage_api::Storage;
+pub use storage_api::{BlockError, Storage};
 
 include!(concat!(env!("OUT_DIR"), "/partition_names.rs"));
 
@@ -25,10 +25,10 @@ pub trait Partition {
     fn acquire(name: [u8; 16]) -> Result<Self, AcquireError>;
 
     #[message]
-    fn read_block(&self, block: u32, #[lease] buf: &mut [u8]);
+    fn read_block(&self, block: u32, #[lease] buf: &mut [u8]) -> Result<(), BlockError>;
 
     #[message]
-    fn write_block(&self, block: u32, #[lease] buf: &[u8]);
+    fn write_block(&self, block: u32, #[lease] buf: &[u8]) -> Result<(), BlockError>;
 
     #[message]
     fn block_count(&self) -> u32;

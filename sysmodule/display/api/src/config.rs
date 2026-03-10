@@ -6,9 +6,11 @@ use ipc::errors::ConstructorError;
 pub struct DisplayConfiguration {
     /// Display width in pixels. Fixed by the display model (e.g. 128 for
     /// SSD1312).
+    /// Invariant: must be non-zero. Enforced by the builder.
     pub width: u8,
     /// Display height in pixels. Fixed by the display model (e.g. 64 for
     /// SSD1312). Sets the MUX ratio to `height - 1`.
+    /// Invariant: must be non-zero. Enforced by the builder.
     pub height: u8,
     /// Contrast level (0x00–0xFF). Controls OLED segment output current and
     /// therefore brightness. 0x7F is the SSD1312 default.
@@ -42,7 +44,11 @@ impl DisplayConfiguration {
     /// - COM pin config 0x12 (alternative, no remap — typical for 128x64)
     /// - charge pump enabled (most modules need this)
     /// - normal (non-inverted) display
+    /// # Panics
+    /// Panics if `width` or `height` is zero.
     pub fn builder(width: u8, height: u8) -> DisplayConfigurationBuilder {
+        assert!(width != 0, "display width must be non-zero");
+        assert!(height != 0, "display height must be non-zero");
         DisplayConfigurationBuilder {
             width,
             height,

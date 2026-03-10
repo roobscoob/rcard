@@ -1,11 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use hubris_task_slots::SLOTS;
-use once_cell::OnceCell;
+use once_cell::{GlobalState, OnceCell};
 use sysmodule_storage_api::{partitions, ring::RingWriter};
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -21,12 +20,7 @@ mod generated {
 static LAST_ID: AtomicU32 = AtomicU32::new(0);
 
 /// Ring writer for the logs partition.
-static WRITER: OnceCell<UnsafeCell<RingWriter>> = OnceCell::new();
-
-fn writer() -> &'static mut RingWriter {
-    // SAFETY: single-threaded IPC server loop.
-    unsafe { &mut *WRITER.get().expect("writer not initialized").get() }
-}
+static WRITER: OnceCell<GlobalState<RingWriter>> = OnceCell::new();
 
 /// Drain new log entries from the log sysmodule and write them to storage.
 fn drain_logs() {
@@ -62,10 +56,11 @@ fn drain_logs() {
             // Only persist entries at INFO level or above (level <= 3).
             let level = buf[offset + 4];
             if level <= 3 {
-                let w = writer();
-                w.begin();
-                w.write(&buf[offset..offset + HEADER + data_len]);
-                w.end();
+                WRITER.get().expect("writer not initialized").with(|w| {
+                    w.begin();
+                    w.write(&buf[offset..offset + HEADER + data_len]);
+                    w.end();
+                });
             }
 
             last = id;
@@ -93,7 +88,7 @@ fn main() -> ! {
 
     // Initialize the ring writer.
     let storage = storage_api::StorageDyn::from_dyn_handle(partition.into());
-    WRITER.set(UnsafeCell::new(RingWriter::new(storage))).ok();
+    WRITER.set(GlobalState::new(RingWriter::new(storage))).ok();
 
     // Do an initial drain in case entries accumulated before we started.
     drain_logs();

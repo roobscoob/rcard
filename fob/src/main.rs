@@ -35,7 +35,7 @@ fn main() -> ! {
     let buf = &mut [0u8; 128];
     let file = FsFile::get(b"main:/demo.txt").unwrap().unwrap();
     let size = file.size().unwrap();
-    let read = file.read(0, &mut buf[..size as usize]).unwrap();
+    let read = file.read(sysmodule_fs_api::FileOffset::new(0).unwrap(), &mut buf[..size as usize]).unwrap();
     file.close().unwrap();
 
     log::info!(

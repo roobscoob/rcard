@@ -16,7 +16,7 @@ fn meta_dir() -> Result<std::path::PathBuf, ()> {
     let work_dir = crate::resolve_alloc::find_work_dir().map_err(|_| ())?;
     let dir = work_dir.join("ipc_meta");
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        println!("cargo::warning=ipc: failed to create ipc_meta dir: {e}");
+        println!("cargo::error=ipc: failed to create ipc_meta dir: {e}");
         return Err(());
     }
     Ok(dir)
@@ -56,7 +56,10 @@ pub fn emit_resource(
 
     let path = dir.join(format!("resource.{}.{}.json", crate_name, trait_name));
     if let Err(e) = write_json(&path, &val) {
-        println!("cargo::warning=ipc: failed to write {}: {e}", path.display());
+        println!(
+            "cargo::warning=ipc: failed to write {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -76,7 +79,10 @@ pub fn emit_interface(crate_name: &str, trait_name: &str, kind: u8) {
 
     let path = dir.join(format!("resource.{}.{}.json", crate_name, trait_name));
     if let Err(e) = write_json(&path, &val) {
-        println!("cargo::warning=ipc: failed to write {}: {e}", path.display());
+        println!(
+            "cargo::warning=ipc: failed to write {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -91,7 +97,10 @@ pub fn emit_server(task_name: &str, serves: &[String]) {
 
     let path = dir.join(format!("server.{}.json", task_name));
     if let Err(e) = write_json(&path, &val) {
-        println!("cargo::warning=ipc: failed to write {}: {e}", path.display());
+        println!(
+            "cargo::warning=ipc: failed to write {}: {e}",
+            path.display()
+        );
     }
 }
 

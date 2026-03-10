@@ -1,77 +1,59 @@
 //! File resource implementation.
 //!
-//! The heavy littlefs state (`lfs_file_t`, cache, config) lives in a static
-//! table so it is never moved after `lfs_file_opencfg`.  `FileResource` is
-//! just a thin index into that table and can be freely moved by the IPC arena.
+//! The heavy littlefs state (`lfs_file_t`, cache, config) lives in the global
+//! `FsState` table so it is never moved after `lfs_file_opencfg`.  `FileResource`
+//! is just a thin index into that table and can be freely moved by the IPC arena.
 
 use core::ffi::c_void;
-use core::mem::MaybeUninit;
 
 use littlefs2_sys::*;
-use sysmodule_fs_api::{File, OpenError};
+use sysmodule_fs_api::{File, FileOffset, OpenError};
 
 use crate::filesystem::{lease_to_cstr, FileSystemResource};
 use crate::state;
 
-const MAX_OPEN_FILES: usize = 4;
-
-struct OpenFile {
-    file: lfs_file_t,
-    file_cfg: lfs_file_config,
-    file_cache: [u8; 512],
-    path: [u8; 64],
-    fs_id: u8,
-    refcount: u8,
-    occupied: bool,
-}
-
-static mut OPEN_FILES: [OpenFile; MAX_OPEN_FILES] = {
-    const EMPTY: OpenFile = OpenFile {
-        file: unsafe { MaybeUninit::zeroed().assume_init() },
-        file_cfg: unsafe { MaybeUninit::zeroed().assume_init() },
-        file_cache: [0u8; 512],
-        path: [0u8; 64],
-        fs_id: 0,
-        refcount: 0,
-        occupied: false,
-    };
-    [EMPTY; MAX_OPEN_FILES]
-};
-
-fn open_files() -> &'static mut [OpenFile; MAX_OPEN_FILES] {
-    unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) }
-}
-
 /// Find an already-open file with the same fs_id and path, bump refcount.
-fn find_existing(fs_id: u8, path: &[u8; 64]) -> Option<usize> {
-    let tbl = open_files();
-    let idx = tbl
+fn find_existing(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], lfs_flags: i32) -> Option<usize> {
+    let idx = s
+        .open_files
         .iter()
         .position(|f| f.occupied && f.fs_id == fs_id && f.path == *path)?;
-    tbl[idx].refcount = tbl[idx].refcount.saturating_add(1);
+    if s.open_files[idx].lfs_flags != lfs_flags {
+        log::warn!(
+            "find_existing: reusing file slot {} with different flags (existing=0x{:x}, requested=0x{:x})",
+            idx,
+            s.open_files[idx].lfs_flags,
+            lfs_flags,
+        );
+    }
+    s.open_files[idx].refcount = s.open_files[idx].refcount.saturating_add(1);
     Some(idx)
 }
 
 /// Open a new file in the static table. Returns the slot index.
-fn open_new(fs_id: u8, path: &[u8; 64], lfs_flags: i32) -> Result<usize, OpenError> {
-    let tbl = open_files();
-    let idx = tbl.iter().position(|f| !f.occupied).ok_or_else(|| {
-        log::error!("open_new: no free file slots");
-        OpenError::Io
-    })?;
+fn open_new(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], lfs_flags: i32) -> Result<usize, OpenError> {
+    let idx = s
+        .open_files
+        .iter()
+        .position(|f| !f.occupied)
+        .ok_or_else(|| {
+            log::error!("open_new: no free file slots");
+            OpenError::Io
+        })?;
 
-    let fs_tbl = unsafe { state::table() };
-    let mounted = fs_tbl.get(fs_id).ok_or_else(|| {
+    let mounted = s.fs_table.get(fs_id).ok_or_else(|| {
         log::error!("open_new: fs not mounted (fs_id={})", fs_id);
         OpenError::Io
     })?;
+    let lfs_ptr = mounted.lfs_ptr();
 
-    let slot = &mut tbl[idx];
-    slot.file = unsafe { MaybeUninit::zeroed().assume_init() };
-    slot.file_cfg = unsafe { MaybeUninit::zeroed().assume_init() };
+    let slot = &mut s.open_files[idx];
+    slot.file = unsafe { core::mem::zeroed() };
+    slot.file_cfg = unsafe { core::mem::zeroed() };
     slot.file_cache = [0u8; 512];
     slot.path = *path;
     slot.fs_id = fs_id;
+    slot.lfs_flags = lfs_flags;
 
     // These pointers are stable because `slot` lives in a static.
     slot.file_cfg.buffer = slot.file_cache.as_mut_ptr() as *mut c_void;
@@ -79,7 +61,7 @@ fn open_new(fs_id: u8, path: &[u8; 64], lfs_flags: i32) -> Result<usize, OpenErr
 
     let rc = unsafe {
         lfs_file_opencfg(
-            mounted.lfs_ptr(),
+            lfs_ptr,
             &mut slot.file,
             slot.path.as_ptr() as *const core::ffi::c_char,
             lfs_flags,
@@ -94,7 +76,7 @@ fn open_new(fs_id: u8, path: &[u8; 64], lfs_flags: i32) -> Result<usize, OpenErr
 
     slot.refcount = 1;
     slot.occupied = true;
-    state::track_open(fs_id, path);
+    slot.unlinked = false;
     log::info!("open_new: file slot {} opened", idx);
     Ok(idx)
 }
@@ -121,15 +103,17 @@ impl FileResource {
             lfs_flags,
         );
 
-        let slot = match find_existing(fs_id, &pathbuf) {
-            Some(idx) => {
-                log::info!("open_inner: reusing file slot {}", idx);
-                idx
-            }
-            None => open_new(fs_id, &pathbuf, lfs_flags)?,
-        };
+        state::with_state(|s| {
+            let slot = match find_existing(s, fs_id, &pathbuf, lfs_flags) {
+                Some(idx) => {
+                    log::info!("open_inner: reusing file slot {}", idx);
+                    idx
+                }
+                None => open_new(s, fs_id, &pathbuf, lfs_flags)?,
+            };
 
-        Ok(FileResource { slot })
+            Ok(FileResource { slot })
+        })
     }
 
     /// Open a file by fs_id directly (used by scheme-path constructors).
@@ -142,19 +126,17 @@ impl FileResource {
             lfs_flags,
         );
 
-        let slot = match find_existing(fs_id, pathbuf) {
-            Some(idx) => {
-                log::info!("open_by_id: reusing file slot {}", idx);
-                idx
-            }
-            None => open_new(fs_id, pathbuf, lfs_flags)?,
-        };
+        state::with_state(|s| {
+            let slot = match find_existing(s, fs_id, pathbuf, lfs_flags) {
+                Some(idx) => {
+                    log::info!("open_by_id: reusing file slot {}", idx);
+                    idx
+                }
+                None => open_new(s, fs_id, pathbuf, lfs_flags)?,
+            };
 
-        Ok(FileResource { slot })
-    }
-
-    fn entry(&mut self) -> &mut OpenFile {
-        &mut open_files()[self.slot]
+            Ok(FileResource { slot })
+        })
     }
 }
 
@@ -167,8 +149,6 @@ fn parse_scheme_path(
     lease: &idyll_runtime::Leased<idyll_runtime::Read, u8>,
     buf: &mut [u8; 64],
 ) -> Result<(u8, usize), OpenError> {
-    use crate::registry::lookup_by_name;
-
     let len = lease.len().min(buf.len());
     for i in 0..len {
         buf[i] = lease.read(i).unwrap_or(0);
@@ -187,7 +167,7 @@ fn parse_scheme_path(
     let scheme_len = colon.min(16);
     name[..scheme_len].copy_from_slice(&buf[..scheme_len]);
 
-    let fs_id = lookup_by_name(&name).ok_or(OpenError::InvalidFs)?;
+    let fs_id = crate::registry::lookup_by_name(&name).ok_or(OpenError::InvalidFs)?;
 
     // Shift the path portion (after the colon) to the front of buf
     let path_start = colon + 1;
@@ -239,92 +219,101 @@ impl File<FileSystemResource> for FileResource {
     fn read(
         &mut self,
         _meta: ipc::Meta,
-        offset: u32,
+        offset: FileOffset,
         buf: idyll_runtime::Leased<idyll_runtime::Write, u8>,
     ) -> u32 {
-        let entry = self.entry();
-        let tbl = unsafe { state::table() };
-        let Some(fs) = tbl.get(entry.fs_id) else {
-            return 0;
-        };
-
-        unsafe { lfs_file_seek(fs.lfs_ptr(), &mut entry.file, offset as i32, 0) };
-
-        let mut total = 0u32;
-        let mut tmp = [0u8; 256];
-        let to_read = buf.len();
-        while (total as usize) < to_read {
-            let chunk = tmp.len().min(to_read - total as usize);
-            let n = unsafe {
-                lfs_file_read(
-                    fs.lfs_ptr(),
-                    &mut entry.file,
-                    tmp.as_mut_ptr() as *mut c_void,
-                    chunk as u32,
-                )
+        debug_assert!(offset.get() <= i32::MAX as u32);
+        state::with_state(|s| {
+            let entry = &mut s.open_files[self.slot];
+            let fs_id = entry.fs_id;
+            let Some(fs) = s.fs_table.get(fs_id) else {
+                return 0;
             };
-            if n <= 0 {
-                break;
+
+            unsafe { lfs_file_seek(fs.lfs_ptr(), &mut entry.file, offset.as_i32(), 0) };
+
+            let mut total = 0u32;
+            let mut tmp = [0u8; 256];
+            let to_read = buf.len();
+            while (total as usize) < to_read {
+                let chunk = tmp.len().min(to_read - total as usize);
+                let n = unsafe {
+                    lfs_file_read(
+                        fs.lfs_ptr(),
+                        &mut entry.file,
+                        tmp.as_mut_ptr() as *mut c_void,
+                        chunk as u32,
+                    )
+                };
+                if n <= 0 {
+                    break;
+                }
+                for i in 0..n as usize {
+                    let _ = buf.write(total as usize + i, tmp[i]);
+                }
+                total += n as u32;
             }
-            for i in 0..n as usize {
-                let _ = buf.write(total as usize + i, tmp[i]);
-            }
-            total += n as u32;
-        }
-        total
+            total
+        })
     }
 
     fn write(
         &mut self,
         _meta: ipc::Meta,
-        offset: u32,
+        offset: FileOffset,
         buf: idyll_runtime::Leased<idyll_runtime::Read, u8>,
     ) -> u32 {
-        let entry = self.entry();
-        let tbl = unsafe { state::table() };
-        let Some(fs) = tbl.get(entry.fs_id) else {
-            return 0;
-        };
-
-        unsafe { lfs_file_seek(fs.lfs_ptr(), &mut entry.file, offset as i32, 0) };
-
-        let mut total = 0u32;
-        let mut tmp = [0u8; 256];
-        let to_write = buf.len();
-        while (total as usize) < to_write {
-            let chunk = tmp.len().min(to_write - total as usize);
-            for i in 0..chunk {
-                tmp[i] = buf.read(total as usize + i).unwrap_or(0);
-            }
-            let n = unsafe {
-                lfs_file_write(
-                    fs.lfs_ptr(),
-                    &mut entry.file,
-                    tmp.as_ptr() as *const c_void,
-                    chunk as u32,
-                )
+        debug_assert!(offset.get() <= i32::MAX as u32);
+        state::with_state(|s| {
+            let entry = &mut s.open_files[self.slot];
+            let fs_id = entry.fs_id;
+            let Some(fs) = s.fs_table.get(fs_id) else {
+                return 0;
             };
-            if n <= 0 {
-                break;
+
+            unsafe { lfs_file_seek(fs.lfs_ptr(), &mut entry.file, offset.as_i32(), 0) };
+
+            let mut total = 0u32;
+            let mut tmp = [0u8; 256];
+            let to_write = buf.len();
+            while (total as usize) < to_write {
+                let chunk = tmp.len().min(to_write - total as usize);
+                for i in 0..chunk {
+                    tmp[i] = buf.read(total as usize + i).unwrap_or(0);
+                }
+                let n = unsafe {
+                    lfs_file_write(
+                        fs.lfs_ptr(),
+                        &mut entry.file,
+                        tmp.as_ptr() as *const c_void,
+                        chunk as u32,
+                    )
+                };
+                if n <= 0 {
+                    break;
+                }
+                total += n as u32;
             }
-            total += n as u32;
-        }
-        total
+            total
+        })
     }
 
     fn size(&mut self, _meta: ipc::Meta) -> u32 {
-        let entry = self.entry();
-        let tbl = unsafe { state::table() };
-        let Some(fs) = tbl.get(entry.fs_id) else {
-            return 0;
-        };
-        let sz = unsafe { lfs_file_size(fs.lfs_ptr(), &mut entry.file) };
-        if sz >= 0 { sz as u32 } else { 0 }
+        state::with_state(|s| {
+            let entry = &mut s.open_files[self.slot];
+            let fs_id = entry.fs_id;
+            let Some(fs) = s.fs_table.get(fs_id) else {
+                return 0;
+            };
+            let sz = unsafe { lfs_file_size(fs.lfs_ptr(), &mut entry.file) };
+            if sz >= 0 { sz as u32 } else { 0 }
+        })
     }
 
     fn unlink(&mut self, _meta: ipc::Meta) {
-        let entry = self.entry();
-        state::track_unlink(entry.fs_id, &entry.path);
+        state::with_state(|s| {
+            s.open_files[self.slot].unlinked = true;
+        });
     }
 
     fn close(self, _meta: ipc::Meta) {
@@ -334,19 +323,26 @@ impl File<FileSystemResource> for FileResource {
 
 impl Drop for FileResource {
     fn drop(&mut self) {
-        let tbl = open_files();
-        let slot = &mut tbl[self.slot];
-        slot.refcount = slot.refcount.saturating_sub(1);
-        if slot.refcount == 0 {
-            let fs_tbl = unsafe { state::table() };
-            if let Some(fs) = fs_tbl.get(slot.fs_id) {
-                unsafe { lfs_file_close(fs.lfs_ptr(), &mut slot.file) };
+        state::with_state(|s| {
+            let slot = &mut s.open_files[self.slot];
+            slot.refcount = slot.refcount.saturating_sub(1);
+            if slot.refcount == 0 {
+                if let Some(fs) = s.fs_table.get(slot.fs_id) {
+                    unsafe { lfs_file_close(fs.lfs_ptr(), &mut slot.file) };
+                }
+                if slot.unlinked {
+                    if let Some(fs) = s.fs_table.get(slot.fs_id) {
+                        unsafe {
+                            lfs_remove(
+                                fs.lfs_ptr(),
+                                slot.path.as_ptr() as *const core::ffi::c_char,
+                            );
+                        }
+                    }
+                }
+                slot.occupied = false;
             }
-            let path = slot.path;
-            let fs_id = slot.fs_id;
-            slot.occupied = false;
-            state::track_close(fs_id, &path);
-        }
+        });
     }
 }
 

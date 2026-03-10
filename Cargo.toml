@@ -52,6 +52,7 @@ panic = "abort"
 debug = true
 panic = "abort"
 lto = true
+codegen-units = 1
 
 [workspace.metadata.rust-analyzer]
 cargo.target = "thumbv8m.main-none-eabihf"

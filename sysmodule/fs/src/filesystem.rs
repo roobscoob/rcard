@@ -12,7 +12,7 @@ impl FileSystem for FileSystemResource {
     fn mount(_meta: ipc::Meta, storage: ipc::DynHandle) -> Result<Self, FileSystemError> {
         log::info!("fs: mount called");
         let dyn_storage = storage_api::StorageDyn::from_dyn_handle(storage);
-        let fs_id = unsafe { state::table() }.mount(dyn_storage)
+        let fs_id = state::with_state(|s| s.fs_table.mount(dyn_storage))
             .inspect_err(|e| log::error!("fs: mount failed: {:?}", e))?;
         log::info!("fs: mount complete, fs_id={}", fs_id);
         Ok(FileSystemResource { fs_id })
@@ -30,29 +30,30 @@ impl FileSystem for FileSystemResource {
     fn format(_meta: ipc::Meta, storage: ipc::DynHandle) -> Result<Self, FileSystemError> {
         log::info!("fs: format called");
         let dyn_storage = storage_api::StorageDyn::from_dyn_handle(storage);
-        let fs_id = unsafe { state::table() }.format(dyn_storage)
+        let fs_id = state::with_state(|s| s.fs_table.format(dyn_storage))
             .inspect_err(|e| log::error!("fs: format failed: {:?}", e))?;
         log::info!("fs: format complete, fs_id={}", fs_id);
         Ok(FileSystemResource { fs_id })
     }
 
     fn stat(&mut self, _meta: ipc::Meta) -> FileSystemStats {
-        let tbl = unsafe { state::table() };
-        let fs = tbl.get(self.fs_id).expect("fs: stat on invalid fs_id");
-        let used = unsafe { littlefs2_sys::lfs_fs_size(fs.lfs_ptr()) };
-        let used_blocks = if used >= 0 { used as u32 } else { 0 };
-        FileSystemStats {
-            total_blocks: fs.block_count,
-            free_blocks: fs.block_count.saturating_sub(used_blocks),
-            block_size: 512,
-        }
+        state::with_state(|s| {
+            let fs = s.fs_table.get(self.fs_id).expect("fs: stat on invalid fs_id");
+            let used = unsafe { littlefs2_sys::lfs_fs_size(fs.lfs_ptr()) };
+            let used_blocks = if used >= 0 { used as u32 } else { 0 };
+            FileSystemStats {
+                total_blocks: fs.block_count,
+                free_blocks: fs.block_count.saturating_sub(used_blocks),
+                block_size: 512,
+            }
+        })
     }
 }
 
 impl Drop for FileSystemResource {
     fn drop(&mut self) {
         log::info!("fs: dropping FileSystemResource fs_id={}", self.fs_id);
-        unsafe { state::table() }.unmount(self.fs_id);
+        state::with_state(|s| s.fs_table.unmount(self.fs_id));
     }
 }
 

@@ -156,6 +156,14 @@ fn gc(state: &mut State) {
 }
 
 /// Post NOTIFICATION_BIT to all subscribers of a group via sys_post.
+///
+/// TODO: This uses generation 0 to construct the TaskId. If a subscriber task
+/// has been restarted (generation incremented), sys_post will return TaskDeath
+/// and the notification will be silently lost. There is no kernel API to look up
+/// the current generation for a task index. To fix this properly, the subscriber
+/// registration should store the full TaskId (including generation) so that
+/// notify can use the correct generation, or the subscriber should re-register
+/// after restart.
 fn notify_subscribers(group_id: u16) {
     for &task_idx in generated::group_subscribers(group_id) {
         let tid = userlib::TaskId::gen0(task_idx);
@@ -238,7 +246,7 @@ impl Reactor for ReactorImpl {
             if state.queue.is_full() {
                 gc(state);
             }
-            if state.queue.is_full() && !evict(state, priority, strategy) {
+            if state.queue.is_full() && !evict(state, effective_priority, strategy) {
                 for &t in generated::group_subscribers(group_id) {
                     drop_notification_for(&notif, t);
                 }

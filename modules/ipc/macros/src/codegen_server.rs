@@ -659,6 +659,7 @@ fn server_return_type(m: &ParsedMethod) -> Option<syn::Type> {
 
 /// Generate resolution statements for resolvable peer params.
 /// After deserialization, each DynHandle param is shadowed with the resolved &PeerType.
+/// If resolution fails (handle not found), replies with HandleLost and returns early.
 fn gen_peer_resolution(m: &ParsedMethod) -> Vec<TokenStream2> {
     m.params
         .iter()
@@ -669,10 +670,17 @@ fn gen_peer_resolution(m: &ParsedMethod) -> Vec<TokenStream2> {
             let name = &p.name;
             let trait_name = p.impl_trait_name.as_ref().unwrap();
             let field = peer_field_name(trait_name);
-            let msg = format!("ipc: invalid peer handle for {}", trait_name);
             Some(quote! {
-                let #name = self.#field.get(#name.handle)
-                    .expect(#msg);
+                let Some(#name) = self.#field.get(#name.handle) else {
+                    let mut __peer_err_buf = [0u8;
+                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+                    let __peer_err_n = hubpack::serialize(
+                        &mut __peer_err_buf,
+                        &core::result::Result::<(), ipc::Error>::Err(ipc::Error::HandleLost),
+                    ).expect("ipc: failed to serialize HandleLost reply");
+                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &__peer_err_buf[..__peer_err_n]);
+                    return Ok(());
+                };
             })
         })
         .collect()

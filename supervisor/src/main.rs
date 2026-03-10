@@ -153,6 +153,7 @@ fn main() -> ! {
                         userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
                     }
                 } else {
+                    usart_write_bytes(b"super: unknown op\r\n");
                     userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
                 }
             }

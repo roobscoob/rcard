@@ -1,10 +1,12 @@
 # Build the Hubris image and run it in Renode
 def main [
     --skip-build  # Skip the build step and just run Renode
+    --build-only  # Build only, do not launch Renode
     --with: string  # Path to a pre-built sdmmc.img (skips build, uses this image directly)
     --features: string  # Comma-delimited feature gates to enable
 ] {
     let project = ($env.FILE_PWD)
+    $env.PYTHONIOENCODING = "utf-8"
     let zip = ($project | path join .work rcard-build.zip)
     let elf = ($project | path join build img final.elf)
     source ./scripts/sdmmc.nu
@@ -243,6 +245,8 @@ def main [
         ($build_dir | path join sdmmc.img)
     }
 
+    if $build_only { return }
+
     # Copy sdmmc image to .state/ so runtime mutations don't affect the build
     let state_dir = ($project | path join .state)
     if not ($state_dir | path exists) { mkdir $state_dir }
@@ -301,7 +305,9 @@ def ensure-rust-objdump [] {
 def ensure-hubake [] {
     if (which hubake | is-empty) {
         print "hubake not found, installing..."
-        cargo install hubake --git "https://github.com/cbiffle/exhubris" --rev "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+        let env_config = open ($env.FILE_PWD | path join hubris-env.toml)
+        let exhubris_rev = $env_config.system.rev
+        cargo install hubake --git "https://github.com/cbiffle/exhubris" --rev $exhubris_rev
     }
 }
 
@@ -357,8 +363,9 @@ def --env setup-arm-cc [] {
 def fix-hubake-cache [] {
     # hubake caches at: %APPDATA%/hubris/git/<base64(repo)>/<rev>/bin/hubris-build
     # but cargo install only creates hubris-build.exe, so the cache check fails
-    let repo = "https://github.com/cbiffle/exhubris"
-    let rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+    let env_config = open ($env.FILE_PWD | path join hubris-env.toml)
+    let repo = $env_config.system.repo
+    let rev = $env_config.system.rev
     let repo_b64 = (python -c $"import base64; print\(base64.b64encode\(b'($repo)'\).decode\(\)\)")
     let exe = ([$env.APPDATA hubris git $repo_b64 $rev bin hubris-build.exe] | path join)
     let noext = ($exe | str replace '.exe' '')
