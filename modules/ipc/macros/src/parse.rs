@@ -1,9 +1,9 @@
 use syn::{
+    Expr, FnArg, GenericArgument, Ident, ItemTrait, Lit, Meta, Pat, PathArguments, ReturnType,
+    Token, TraitItem, TraitItemFn, Type, TypeParamBound,
     ext::IdentExt,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Expr, FnArg, GenericArgument, Ident, ItemTrait, Lit, Meta, Pat, PathArguments,
-    ReturnType, Token, TraitItem, TraitItemFn, Type, TypeParamBound,
 };
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,6 @@ pub struct ResourceAttr {
     /// interface's Op enum to assign matching method IDs at compile time.
     pub implements: Option<syn::Path>,
     pub clone_mode: Option<CloneMode>,
-    pub parent: Option<String>,
 }
 
 impl Parse for ResourceAttr {
@@ -31,7 +30,6 @@ impl Parse for ResourceAttr {
         let mut kind = None;
         let mut implements: Option<syn::Path> = None;
         let mut clone_mode = None;
-        let mut parent = None;
 
         let pairs = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
         for meta in pairs {
@@ -59,19 +57,12 @@ impl Parse for ResourceAttr {
                             }
                         }
                     }
-                    Some("parent") => {
-                        if let Expr::Path(p) = &nv.value {
-                            if let Some(ident) = p.path.get_ident() {
-                                parent = Some(ident.to_string());
-                            }
-                        }
-                    }
                     other => {
                         return Err(syn::Error::new_spanned(
                             &nv.path,
                             format!(
                                 "unknown ipc::resource attribute `{}`; \
-                                 expected one of: arena_size, kind, clone, parent",
+                                 expected one of: arena_size, kind, clone",
                                 other.unwrap_or("?"),
                             ),
                         ));
@@ -81,10 +72,7 @@ impl Parse for ResourceAttr {
                 if list.path.is_ident("implements") {
                     // Parse implements(path::to::Trait)
                     let path: syn::Path = syn::parse2(list.tokens.clone()).map_err(|_| {
-                        syn::Error::new_spanned(
-                            &list.tokens,
-                            "expected `implements(TraitPath)`",
-                        )
+                        syn::Error::new_spanned(&list.tokens, "expected `implements(TraitPath)`")
                     })?;
                     implements = Some(path);
                 } else {
@@ -92,8 +80,11 @@ impl Parse for ResourceAttr {
                         &list.path,
                         format!(
                             "unknown ipc::resource attribute `{}`; \
-                             expected one of: arena_size, kind, clone, parent, implements",
-                            list.path.get_ident().map(|i| i.to_string()).unwrap_or_else(|| "?".into()),
+                             expected one of: arena_size, kind, clone, implements",
+                            list.path
+                                .get_ident()
+                                .map(|i| i.to_string())
+                                .unwrap_or_else(|| "?".into()),
                         ),
                     ));
                 }
@@ -110,7 +101,6 @@ impl Parse for ResourceAttr {
             kind: kind.ok_or_else(|| input.error("missing `kind`"))?,
             implements,
             clone_mode,
-            parent,
         })
     }
 }
@@ -213,12 +203,14 @@ pub struct ParsedMethod {
     /// If this message constructs a different resource type.
     /// `(TraitName, GenericIdent)` from `#[message(constructs(FileSystem = FS))]`.
     pub constructs: Option<(Ident, Ident)>,
-    /// If the return type is `impl Trait`.
-    pub return_impl_trait: Option<Ident>,
 }
 
 fn has_receiver(method: &TraitItemFn) -> bool {
-    method.sig.inputs.iter().any(|arg| matches!(arg, FnArg::Receiver(_)))
+    method
+        .sig
+        .inputs
+        .iter()
+        .any(|arg| matches!(arg, FnArg::Receiver(_)))
 }
 
 fn classify_method(method: &TraitItemFn) -> Option<(MethodKind, Option<(Ident, Ident)>)> {
@@ -290,10 +282,7 @@ fn parse_handle_mode(arg: &FnArg) -> Option<HandleMode> {
                     match ident.to_string().as_str() {
                         "move" => Ok(HandleMode::Move),
                         "clone" => Ok(HandleMode::Clone),
-                        _ => Err(syn::Error::new(
-                            ident.span(),
-                            "expected `move` or `clone`",
-                        )),
+                        _ => Err(syn::Error::new(ident.span(), "expected `move` or `clone`")),
                     }
                 }) {
                     return Some(mode);
@@ -376,29 +365,6 @@ fn extract_return_type(ret: &ReturnType) -> Option<Type> {
     }
 }
 
-fn extract_return_impl_trait(ret: &ReturnType) -> Option<Ident> {
-    match ret {
-        ReturnType::Default => None,
-        ReturnType::Type(_, ty) => {
-            // Check bare `impl Trait`
-            if let Some(name) = extract_impl_trait(ty) {
-                return Some(name);
-            }
-            // Check `Result<impl Trait, E>` and `Option<impl Trait>`
-            if let Type::Path(p) = ty.as_ref() {
-                if let Some(seg) = p.path.segments.last() {
-                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                            return extract_impl_trait(inner);
-                        }
-                    }
-                }
-            }
-            None
-        }
-    }
-}
-
 /// Parse a constructor's return type into a validated `ConstructorReturn`.
 /// Only `Self`, `Result<Self, E>`, and `Option<Self>` are accepted.
 fn parse_ctor_return(ret: &ReturnType) -> syn::Result<ConstructorReturn> {
@@ -475,7 +441,6 @@ pub fn parse_methods(trait_def: &ItemTrait) -> syn::Result<Vec<ParsedMethod>> {
             }
 
             let return_type = extract_return_type(&method.sig.output);
-            let return_impl_trait = extract_return_impl_trait(&method.sig.output);
 
             let ctor_return = if kind == MethodKind::Constructor {
                 Some(parse_ctor_return(&method.sig.output)?)
@@ -499,7 +464,6 @@ pub fn parse_methods(trait_def: &ItemTrait) -> syn::Result<Vec<ParsedMethod>> {
                 ctor_return,
                 method_id: next_id,
                 constructs,
-                return_impl_trait,
             });
 
             next_id += 1;
@@ -517,7 +481,10 @@ pub fn collect_peer_traits(methods: &[ParsedMethod]) -> Vec<(Ident, Ident)> {
         for p in &m.params {
             if p.handle_mode == Some(HandleMode::Clone) {
                 if let Some(ref trait_name) = p.impl_trait_name {
-                    if !seen.iter().any(|(name, _): &(Ident, Ident)| name == trait_name) {
+                    if !seen
+                        .iter()
+                        .any(|(name, _): &(Ident, Ident)| name == trait_name)
+                    {
                         let snake = crate::util::to_snake_ident(trait_name);
                         seen.push((trait_name.clone(), snake));
                     }

@@ -4,6 +4,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use hubris_task_slots::SLOTS;
+use once_cell::OnceCell;
 use sysmodule_storage_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -60,10 +61,10 @@ fn is_managed(name: &str) -> bool {
 
 // ── Shared SDMMC handle ────────────────────────────────────────────
 
-static mut SDMMC: Option<Sdmmc> = None;
+static SDMMC: OnceCell<Sdmmc> = OnceCell::new();
 
 fn sdmmc() -> &'static Sdmmc {
-    unsafe { SDMMC.as_ref().expect("SDMMC not initialized") }
+    SDMMC.get().expect("SDMMC not initialized")
 }
 
 // ── Partition resource implementation ───────────────────────────────
@@ -98,8 +99,12 @@ impl Partition for PartitionResource {
             return Err(AcquireError::InUse);
         }
 
-        log::info!("partition {:?} acquired (offset={}, size={})",
-            config.name, config.offset_blocks, config.size_blocks);
+        log::info!(
+            "partition {:?} acquired (offset={}, size={})",
+            config.name,
+            config.offset_blocks,
+            config.size_blocks
+        );
 
         Ok(PartitionResource {
             index: idx,
@@ -162,14 +167,25 @@ fn main() -> ! {
     sysmodule_log_api::init_logger!(Log);
 
     // Acquire the raw SDMMC device.
-    let sdmmc = Sdmmc::open().unwrap().expect("storage: failed to acquire SDMMC");
-    unsafe { SDMMC = Some(sdmmc) };
+    let sdmmc = Sdmmc::open()
+        .unwrap()
+        .expect("storage: failed to acquire SDMMC");
+    SDMMC.set(sdmmc).ok();
 
     log::info!("storage: {} partitions configured", PARTITIONS.len());
     for p in PARTITIONS {
-        log::info!("  {:?}: offset={} size={} format={:?}{}",
-            p.name, p.offset_blocks, p.size_blocks, p.format,
-            if is_managed(p.name) { " [filesystem]" } else { "" });
+        log::info!(
+            "  {:?}: offset={} size={} format={:?}{}",
+            p.name,
+            p.offset_blocks,
+            p.size_blocks,
+            p.format,
+            if is_managed(p.name) {
+                " [filesystem]"
+            } else {
+                ""
+            }
+        );
     }
 
     ipc::server! {

@@ -17,3 +17,6 @@ userlib.workspace = true
 name = "sysmodule_display"
 test = false
 bench = false
+
+[lints]
+workspace = true

@@ -12,6 +12,7 @@ log = { version = "0.4", default-features = false }
 sysmodule_log_api = { path = "../../sysmodule/log/api", features = ["logger"] }
 sysmodule_sdmmc_api = { path = "../sdmmc/api" }
 sysmodule_storage_api = { path = "api" }
+once-cell = { path = "../../modules/once_cell" }
 storage_api = { path = "../../modules/storage_api" }
 userlib = { workspace = true, features = ["no-panic-handler"] }
 
@@ -22,3 +23,6 @@ serde_json = "1"
 name = "sysmodule_storage"
 test = false
 bench = false
+
+[lints]
+workspace = true

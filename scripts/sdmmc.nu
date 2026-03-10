@@ -130,13 +130,20 @@ def "sdmmc open" [
 
         python (project-root | path join scripts _lfs.py) read $resolved $part.offset_bytes $part.size_bytes $path
     } else {
-        # raw partition dump
+        # whole partition
         let part = (find-partition $target)
-        if $part.format not-in [raw boot] {
-            error make { msg: $"Partition '($target)' has format '($part.format)', expected 'raw' or 'boot'" }
+        if $part.format == "ringbuffer" {
+            # Extract raw partition slice, pipe through ring buffer reader
+            let tmp = (mktemp -t sdmmc_ring_XXXXXX)
+            open $resolved | bytes at $part.offset_bytes..($part.offset_bytes + $part.size_bytes) | save -f $tmp
+            let lines = (python (project-root | path join scripts read_ringbuf.py) $tmp | lines | each { |l| $l | decode base64 })
+            rm -f $tmp
+            $lines
+        } else if $part.format in [raw boot] {
+            open $resolved | bytes at $part.offset_bytes..($part.offset_bytes + $part.size_bytes)
+        } else {
+            error make { msg: $"Partition '($target)' has format '($part.format)', expected 'raw', 'boot', or 'ringbuffer'" }
         }
-
-        open $resolved | bytes at $part.offset_bytes..($part.offset_bytes + $part.size_bytes)
     }
 }
 
@@ -145,6 +152,7 @@ def "sdmmc format littlefs" [
     name: string       # Partition name
     --with: string     # Optional: path to folder to populate the filesystem with
     --img: string      # Path to sdmmc image (default: build/sdmmc.img)
+    --silent           # If set, suppress output (for scripting)
 ] {
     let part = (find-partition $name)
     if $part.format != "littlefs" {
@@ -157,7 +165,10 @@ def "sdmmc format littlefs" [
     } else {
         python (project-root | path join scripts _lfs.py) format $resolved $part.offset_bytes $part.size_bytes
     }
-    print $"Formatted partition '($name)' as littlefs"
+
+    if not $silent {
+        print $"Formatted partition '($name)' as littlefs"
+    }
 }
 
 # Pack raw data into a partition, zero-padding to fill.

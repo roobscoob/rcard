@@ -42,6 +42,7 @@ pub const MALFORMED_MESSAGE: userlib::ResponseCode = userlib::ResponseCode(1);
 /// panics on any non-SUCCESS response code.
 pub const INVALID_HANDLE: userlib::ResponseCode = userlib::ResponseCode(2);
 
+pub mod alloc_take;
 mod arena;
 mod dyn_handle;
 mod handle;
@@ -56,7 +57,9 @@ pub use dyn_handle::DynHandle;
 pub use handle::{
     CLONE_METHOD, IMPLICIT_DESTROY_METHOD, TRANSFER_METHOD, Meta, RawHandle, opcode, split_opcode,
 };
-pub use ipc_macros::{interface, resource, server};
+pub use ipc_macros::{
+    __check_uses, allocation, interface, notification_handler, resource, server,
+};
 pub use server::{ResourceDispatch, Server};
 
 /// Trait used by generated dispatcher code to extract a resource from a

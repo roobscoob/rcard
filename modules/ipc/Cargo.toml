@@ -17,3 +17,6 @@ idyll_runtime.workspace = true
 hubpack = "0.1.2"
 serde = { version = "1", default-features = false, features = ["derive"] }
 ipc-macros = { path = "macros" }
+
+[lints]
+workspace = true

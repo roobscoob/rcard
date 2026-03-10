@@ -22,6 +22,46 @@ pub fn gen_client(
     let binding_struct_name = format_ident!("{}Server", trait_name);
     let bind_macro_name = format_ident!("bind_{}", to_snake_case(&trait_name.to_string()));
 
+    // Generate a dependency check: the bind macro calls __check_uses!()
+    // which reads .work/app.uses.json at compile time to verify the
+    // consuming task declared this dependency. Skipped if the file
+    // doesn't exist (e.g. during IDE cargo check without a prior build).
+    let peer_guard = {
+        let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+        let task_name = pkg.strip_suffix("_api").unwrap_or(&pkg).to_string();
+        quote! {
+            ipc::__check_uses!(#task_name);
+        }
+    };
+
+    let constructors: Vec<&ParsedMethod> = methods
+        .iter()
+        .filter(|m| m.kind == MethodKind::Constructor)
+        .collect();
+
+    // Generate constructor enum variants (store non-lease, non-handle params).
+    let ctor_variants: Vec<TokenStream2> = constructors
+        .iter()
+        .map(|m| {
+            let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));
+            let fields: Vec<TokenStream2> = m
+                .params
+                .iter()
+                .filter(|p| !p.is_lease && p.handle_mode.is_none())
+                .map(|p| {
+                    let name = &p.name;
+                    let ty = &p.ty;
+                    quote! { #name: #ty }
+                })
+                .collect();
+            if fields.is_empty() {
+                quote! { #variant }
+            } else {
+                quote! { #variant { #(#fields),* } }
+            }
+        })
+        .collect();
+
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
 
     let enum_name = format_ident!("{}Op", trait_name);
@@ -135,6 +175,7 @@ pub fn gen_client(
         #[macro_export]
         macro_rules! #bind_macro_name {
             ($name:ident = $slot:expr) => {
+                #peer_guard
                 #[doc(hidden)]
                 struct #binding_struct_name;
                 impl $crate::#mod_name::#server_trait_name for #binding_struct_name {

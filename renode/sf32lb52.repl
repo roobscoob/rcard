@@ -21,6 +21,9 @@ sram_shared: Memory.MappedMemory @ sysbus 0x20800000
 flash: Memory.MappedMemory @ sysbus 0x10000000
     size: 0x02000000  // 32MB MPI1 (external NOR flash)
 
+ext_ram: Memory.MappedMemory @ sysbus 0x60000000
+    size: 0x00800000
+
 // Peripherals
 
 usart1: UART.STM32F7_USART @ sysbus 0x50084000
@@ -45,7 +48,6 @@ sdmmc1: SD.SF32LB52_SDMMC @ sysbus 0x50045000
 
 sysbus:
     init:
-        SilenceRange <0xE000EDC4, 0xE000EDC7>  // SF32LB52 vendor SCB register (WDT/unlock?)
         SilenceRange <0x50000000, 0x50000FFF>  // RCC
         SilenceRange <0x50003000, 0x500030E7>  // Pin Control
         SilenceRange <0x5000B000, 0x5000BFFF>  // Syscon

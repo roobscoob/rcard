@@ -3,7 +3,6 @@
 
 use hubris_task_slots::SLOTS;
 use sysmodule_display_api::DisplayConfiguration;
-use sysmodule_storage_api::partitions;
 
 sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -44,6 +43,11 @@ fn main() -> ! {
         read,
         core::str::from_utf8(&buf[..read as usize]).unwrap_or("<invalid utf8>")
     );
+
+    // Test that consume_since is rejected for non-subscribers.
+    let mut test_buf = [0u8; 64];
+    let result = Log::consume_since(0, &mut test_buf).unwrap();
+    result.unwrap(); // Should panic: fob is not a logs subscriber
 
     loop {
         // log::info!("tick");

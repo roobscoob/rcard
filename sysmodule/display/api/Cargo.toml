@@ -14,3 +14,6 @@ serde = { version = "1.0.228", default-features = false }
 [lib]
 test = false
 bench = false
+
+[lints]
+workspace = true

@@ -11,3 +11,6 @@ kipc.workspace = true
 name = "supervisor"
 test = false
 bench = false
+
+[lints]
+workspace = true

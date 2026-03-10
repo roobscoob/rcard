@@ -13,15 +13,25 @@ members = [
     "sysmodule/sdmmc/api",
     "sysmodule/fs",
     "sysmodule/fs/api",
+    "sysmodule/reactor",
+    "sysmodule/reactor/api",
     "sysmodule/storage",
     "sysmodule/storage/api",
+    "sysmodule/compositor",
+    "sysmodule/compositor/api",
+    "sysmodule/log_sink_storage",
     "modules/storage_api",
     "fob",
     "modules/ipc",
     "modules/ipc/macros",
+    "modules/once_cell",
     "kernel-sf32lb52",
     "supervisor",
+    "idle",
 ]
+
+[workspace.lints.rust]
+warnings = "deny"
 
 [workspace.dependencies]
 userlib = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173", features = [

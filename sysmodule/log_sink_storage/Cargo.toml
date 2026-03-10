@@ -1,0 +1,27 @@
+[package]
+name = "sysmodule_log_sink_storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hubris-task-slots.workspace = true
+idyll_runtime.workspace = true
+ipc = { path = "../../modules/ipc" }
+log = { version = "0.4", default-features = false }
+once-cell = { path = "../../modules/once_cell" }
+sysmodule_log_api = { path = "../log/api", features = ["logger"] }
+sysmodule_reactor_api = { path = "../reactor/api" }
+sysmodule_storage_api = { path = "../storage/api" }
+storage_api = { path = "../../modules/storage_api" }
+userlib.workspace = true
+
+[build-dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "sysmodule_log_sink_storage"
+test = false
+bench = false
+
+[lints]
+workspace = true

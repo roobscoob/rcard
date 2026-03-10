@@ -1,127 +1,171 @@
-define workgroup {
+define "workgroup" {
     kernel
+    core-sysmodule
     sysmodule
     app
     idle
 }
 
-app rcard
+app "rcard"
 
-board sf32lb52-dev {
+board "sf32lb52-dev" {
     chip "proj:chips/sf32lb52-ram.kdl"
+
+    memory "ext_ram" {
+        base 0x6000_0000
+        size 0x0080_0000
+    }
+}
+
+allocation "frame_buffers" {
+    in "ext_ram"
+    size (KiB)512 // 8 KB per framebuffer, 64 framebuffers total
+    align 32 // 32 byte alignment for cache efficiency
+    policy { auto; }
 }
 
 kernel {
     workspace-crate "kernel-sf32lb52"
-    stack-size 1024
+    stack-size (KiB)1
 }
 
-block-device sdmmc {
+block-device "sdmmc" {
+    size (B)120586240
+    block-size (B)512
+
     partition "firmware" {
-        size 384 KiB
-        format boot
+        size (KiB)384
+        format "boot"
     }
 
     partition "logs" {
-        size 10 MiB
-        format ringbuffer
+        size (MiB)10
+        format "ringbuffer"
     }
 
     partition "main" {
-        size 100 MiB
-        format littlefs
+        size (MiB)10
+        format "littlefs"
     }
 }
 
-filesystem global {
-    map main { source sdmmc::main }
+filesystem "global" {
+    map "main" { source "sdmmc::main"; }
 }
 
-task idle {
-    git-crate {
-        repo "https://github.com/cbiffle/exhubris/"
-        package idle
-        rev "69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
+
+notifications {
+    logs {
+        min-priority 0
+        max-priority 10
     }
+}
+
+task "idle" {
+    workspace-crate "idle"
     stack-size 256
-    priority (workgroup)idle
-    features insomniac
+    priority (workgroup)"idle"
+    features "insomniac"
 }
 
-task super {
+task "super" {
     supervisor
     workspace-crate "supervisor"
-    priority (workgroup)kernel
-    stack-size 8192
-    uses-peripheral usart1
+    priority (workgroup)"kernel"
+    stack-size (KiB)8
+    uses-peripheral "usart1"
 }
 
-task sysmodule_usart {
+task "sysmodule_usart" {
     workspace-crate "sysmodule_usart"
-    stack-size 2048
-    priority (workgroup)sysmodule
+    stack-size (KiB)2
+    priority (workgroup)"core-sysmodule"
 
     // can't use USART1 - it's used by the supervisor for logging
-    uses-peripheral usart2
-    uses-peripheral usart3
+    uses-peripheral "usart2"
+    uses-peripheral "usart3"
 }
 
-task sysmodule_time {
+task "sysmodule_time" {
     workspace-crate "sysmodule_time"
-    stack-size 1024
-    priority (workgroup)sysmodule
-    uses-peripheral rtc
+    stack-size (KiB)1
+    priority (workgroup)"core-sysmodule"
+    uses-peripheral "rtc"
 }
 
-task sysmodule_log {
+task "sysmodule_log" {
     workspace-crate "sysmodule_log"
-    stack-size 4096
-    priority (workgroup)sysmodule
-    uses-task sysmodule_usart
-    uses-task sysmodule_time
-    uses-task sysmodule_storage
-    uses-partition logs
+    stack-size (KiB)4
+    priority (workgroup)"core-sysmodule"
+    uses-sysmodule "usart"
+    uses-sysmodule "time"
+    uses-sysmodule "reactor"
+    pushes-notification "logs"
 }
 
-task sysmodule_display {
+task "sysmodule_reactor" {
+    workspace-crate "sysmodule_reactor"
+    stack-size (KiB)2
+    priority (workgroup)"core-sysmodule"
+}
+
+task "sysmodule_display" {
     workspace-crate "sysmodule_display"
-    stack-size 2048
-    priority (workgroup)sysmodule
-    uses-peripheral lcdc
-    uses-task sysmodule_log
+    stack-size (KiB)2
+    priority (workgroup)"sysmodule"
+    uses-peripheral "lcdc"
+    uses-sysmodule "log"
 }
 
-task sysmodule_sdmmc {
+task "sysmodule_compositor" {
+    workspace-crate "sysmodule_compositor"
+    stack-size (KiB)2
+    priority (workgroup)"sysmodule"
+    uses-sysmodule "display"
+    uses-sysmodule "log"
+    uses-allocation "frame_buffers" { read; write; }
+}
+
+task "sysmodule_sdmmc" {
     workspace-crate "sysmodule_sdmmc"
-    stack-size 4096
-    priority (workgroup)sysmodule
-    uses-peripheral sdmmc1
-    uses-task sysmodule_log
+    stack-size (KiB)4
+    priority (workgroup)"sysmodule"
+    uses-peripheral "sdmmc1"
+    uses-sysmodule "log"
 }
 
-task sysmodule_storage {
+task "sysmodule_storage" {
     workspace-crate "sysmodule_storage"
-    stack-size 4096
-    priority (workgroup)sysmodule
-    uses-task sysmodule_sdmmc
-    uses-task sysmodule_fs
-    uses-task sysmodule_log
+    stack-size (KiB)4
+    priority (workgroup)"sysmodule"
+    uses-sysmodule "sdmmc"
+    peer-sysmodule "fs"
+    uses-sysmodule "log"
 }
 
-task sysmodule_fs {
+task "sysmodule_log_sink_storage" {
+    workspace-crate "sysmodule_log_sink_storage"
+    stack-size (KiB)4
+    priority (workgroup)"sysmodule"
+    uses-sysmodule "log"
+    uses-partition "logs"
+    uses-notification "logs"
+}
+
+task "sysmodule_fs" {
     workspace-crate "sysmodule_fs"
-    stack-size 32768
-    priority (workgroup)sysmodule
-    uses-task sysmodule_storage
-    uses-task sysmodule_log
+    stack-size (KiB)32
+    priority (workgroup)"sysmodule"
+    uses-sysmodule "storage"
+    uses-sysmodule "log"
 }
 
-task fob {
+task "fob" {
     workspace-crate "fob"
-    stack-size 8192
-    priority (workgroup)app
-    uses-task sysmodule_display
-    uses-task sysmodule_log
-    uses-task sysmodule_storage
-    uses-task sysmodule_fs
+    stack-size (KiB)8
+    priority (workgroup)"app"
+    uses-sysmodule "display"
+    uses-sysmodule "log"
+    uses-sysmodule "storage"
+    uses-sysmodule "fs"
 }

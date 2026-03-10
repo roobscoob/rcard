@@ -108,10 +108,6 @@ fn main() {
     // Generate partition ACL function.
     // The ACL maps partition names to the set of tasks allowed to acquire them.
     // Task identity is checked via SLOTS (hubris_task_slots).
-    writeln!(out, "pub fn is_partition_allowed(name: &str, caller: u16) -> bool {{").unwrap();
-    writeln!(out, "    use hubris_task_slots::SLOTS;").unwrap();
-    writeln!(out, "    match name {{").unwrap();
-
     // Build a reverse map: partition_name -> [task_names]
     let mut acl_map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
     if let Some(acl) = data["partition_acl"].as_object() {
@@ -124,6 +120,13 @@ fn main() {
             }
         }
     }
+
+    let caller_param = if acl_map.is_empty() { "_caller" } else { "caller" };
+    writeln!(out, "pub fn is_partition_allowed(name: &str, {caller_param}: u16) -> bool {{").unwrap();
+    if !acl_map.is_empty() {
+        writeln!(out, "    use hubris_task_slots::SLOTS;").unwrap();
+    }
+    writeln!(out, "    match name {{").unwrap();
 
     for (part_name, task_names) in &acl_map {
         let checks: Vec<String> = task_names

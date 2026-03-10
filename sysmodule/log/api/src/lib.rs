@@ -22,6 +22,19 @@ pub enum LogLevel {
     Trace,
 }
 
+impl LogLevel {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => LogLevel::Panic,
+            1 => LogLevel::Error,
+            2 => LogLevel::Warn,
+            3 => LogLevel::Info,
+            4 => LogLevel::Debug,
+            _ => LogLevel::Trace,
+        }
+    }
+}
+
 #[cfg(feature = "logger")]
 pub use log;
 
@@ -105,7 +118,21 @@ impl<B: LogBackend> core::fmt::Write for LogWriter<B> {
     }
 }
 
-#[ipc::resource(arena_size = 1, kind = 0x03)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    hubpack::SerializedSize,
+)]
+pub enum LogError {
+    Unauthorized,
+}
+
+#[ipc::resource(arena_size = 16, kind = 0x03)]
 pub trait Log {
     #[message]
     fn log(level: LogLevel, #[lease] data: &[u8]);
@@ -115,6 +142,9 @@ pub trait Log {
 
     #[message]
     fn write(&self, #[lease] data: &[u8]);
+
+    #[message]
+    fn consume_since(since_id: u32, #[lease] buf: &mut [u8]) -> Result<u32, LogError>;
 }
 
 /// Initialize the global `log` logger backed by the IPC Log sysmodule.

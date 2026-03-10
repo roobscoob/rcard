@@ -15,3 +15,6 @@ userlib.workspace = true
 name = "sysmodule_usart"
 test = false
 bench = false
+
+[lints]
+workspace = true

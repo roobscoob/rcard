@@ -17,3 +17,6 @@ package = "kern"
 git = "https://github.com/cbiffle/hubris-fork.git"
 branch = "cbiffle/exhubris-fixes"
 features = ["stack-watermark"]
+
+[lints]
+workspace = true

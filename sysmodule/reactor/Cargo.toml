@@ -1,0 +1,23 @@
+[package]
+name = "sysmodule_reactor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hubpack = "0.1.2"
+idyll_runtime.workspace = true
+ipc = { path = "../../modules/ipc" }
+heapless = "0.8"
+sysmodule_reactor_api = { path = "api" }
+userlib.workspace = true
+
+[build-dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "sysmodule_reactor"
+test = false
+bench = false
+
+[lints]
+workspace = true

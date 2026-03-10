@@ -13,7 +13,7 @@ fn main() {
     let mut out = std::fs::File::create(&out_path).unwrap();
 
     if !json_path.exists() {
-        writeln!(out, "pub const AUTO_MOUNT: &[AutoMount] = &[];").unwrap();
+        writeln!(out, "pub(crate) const AUTO_MOUNT: &[AutoMount] = &[];").unwrap();
         return;
     }
 
@@ -35,7 +35,7 @@ fn main() {
         }
     }
 
-    writeln!(out, "pub const AUTO_MOUNT: &[AutoMount] = &[").unwrap();
+    writeln!(out, "pub(crate) const AUTO_MOUNT: &[AutoMount] = &[").unwrap();
     for (name, partition) in &mounts {
         writeln!(
             out,

@@ -1,0 +1,11 @@
+[package]
+name = "once-cell"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+test = false
+bench = false
+
+[lints]
+workspace = true

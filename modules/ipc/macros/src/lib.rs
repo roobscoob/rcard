@@ -2,9 +2,11 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse_macro_input;
 
+mod check_uses;
 mod codegen_client;
 mod codegen_server;
 mod parse;
+mod resolve_alloc;
 mod util;
 
 use codegen_client::{gen_client, gen_dyn_client};
@@ -12,6 +14,7 @@ use codegen_server::{
     gen_constants, gen_dispatcher, gen_operation_enum, gen_server_trait, gen_wiring_macro,
 };
 use parse::{parse_methods, InterfaceAttr, MethodKind, ResourceAttr};
+use util::to_screaming_snake_case;
 
 #[proc_macro_attribute]
 pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -84,7 +87,6 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         kind: iface_attrs.kind,
         implements: None,
         clone_mode: None,
-        parent: None,
     };
 
     let server_trait = gen_server_trait(trait_name, &methods, &attrs);
@@ -109,26 +111,76 @@ struct ServerEntry {
     concrete_type: syn::Path,
 }
 
+struct NotificationConfig {
+    /// The reactor client type (e.g., `Reactor` from `bind_reactor!`).
+    reactor_client: syn::Path,
+    /// Handler functions to call for each pulled notification.
+    handlers: Vec<syn::Path>,
+}
+
 struct ServerInput {
     entries: Vec<ServerEntry>,
+    notifications: Option<NotificationConfig>,
 }
 
 impl syn::parse::Parse for ServerInput {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut entries = Vec::new();
+        let mut notifications = None;
+
         while !input.is_empty() {
-            let trait_name: syn::Ident = input.parse()?;
-            input.parse::<syn::Token![:]>()?;
-            let concrete_type: syn::Path = input.parse()?;
-            entries.push(ServerEntry {
-                trait_name,
-                concrete_type,
-            });
-            if !input.is_empty() {
-                input.parse::<syn::Token![,]>()?;
+            // Check for @notifications
+            if input.peek(syn::Token![@]) {
+                input.parse::<syn::Token![@]>()?;
+                let kw: syn::Ident = input.parse()?;
+                if kw != "notifications" {
+                    return Err(syn::Error::new(kw.span(), "expected `notifications`"));
+                }
+
+                // Parse (ReactorClient)
+                let content;
+                syn::parenthesized!(content in input);
+                let reactor_client: syn::Path = content.parse()?;
+
+                input.parse::<syn::Token![=>]>()?;
+
+                // Parse handler1, handler2, ...
+                let mut handlers = Vec::new();
+                handlers.push(input.parse::<syn::Path>()?);
+                while input.peek(syn::Token![,]) && !input.is_empty() {
+                    input.parse::<syn::Token![,]>()?;
+                    if input.is_empty() || input.peek(syn::Token![@]) {
+                        break;
+                    }
+                    // Check if next token is an ident followed by `:` (a ServerEntry)
+                    // If so, break out — this comma was the trailing comma before the next entry
+                    if input.peek(syn::Ident) && input.peek2(syn::Token![:]) {
+                        break;
+                    }
+                    handlers.push(input.parse::<syn::Path>()?);
+                }
+
+                notifications = Some(NotificationConfig {
+                    reactor_client,
+                    handlers,
+                });
+            } else {
+                let trait_name: syn::Ident = input.parse()?;
+                input.parse::<syn::Token![:]>()?;
+                let concrete_type: syn::Path = input.parse()?;
+                entries.push(ServerEntry {
+                    trait_name,
+                    concrete_type,
+                });
+                if !input.is_empty() {
+                    input.parse::<syn::Token![,]>()?;
+                }
             }
         }
-        Ok(ServerInput { entries })
+        Ok(ServerInput {
+            entries,
+            notifications,
+        })
     }
 }
 
@@ -200,6 +252,29 @@ pub fn server(input: TokenStream) -> TokenStream {
         });
     }
 
+    let run_call = if let Some(notif_cfg) = &input.notifications {
+        let reactor = &notif_cfg.reactor_client;
+        let handlers = &notif_cfg.handlers;
+        quote! {
+            __server.run_with_notifications(
+                &mut __buf,
+                sysmodule_reactor_api::NOTIFICATION_BIT,
+                |_bits| {
+                    loop {
+                        match #reactor::pull() {
+                            Ok(Some(notif)) => {
+                                #( #handlers(&notif); )*
+                            }
+                            _ => break,
+                        }
+                    }
+                },
+            )
+        }
+    } else {
+        quote! { __server.run(&mut __buf) }
+    };
+
     let output = quote! {
         {
             #(#arena_decls)*
@@ -208,9 +283,220 @@ pub fn server(input: TokenStream) -> TokenStream {
             let mut __buf = [core::mem::MaybeUninit::uninit(); 256];
             let mut __server = ipc::Server::<#count>::new();
             #(#register_calls)*
-            __server.run(&mut __buf)
+            #run_call
         }
     };
 
     output.into()
+}
+
+// ---------------------------------------------------------------------------
+// #[notification_handler(group_name)] proc macro attribute
+// ---------------------------------------------------------------------------
+
+/// Transforms a notification handler function.
+///
+/// The input function must have the signature:
+/// ```ignore
+/// fn handler_name(sender: u16, code: u32) { ... }
+/// ```
+///
+/// The attribute transforms it into a function that takes `&Notification`
+/// and only executes the body when `notif.group_id` matches the specified
+/// group. The group ID is resolved from `generated::GROUP_ID_<SCREAMING_NAME>`.
+///
+/// Example:
+/// ```ignore
+/// #[notification_handler(logs)]
+/// fn handle_log(sender: u16, code: u32) {
+///     // only called for the "logs" notification group
+/// }
+/// ```
+///
+/// Convention: the subscriber task must have a `generated` module
+/// (from build.rs) containing `GROUP_ID_LOGS: u16` constants.
+#[proc_macro_attribute]
+pub fn notification_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let group_name = parse_macro_input!(attr as syn::Ident);
+    let func = parse_macro_input!(item as syn::ItemFn);
+
+    let fn_name = &func.sig.ident;
+    let fn_vis = &func.vis;
+    let fn_body = &func.block;
+
+    // Convert group name to SCREAMING_SNAKE for the generated constant
+    let screaming = to_screaming_snake_case(&group_name.to_string());
+    let group_id_const = format_ident!("GROUP_ID_{}", screaming);
+
+    let output = quote! {
+        #fn_vis fn #fn_name(__notif: &sysmodule_reactor_api::Notification) {
+            if __notif.group_id != generated::#group_id_const {
+                return;
+            }
+            let sender = __notif.sender_index;
+            let code = __notif.code;
+            #fn_body
+        }
+    };
+
+    output.into()
+}
+
+// ---------------------------------------------------------------------------
+// __check_uses! – dependency enforcement at consumer compile time
+// ---------------------------------------------------------------------------
+
+/// Internal proc macro invoked by generated `bind_X!` macros.
+///
+/// Checks that the consuming crate has declared a dependency on the named
+/// task via `uses-sysmodule` in `app.kdl`. Reads `.work/app.uses.json`
+/// at compile time. If the file doesn't exist (e.g. during IDE cargo check),
+/// enforcement is silently skipped.
+///
+/// Usage (generated, not user-facing):
+/// ```ignore
+/// ipc_macros::__check_uses!("sysmodule_fs");
+/// ```
+#[proc_macro]
+pub fn __check_uses(input: TokenStream) -> TokenStream {
+    let lit = parse_macro_input!(input as syn::LitStr);
+    let dep_task = lit.value();
+
+    match check_uses::check(&dep_task) {
+        Ok(Some(err_msg)) => {
+            let err = syn::Error::new(lit.span(), err_msg);
+            err.to_compile_error().into()
+        }
+        Ok(None) => TokenStream::new(),
+        Err(_) => TokenStream::new(), // file missing / parse error → skip
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ipc::allocation!() – declare a handle to a named memory allocation
+// ---------------------------------------------------------------------------
+
+/// Declare a static handle to a named memory allocation.
+///
+/// Syntax: `ipc::allocation!(NAME = @alloc_name: Type);`
+///
+/// Example:
+/// ```ignore
+/// ipc::allocation!(FRAME_BUFFERS = @frame_buffers: [[u8; 8192]; 64]);
+/// let fb = FRAME_BUFFERS.get(); // &'static mut [[u8; 8192]; 64]
+/// ```
+///
+/// The allocation must be defined in `app.kdl` and the task must have
+/// `uses-allocation "alloc_name"`. Compile-time checks verify that
+/// `size_of::<Type>() == allocation size` and `align_of::<Type>() <= allocation align`.
+/// Calling `.get()` twice panics.
+#[proc_macro]
+pub fn allocation(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as AllocationInput);
+
+    let static_name = &parsed.static_name;
+    let alloc_name_str = parsed.alloc_name.to_string();
+    let ty = &parsed.ty;
+
+    // Check that this task has uses-allocation in app.kdl
+    match resolve_alloc::check_acl(&alloc_name_str) {
+        Ok(Some(err_msg)) => {
+            return syn::Error::new(parsed.alloc_name.span(), err_msg)
+                .to_compile_error()
+                .into();
+        }
+        Ok(None) => {} // allowed
+        Err(_) => {}   // file missing, skip check
+    }
+
+    // Look up the allocation for compile-time checks and base address
+    let info = match resolve_alloc::resolve(&alloc_name_str) {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            let msg = format!("unknown allocation '{}'", alloc_name_str);
+            return syn::Error::new(parsed.alloc_name.span(), msg)
+                .to_compile_error()
+                .into();
+        }
+        // JSON not available (e.g. IDE cargo check) — emit a dummy static
+        Err(_) => {
+            return quote! {
+                static #static_name: () = ();
+            }
+            .into();
+        }
+    };
+
+    let alloc_base = info.base as usize;
+    let alloc_size = info.size as usize;
+    let alloc_align = info.align as usize;
+
+    let size_msg = format!(
+        "size mismatch: type size != allocation '{}' size ({} bytes)",
+        alloc_name_str, alloc_size,
+    );
+    let align_msg = format!(
+        "alignment mismatch: type alignment > allocation '{}' alignment ({} bytes)",
+        alloc_name_str, alloc_align,
+    );
+
+    let wrapper_type = format_ident!("__Alloc_{}", static_name);
+
+    // Sentinel symbol: prevents two statics from using the same allocation
+    // within one binary. The linker will error on duplicate symbols.
+    let sentinel_ident = format_ident!("__only_one_usage_allowed_for_allocation_{}", alloc_name_str);
+
+    let output = quote! {
+        const _: () = assert!(
+            core::mem::size_of::<#ty>() == #alloc_size,
+            #size_msg,
+        );
+        const _: () = assert!(
+            core::mem::align_of::<#ty>() <= #alloc_align,
+            #align_msg,
+        );
+
+        #[allow(non_camel_case_types)]
+        struct #wrapper_type;
+
+        impl #wrapper_type {
+            /// Take the allocation. Panics if called twice.
+            fn get(&self) -> &'static mut core::mem::MaybeUninit<#ty> {
+                static TAKEN: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                ipc::alloc_take::take::<#ty>(&TAKEN, #alloc_base)
+            }
+        }
+
+        static #static_name: #wrapper_type = #wrapper_type;
+
+        #[unsafe(no_mangle)]
+        #[unsafe(link_section = ".discard")]
+        static #sentinel_ident: () = ();
+    };
+
+    output.into()
+}
+
+/// Parse: `NAME = @alloc_name: Type`
+struct AllocationInput {
+    static_name: syn::Ident,
+    alloc_name: syn::Ident,
+    ty: syn::Type,
+}
+
+impl syn::parse::Parse for AllocationInput {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let static_name: syn::Ident = input.parse()?;
+        input.parse::<syn::Token![=]>()?;
+        input.parse::<syn::Token![@]>()?;
+        let alloc_name: syn::Ident = input.parse()?;
+        input.parse::<syn::Token![:]>()?;
+        let ty: syn::Type = input.parse()?;
+        Ok(AllocationInput {
+            static_name,
+            alloc_name,
+            ty,
+        })
+    }
 }

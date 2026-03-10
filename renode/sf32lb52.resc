@@ -12,6 +12,9 @@ showAnalyzer usart2
 showAnalyzer usart3
 showAnalyzer lcdc
 
+# Suppress NVIC warnings for unhandled vendor SCB registers (0xDC4, SHCSR, etc.)
+logLevel 3 nvic
+
 sysbus LoadBinary @build/boot.bin 0x20020000
 sysbus LoadSymbolsFrom $kernel_elf
 

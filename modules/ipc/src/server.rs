@@ -141,60 +141,89 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
     }
 
     /// Run the server loop forever, dispatching incoming messages.
+    /// Does not handle notification bits. See [`run_with_notifications`] for that.
     pub fn run(&mut self, buf: &mut [MaybeUninit<u8>]) -> ! {
+        self.run_with_notifications(buf, 0, |_| {})
+    }
+
+    /// Run the server loop forever, dispatching incoming messages and
+    /// notification bits.
+    ///
+    /// When `notification_mask` is non-zero, the server uses `sys_recv_open`
+    /// to also listen for kernel notification bits. When a notification fires,
+    /// `on_notification` is called with the received bits.
+    pub fn run_with_notifications(
+        &mut self,
+        buf: &mut [MaybeUninit<u8>],
+        notification_mask: u32,
+        mut on_notification: impl FnMut(u32),
+    ) -> ! {
         #[cfg(feature = "dangerously_enable_uart3_debugging")]
         debug_uart::Uart3::init();
 
         loop {
-            let msg = userlib::sys_recv_msg_open(buf);
-
-            // Detect client restarts and clean up stale resources.
-            self.check_client_generation(msg.sender);
-
-            let (kind, method) = split_opcode(msg.operation);
-
-            #[cfg(feature = "dangerously_enable_uart3_debugging")]
-            {
-                use core::fmt::Write;
-                let _ = write!(
-                    debug_uart::Uart3,
-                    "[ipc k=0x{kind:02x} m=0x{method:02x} from={:?} leases={}]\n",
-                    msg.sender, msg.lease_count,
-                );
+            if notification_mask == 0 {
+                let msg = userlib::sys_recv_msg_open(buf);
+                self.dispatch_message(&msg);
+            } else {
+                match userlib::sys_recv_open(buf, notification_mask) {
+                    userlib::MessageOrNotification::Notification(bits) => {
+                        on_notification(bits);
+                    }
+                    userlib::MessageOrNotification::Message(msg) => {
+                        self.dispatch_message(&msg);
+                    }
+                }
             }
+        }
+    }
 
-            let result = self.dispatchers.iter_mut().find_map(|entry| {
-                let (k, d) = entry.as_mut()?;
-                if *k == kind {
-                    Some(d.dispatch(method, &msg))
-                } else {
-                    None
-                }
-            });
+    fn dispatch_message(&mut self, msg: &userlib::Message<'_>) {
+        self.check_client_generation(msg.sender);
 
-            match result {
-                Some(Ok(())) => {
-                    #[cfg(feature = "dangerously_enable_uart3_debugging")]
-                    { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc ok]\n"); }
-                }
-                Some(Err(e)) => {
-                    #[cfg(feature = "dangerously_enable_uart3_debugging")]
-                    { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc DISPATCH ERR k=0x{kind:02x} m=0x{method:02x}]\n"); }
-                    // The client sent a malformed message (bad size, bad
-                    // contents, or bad leases). Reply with non-SUCCESS so the
-                    // client's generated panic handler fires — its panic handler
-                    // will log and/or restart the task. The server continues.
-                    let _ = e;
-                    userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
-                }
-                None => {
-                    #[cfg(feature = "dangerously_enable_uart3_debugging")]
-                    { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc NO DISPATCHER k=0x{kind:02x}]\n"); }
-                    // Client sent a kind byte we have no dispatcher for —
-                    // malformed message. Same treatment as bad contents:
-                    // reply non-SUCCESS to fire the client's panic handler.
-                    userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
-                }
+        let (kind, method) = split_opcode(msg.operation);
+
+        #[cfg(feature = "dangerously_enable_uart3_debugging")]
+        {
+            use core::fmt::Write;
+            let _ = write!(
+                debug_uart::Uart3,
+                "[ipc k=0x{kind:02x} m=0x{method:02x} from={:?} leases={}]\n",
+                msg.sender, msg.lease_count,
+            );
+        }
+
+        let result = self.dispatchers.iter_mut().find_map(|entry| {
+            let (k, d) = entry.as_mut()?;
+            if *k == kind {
+                Some(d.dispatch(method, msg))
+            } else {
+                None
+            }
+        });
+
+        match result {
+            Some(Ok(())) => {
+                #[cfg(feature = "dangerously_enable_uart3_debugging")]
+                { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc ok]\n"); }
+            }
+            Some(Err(e)) => {
+                #[cfg(feature = "dangerously_enable_uart3_debugging")]
+                { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc DISPATCH ERR k=0x{kind:02x} m=0x{method:02x}]\n"); }
+                // The client sent a malformed message (bad size, bad
+                // contents, or bad leases). Reply with non-SUCCESS so the
+                // client's generated panic handler fires — its panic handler
+                // will log and/or restart the task. The server continues.
+                let _ = e;
+                userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
+            }
+            None => {
+                #[cfg(feature = "dangerously_enable_uart3_debugging")]
+                { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc NO DISPATCHER k=0x{kind:02x}]\n"); }
+                // Client sent a kind byte we have no dispatcher for —
+                // malformed message. Same treatment as bad contents:
+                // reply non-SUCCESS to fire the client's panic handler.
+                userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
             }
         }
     }

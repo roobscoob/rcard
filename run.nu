@@ -2,9 +2,10 @@
 def main [
     --skip-build  # Skip the build step and just run Renode
     --with: string  # Path to a pre-built sdmmc.img (skips build, uses this image directly)
+    --features: string  # Comma-delimited feature gates to enable
 ] {
     let project = ($env.FILE_PWD)
-    let zip = ($project | path join rcard-build.zip)
+    let zip = ($project | path join .work rcard-build.zip)
     let elf = ($project | path join build img final.elf)
     source ./scripts/sdmmc.nu
     let build_dir = ($project | path join build)
@@ -15,14 +16,32 @@ def main [
     let $fw = if $with != null {
         $with
     } else if not $skip_build {
+        check-workspace-lints
         ensure-hubake
         fix-hubake-cache
         fix-lld-linker
         setup-arm-cc
 
         let app_kdl = ($project | path join .work app.kdl)
-        python ($project | path join scripts kdl-preprocess.py) ($project | path join app.kdl) $app_kdl
-        hubake build $app_kdl
+        if $features != null {
+            python ($project | path join scripts kdl-preprocess.py) ($project | path join app.kdl) $app_kdl --features $features
+        } else {
+            python ($project | path join scripts kdl-preprocess.py) ($project | path join app.kdl) $app_kdl
+        }
+
+        # open ($project | path join .work allocations.json) | get 0 | print
+
+        $env.HUBRIS_BUILD = "1"
+        let allocations = python ./scripts/run-exhubris.py $app_kdl $zip e>| from json
+
+        # check if allocations is nothing, if so python errored. we should just exit
+        if $allocations == null {
+            # quit silently since the error was already printed by python
+            exit 1
+        }
+
+        log_in_progress "Packing firmware image"
+        let start = date now | into int
 
         # Extract ELFs from the build archive
         mkdir ($build_dir | path join img)
@@ -34,7 +53,7 @@ def main [
         rust-objcopy -O binary ($build_dir | path join img final.elf) $bin_path
 
         # Pack the firmware binary into the sdmmc image
-        sdmmc pack firmware $bin_path
+        sdmmc pack firmware $bin_path | ignore
 
         # if there is a sdmmc directory...
         let sdmmc_dir = ($project | path join sdmmc)
@@ -46,13 +65,170 @@ def main [
                 let name = ($item | get name)
                 let path = ($sdmmc_dir | path join $name)
                 if ($path | path exists) {
-                    print $"Formatting partition '($name)' with contents of ($path)"
-                    sdmmc format littlefs $name --with $path
-                } else {
-                    print $"No directory found for partition '($name)' at ($path), skipping."
+                    sdmmc format littlefs $name --with $path --silent
                 }
             }
-        }        
+        }
+
+        print -n "\u{1b}[1A\u{1b}[2K"
+        let elapsed = ((date now | into int) - $start) / 1_000_000_000
+        log_done "Packing firmware image" ($elapsed | math round --precision 2 | into string)
+
+        let to_hex = { |n|
+            let digits = ("0123456789abcdef" | split chars)
+            mut remaining = $n
+            mut nibbles = ""
+            for _ in 0..7 {
+                let idx = ($remaining mod 16 | into int)
+                $nibbles = ($digits | get $idx) + $nibbles
+                $remaining = ($remaining / 16 | into int)
+            }
+            $"0x($nibbles)"
+        }
+
+        let fmt_size = { |size_bytes|
+            if $size_bytes >= 1048576 {
+                $"($size_bytes / 1048576) MiB"
+            } else if $size_bytes >= 1024 {
+                $"($size_bytes / 1024) KiB"
+            } else {
+                $"($size_bytes) bytes"
+            }
+        }
+
+        let partitions_json = open ($project | path join .work app.partitions.json)
+        let device_sizes = if "device_sizes" in ($partitions_json | columns) { $partitions_json.device_sizes } else { {} }
+
+        let layout = sdmmc layout | get block_devices | transpose memory partitions | each { |dev|
+            let used_bytes = ($dev.partitions | each { |part| $part.blocks * 512 } | math sum | default 0)
+            let dev_total = ($device_sizes | get -o $dev.memory)
+
+            let part_entries = ($dev.partitions | each { |part|
+                let start = $part.offset * 512
+                let end = ($part.offset + $part.blocks) * 512
+                let size_bytes = $part.blocks * 512
+
+                {
+                    memory: $dev.memory
+                    task: $part.name
+                    start: (do $to_hex $start)
+                    end: (do $to_hex $end)
+                    size: (do $fmt_size $size_bytes)
+                    lost: "0 bytes"
+                }
+            })
+
+            let unused_entry = if $dev_total != null and $dev_total > $used_bytes {
+                let unused_bytes = $dev_total - $used_bytes
+                [{
+                    memory: $dev.memory
+                    task: "(unused)"
+                    start: (do $to_hex $used_bytes)
+                    end: (do $to_hex $dev_total)
+                    size: (do $fmt_size $unused_bytes)
+                    lost: "0 bytes"
+                }]
+            } else {
+                []
+            }
+
+            $part_entries ++ $unused_entry
+        } | flatten
+
+        # Compute "unused" entries for each chip memory region (flash, ram, vectors)
+        let chip_regions_path = ($project | path join .work app.chip-regions.json)
+        let unused = if ($chip_regions_path | path exists) {
+            let chip_regions = open $chip_regions_path
+
+            $chip_regions | columns | each { |region|
+                let info = ($chip_regions | get $region)
+                let region_base = ($info | get base)
+                let region_size = ($info | get size)
+                let region_end = $region_base + $region_size
+
+                # Sum up used bytes in this region from hubris allocations
+                let used = ($allocations
+                    | where memory == $region
+                    | each { |a| (($a.end | into int -r 16) - ($a.start | into int -r 16)) }
+                    | math sum
+                    | default 0)
+
+                let unused_bytes = $region_size - $used
+                if $unused_bytes > 0 {
+                    let unused_start = $region_end - $unused_bytes
+
+                    {
+                        memory: $region
+                        task: "(unused)"
+                        start: (do $to_hex $unused_start)
+                        end: (do $to_hex $region_end)
+                        size: (do $fmt_size $unused_bytes)
+                        lost: "0 bytes"
+                    }
+                }
+            } | flatten
+        } else {
+            []
+        }
+
+        # Build entries for board memory regions (ext_ram, etc.) and their allocations
+        let alloc_json_path = ($project | path join .work app.allocations.json)
+        let board_mem = if ($alloc_json_path | path exists) {
+            let alloc_json = open $alloc_json_path
+            let regions = $alloc_json.regions
+            let allocs = $alloc_json.allocations
+
+            # Build allocation entries (labeled by allocation name)
+            let alloc_entries = ($allocs | columns | each { |name|
+                let a = ($allocs | get $name)
+                let base = ($a | get base)
+                let size = ($a | get size)
+                {
+                    memory: ($a | get region)
+                    task: $name
+                    start: (do $to_hex $base)
+                    end: (do $to_hex ($base + $size))
+                    size: (do $fmt_size $size)
+                    lost: "0 bytes"
+                }
+            })
+
+            # Build unused entries for each board memory region
+            let unused_entries = ($regions | columns | each { |region|
+                let info = ($regions | get $region)
+                let region_base = ($info | get base)
+                let region_size = ($info | get size)
+                let region_end = $region_base + $region_size
+
+                let used = ($allocs | columns
+                    | each { |name| $allocs | get $name }
+                    | where region == $region
+                    | each { |a| $a | get size }
+                    | math sum
+                    | default 0)
+
+                let unused_bytes = $region_size - $used
+                if $unused_bytes > 0 {
+                    let unused_start = $region_end - $unused_bytes
+                    {
+                        memory: $region
+                        task: "(unused)"
+                        start: (do $to_hex $unused_start)
+                        end: (do $to_hex $region_end)
+                        size: (do $fmt_size $unused_bytes)
+                        lost: "0 bytes"
+                    }
+                }
+            } | flatten)
+
+            $alloc_entries ++ $unused_entries
+        } else {
+            []
+        }
+
+        let alloc = $allocations ++ $layout ++ $unused ++ $board_mem
+
+        python ($project | path join scripts memmap.py) --ignore-empty ($alloc | to json)
 
         # Use the built image for running in Renode
         ($build_dir | path join sdmmc.img)
@@ -83,7 +259,25 @@ def main [
     let die_loop = (python ($project | path join renode find_die_loop.py) ($project | path join build elf kernel) | str trim)
 
     $env.RCARD_SDMMC_IMG = $state_img
-    renode --console -e $"set bin \"($bin)\"; set kernel_elf \"($kernel_elf)\"; set die_loop ($die_loop); set resc \"($resc)\"" -e "include $resc"
+    renode -e $"set bin \"($bin)\"; set kernel_elf \"($kernel_elf)\"; set die_loop ($die_loop); set resc \"($resc)\"" -e "include $resc"
+}
+
+# Verify every workspace member has [lints] workspace = true
+def check-workspace-lints [] {
+    let project = ($env.FILE_PWD)
+    let root_toml = open ($project | path join Cargo.toml)
+    let members = ($root_toml | get workspace.members)
+
+    let missing = ($members | where {|member|
+        let toml_path = ($project | path join $member Cargo.toml)
+        let content = (open $toml_path)
+        ($content | get -o lints.workspace) != true
+    })
+
+    if ($missing | is-not-empty) {
+        let list = ($missing | str join "\n  ")
+        error make { msg: $"These workspace members are missing `[lints] workspace = true`:\n  ($list)" }
+    }
 }
 
 # Install cargo-binutils (provides rust-objdump) if not already present
@@ -163,4 +357,13 @@ def fix-hubake-cache [] {
     if ($exe | path exists) and not ($noext | path exists) {
         ^powershell -Command $"New-Item -ItemType HardLink -Path '($noext)' -Target '($exe)' | Out-Null"
     }
+}
+
+def log_in_progress [name: string] {
+    print $"  (ansi yellow)⟳(ansi reset) ($name)"
+}
+
+def log_done [name: string, time: string, padding: int = 30] {
+    let padded = $name | fill -a l -w $padding
+    print $"  (ansi green)✓(ansi reset) (ansi { attr: b })($padded)(ansi reset) (ansi dark_gray)($time)(ansi reset)"
 }
