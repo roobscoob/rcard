@@ -21,34 +21,15 @@ pub const HUBRIS_MESSAGE_SIZE_LIMIT: usize = 256;
 /// `E` is the reconstruction domain-error type (the constructor's `E`). Defaults
 /// to `()` for resources whose constructor is infallible.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum Error<E = ()> {
-    /// The server task died and could not be reconnected.
+pub enum Error {
+    /// The server task died.
     ServerDied,
     /// The server's resource arena is full; could not allocate.
     ArenaFull,
-    /// Server died; reconnect attempt ran the constructor, which returned `Err(e)`.
-    ReconstructionFailed(E),
-    /// Server died; reconnect attempt ran the constructor, which returned `None`.
-    ReconstructionReturnedNone,
 }
 
-impl<E: hubpack::SerializedSize> hubpack::SerializedSize for Error<E> {
-    // 1 byte hubpack enum discriminant + largest variant payload (ConstructorFailed(E)).
-    const MAX_SIZE: usize = 1 + E::MAX_SIZE;
-}
-
-impl Error {
-    /// Convert an `Error<()>` (from the wire) into an `Error<E>` for any `E`.
-    /// The `ReconstructionFailed` variant cannot exist on the wire, so this
-    /// conversion is total.
-    pub fn upcast<E>(self) -> Error<E> {
-        match self {
-            Error::ServerDied => Error::ServerDied,
-            Error::ArenaFull => Error::ArenaFull,
-            Error::ReconstructionReturnedNone => Error::ReconstructionReturnedNone,
-            Error::ReconstructionFailed(()) => Error::ReconstructionReturnedNone,
-        }
-    }
+impl hubpack::SerializedSize for Error {
+    const MAX_SIZE: usize = 1;
 }
 
 /// `ResponseCode` sent by the server when a client message is malformed

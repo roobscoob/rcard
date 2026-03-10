@@ -18,151 +18,17 @@ pub fn gen_client(
 ) -> TokenStream2 {
     let kind = attrs.kind;
     let handle_name = format_ident!("{}Handle", trait_name);
-    let ctor_enum_name = format_ident!("{}CtorArgs", trait_name);
     let server_trait_name = format_ident!("{}Server", trait_name);
     let binding_struct_name = format_ident!("{}Server", trait_name);
     let bind_macro_name = format_ident!("bind_{}", to_snake_case(&trait_name.to_string()));
 
-    let constructors: Vec<&ParsedMethod> = methods
-        .iter()
-        .filter(|m| m.kind == MethodKind::Constructor)
-        .collect();
-
-    // Generate constructor enum variants (store non-lease, non-handle params).
-    let ctor_variants: Vec<TokenStream2> = constructors
-        .iter()
-        .map(|m| {
-            let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));
-            let fields: Vec<TokenStream2> = m
-                .params
-                .iter()
-                .filter(|p| !p.is_lease && p.handle_mode.is_none())
-                .map(|p| {
-                    let name = &p.name;
-                    let ty = &p.ty;
-                    quote! { #name: #ty }
-                })
-                .collect();
-            if fields.is_empty() {
-                quote! { #variant }
-            } else {
-                quote! { #variant { #(#fields),* } }
-            }
-        })
-        .collect();
-
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
-
-    // Determine the handle's E type.
-    let handle_error_type: proc_macro2::TokenStream = constructors
-        .iter()
-        .find_map(|m| {
-            if let Some(ConstructorReturn::Result(et)) = &m.ctor_return {
-                Some(quote! { #et })
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| quote! { () });
 
     let enum_name = format_ident!("{}Op", trait_name);
 
-    // Generate reconstruct match arms.
-    let reconstruct_arms: Vec<TokenStream2> = constructors
-        .iter()
-        .map(|m| {
-            let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));
-            let method_id_expr = quote! { #enum_name::#variant as u8 };
-
-            let non_lease_non_handle_params: Vec<&ParsedParam> = m
-                .params
-                .iter()
-                .filter(|p| !p.is_lease && p.handle_mode.is_none())
-                .collect();
-            let arg_names: Vec<&Ident> =
-                non_lease_non_handle_params.iter().map(|p| &p.name).collect();
-            let arg_types: Vec<TokenStream2> =
-                non_lease_non_handle_params.iter().map(|p| {
-                    let ty = &p.ty;
-                    quote! { #ty }
-                }).collect();
-
-            let destructure = if arg_names.is_empty() {
-                quote! { #ctor_enum_name::#variant }
-            } else {
-                quote! { #ctor_enum_name::#variant { #(#arg_names),* } }
-            };
-
-            let serialize = gen_serialize_wire(&arg_names, &arg_types, None);
-
-            let ctor_return = m
-                .ctor_return
-                .as_ref()
-                .expect("constructor must have ctor_return");
-
-            let wire_type = ctor_wire_type(ctor_return);
-            let retbuffer_size = ctor_retbuffer_size_reconstruct(ctor_return);
-
-            let extract_handle = match ctor_return {
-                ConstructorReturn::Bare => quote! {
-                    match result {
-                        Ok(handle) => { self.handle.set(handle); }
-                        Err(_) => return Err(ipc::Error::ServerDied),
-                    }
-                },
-                ConstructorReturn::Result(_) => quote! {
-                    match result {
-                        Ok(Ok(handle)) => { self.handle.set(handle); }
-                        Ok(Err(e)) => return Err(ipc::Error::ReconstructionFailed(e)),
-                        Err(_) => return Err(ipc::Error::ServerDied),
-                    }
-                },
-                ConstructorReturn::OptionSelf => quote! {
-                    match result {
-                        Ok(Some(handle)) => { self.handle.set(handle); }
-                        Ok(None) => return Err(ipc::Error::ReconstructionReturnedNone),
-                        Err(_) => return Err(ipc::Error::ServerDied),
-                    }
-                },
-            };
-
-            quote! {
-                #destructure => {
-                    #serialize
-                    let mut retbuffer = [0u8; #retbuffer_size];
-                    let mut leases = [];
-                    let argbuffer = &argbuffer[..n];
-                    let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-                    let (rc, len) = userlib::sys_send(
-                        self.server.get(),
-                        opcode,
-                        argbuffer,
-                        &mut retbuffer,
-                        &mut leases,
-                    ).map_err(|_| ipc::Error::ServerDied)?;
-                    if rc != userlib::ResponseCode::SUCCESS {
-                        panic!(
-                            "ipc reconstruct: server {:?} sent unexpected non-SUCCESS response \
-                             code; this indicates a protocol violation",
-                            self.server.get(),
-                        );
-                    }
-                    let (result, _) = hubpack::deserialize::<#wire_type>(&retbuffer[..len])
-                        .unwrap_or_else(|_| panic!(
-                            "ipc reconstruct: server {:?} sent malformed constructor reply \
-                             ({} bytes received)",
-                            self.server.get(), len,
-                        ));
-                    #extract_handle
-                    Ok(())
-                }
-            }
-        })
-        .collect();
-
     let method_impls: Vec<TokenStream2> = methods
         .iter()
-        .map(|m| gen_client_method(m, kind, &enum_name, &ctor_enum_name, &handle_error_type))
+        .map(|m| gen_client_method(m, kind, &enum_name))
         .collect();
 
     // Generate Transferable impl.
@@ -207,38 +73,21 @@ pub fn gen_client(
                 fn server_id() -> &'static ipc::StaticTaskId;
             }
 
-            #[derive(Clone, Copy)]
-            enum #ctor_enum_name {
-                #(#ctor_variants),*
-            }
-
             pub struct #handle_name<S: #server_trait_name> {
                 server: core::cell::Cell<userlib::TaskId>,
                 handle: core::cell::Cell<ipc::RawHandle>,
-                ctor: core::option::Option<#ctor_enum_name>,
                 destroyed: core::cell::Cell<bool>,
                 _server: core::marker::PhantomData<S>,
             }
 
             impl<S: #server_trait_name> #handle_name<S> {
-                /// Adopt a raw handle (e.g. from a transfer). No auto-reconstruction
-                /// on server death — if the server dies, operations return `ServerDied`.
+                /// Adopt a raw handle (e.g. from a transfer).
                 pub fn from_raw(handle: ipc::RawHandle) -> Self {
                     Self {
                         server: core::cell::Cell::new(S::task_id()),
                         handle: core::cell::Cell::new(handle),
-                        ctor: None,
                         destroyed: core::cell::Cell::new(false),
                         _server: core::marker::PhantomData,
-                    }
-                }
-
-                fn reconstruct(&self) -> core::result::Result<(), ipc::Error<#handle_error_type>> {
-                    match &self.ctor {
-                        None => Err(ipc::Error::ServerDied),
-                        Some(ctor) => match *ctor {
-                            #(#reconstruct_arms)*
-                        },
                     }
                 }
 
@@ -527,8 +376,6 @@ fn gen_client_method(
     m: &ParsedMethod,
     kind: u8,
     enum_name: &Ident,
-    ctor_enum_name: &Ident,
-    error_type: &TokenStream2,
 ) -> TokenStream2 {
     let method_name = &m.name;
     let variant = format_ident!("{}", to_pascal_case(&method_name.to_string()));
@@ -573,7 +420,6 @@ fn gen_client_method(
                 &sig_params,
                 &non_lease_params,
                 &lease_params,
-                ctor_enum_name,
                 ctor_return,
             )
         }
@@ -585,7 +431,6 @@ fn gen_client_method(
             &non_lease_params,
             &lease_params,
             m.return_type.as_ref(),
-            error_type,
             m.constructs.as_ref(),
         ),
         MethodKind::StaticMessage => gen_static_message(
@@ -605,7 +450,6 @@ fn gen_client_method(
             &non_lease_params,
             &lease_params,
             m.return_type.as_ref(),
-            error_type,
         ),
     }
 }
@@ -617,18 +461,8 @@ fn gen_constructor(
     sig_params: &[TokenStream2],
     non_lease_params: &[&ParsedParam],
     lease_params: &[&ParsedParam],
-    ctor_enum_name: &Ident,
     ctor_return: &ConstructorReturn,
 ) -> TokenStream2 {
-    let variant = format_ident!("{}", to_pascal_case(&method_name.to_string()));
-
-    // For ctor args storage, exclude lease and handle params.
-    let storable_params: Vec<&&ParsedParam> = non_lease_params
-        .iter()
-        .filter(|p| p.handle_mode.is_none())
-        .collect();
-    let storable_names: Vec<&Ident> = storable_params.iter().map(|p| &p.name).collect();
-
     // For serialization, we need to handle #[handle(move)] params specially.
     let ctor_server_expr = quote! { server.get() };
     let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &ctor_server_expr);
@@ -640,17 +474,10 @@ fn gen_constructor(
     let lease_arr = gen_lease_array(lease_params);
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
 
-    let ctor_value = if storable_names.is_empty() {
-        quote! { #ctor_enum_name::#variant }
-    } else {
-        quote! { #ctor_enum_name::#variant { #(#storable_names: #storable_names.clone()),* } }
-    };
-
     let make_self = quote! {
         Self {
             server,
             handle: core::cell::Cell::new(handle),
-            ctor: Some(#ctor_value),
             destroyed: core::cell::Cell::new(false),
             _server: core::marker::PhantomData,
         }
@@ -735,7 +562,6 @@ fn gen_message(
     non_lease_params: &[&ParsedParam],
     lease_params: &[&ParsedParam],
     return_type: Option<&syn::Type>,
-    handle_error_type: &TokenStream2,
     constructs: Option<&(Ident, Ident)>,
 ) -> TokenStream2 {
     let self_server_expr = quote! { self.server.get() };
@@ -749,20 +575,10 @@ fn gen_message(
     let lease_arr = gen_lease_array(lease_params);
     let send_body = gen_send_body(kind, method_id_expr, &lease_arr);
 
-    // For the retry path, re-serialize because self.handle changed.
-    let retry_serialize = gen_serialize_wire(&wire_names, &wire_types, Some(&handle_expr));
-    let retry_lease_arr = gen_lease_array(lease_params);
-    let retry_send_body = gen_send_body(kind, method_id_expr, &retry_lease_arr);
-
     if let Some((trait_name, generic_ident)) = constructs {
-        // This message constructs a handle of a different resource type.
-        // The wire reply contains RawHandle where the user-facing type is
-        // `TraitHandle<GenericIdent>`. We deserialize the wire type (with
-        // RawHandle), then map into the handle wrapper.
         let handle_type = format_ident!("{}Handle", trait_name);
         let server_trait = format_ident!("{}Server", trait_name);
 
-        // Build the wire return type (FS → RawHandle) and user return type (FS → Handle<FS>).
         let (wire_rt, user_rt) = match return_type {
             Some(rt) => {
                 let wire = replace_ident_in_type(rt, generic_ident, &quote! { ipc::RawHandle });
@@ -772,43 +588,27 @@ fn gen_message(
             None => (quote! { () }, quote! { () }),
         };
 
-        let parse_reply = gen_parse_reply(Some(&syn::parse2(wire_rt.clone()).unwrap()), quote! { self.server.get() }, true);
-
+        let parse_reply = gen_parse_reply(Some(&syn::parse2(wire_rt.clone()).unwrap()), quote! { self.server.get() });
         let map_handles = gen_constructs_map(return_type, generic_ident, &handle_type);
 
-        let ret_type = quote! {
-            -> core::result::Result<#user_rt, ipc::Error<#handle_error_type>>
-        };
-
         quote! {
-            pub fn #method_name<#generic_ident: #server_trait>(&self, #(#sig_params),*) #ret_type {
+            pub fn #method_name<#generic_ident: #server_trait>(&self, #(#sig_params),*)
+                -> core::result::Result<#user_rt, ipc::Error>
+            {
                 #handle_transfer_stmts
                 #serialize
                 #send_body
-                match send_result {
-                    Ok((rc, len)) => {
-                        let wire_result = { #parse_reply };
-                        wire_result.map(|v| { #map_handles })
-                    }
-                    Err(dead) => {
-                        self.server.set(self.server.get().with_generation(dead.new_generation()));
-                        self.reconstruct()?;
-                        #retry_serialize
-                        #retry_send_body
-                        let (rc, len) = send_result.map_err(|_| ipc::Error::ServerDied)?;
-                        let wire_result = { #parse_reply };
-                        wire_result.map(|v| { #map_handles })
-                    }
-                }
+                let (rc, len) = send_result.map_err(|_| ipc::Error::ServerDied)?;
+                let wire_result = { #parse_reply };
+                wire_result.map(|v| { #map_handles })
             }
         }
     } else {
-        // Normal message — no constructs.
-        let parse_reply = gen_parse_reply(return_type, quote! { self.server.get() }, true);
+        let parse_reply = gen_parse_reply(return_type, quote! { self.server.get() });
 
         let ret_type = match return_type {
-            Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error<#handle_error_type>> },
-            None => quote! { -> core::result::Result<(), ipc::Error<#handle_error_type>> },
+            Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error> },
+            None => quote! { -> core::result::Result<(), ipc::Error> },
         };
 
         quote! {
@@ -816,20 +616,8 @@ fn gen_message(
                 #handle_transfer_stmts
                 #serialize
                 #send_body
-                match send_result {
-                    Ok((rc, len)) => {
-                        #parse_reply
-                    }
-                    Err(dead) => {
-                        self.server.set(self.server.get().with_generation(dead.new_generation()));
-                        self.reconstruct()?;
-                        // Retry once with new handle.
-                        #retry_serialize
-                        #retry_send_body
-                        let (rc, len) = send_result.map_err(|_| ipc::Error::ServerDied)?;
-                        #parse_reply
-                    }
-                }
+                let (rc, len) = send_result.map_err(|_| ipc::Error::ServerDied)?;
+                #parse_reply
             }
         }
     }
@@ -843,7 +631,6 @@ fn gen_destructor(
     non_lease_params: &[&ParsedParam],
     lease_params: &[&ParsedParam],
     return_type: Option<&syn::Type>,
-    handle_error_type: &TokenStream2,
 ) -> TokenStream2 {
     let self_server_expr = quote! { self.server.get() };
     let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &self_server_expr);
@@ -855,11 +642,11 @@ fn gen_destructor(
     let serialize = gen_serialize_wire(&wire_names, &wire_types, Some(&handle_expr));
     let lease_arr = gen_lease_array(lease_params);
     let send_body = gen_send_body(kind, method_id_expr, &lease_arr);
-    let parse_reply = gen_parse_reply(return_type, quote! { self.server.get() }, true);
+    let parse_reply = gen_parse_reply(return_type, quote! { self.server.get() });
 
     let ret_type = match return_type {
-        Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error<#handle_error_type>> },
-        None => quote! { -> core::result::Result<(), ipc::Error<#handle_error_type>> },
+        Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error> },
+        None => quote! { -> core::result::Result<(), ipc::Error> },
     };
 
     quote! {
@@ -892,7 +679,7 @@ fn gen_static_message(
     let serialize = gen_serialize_wire(&wire_names, &wire_types, None);
     let lease_arr = gen_lease_array(lease_params);
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
-    let parse_reply = gen_parse_reply(return_type, quote! { server_id.get() }, false);
+    let parse_reply = gen_parse_reply(return_type, quote! { server_id.get() });
 
     let ret_type = match return_type {
         Some(rt) => quote! { -> core::result::Result<#rt, ipc::Error> },
@@ -972,7 +759,7 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
         None => quote! { -> core::result::Result<(), ipc::Error> },
     };
 
-    let parse_reply = gen_parse_reply(m.return_type.as_ref(), quote! { self.server.get() }, false);
+    let parse_reply = gen_parse_reply(m.return_type.as_ref(), quote! { self.server.get() });
 
     quote! {
         pub fn #method_name(&self, #(#sig_params),*) #ret_type {
@@ -1175,7 +962,6 @@ fn gen_send_body(kind: u8, method_id_expr: &TokenStream2, lease_arr: &TokenStrea
 fn gen_parse_reply(
     return_type: Option<&syn::Type>,
     server_expr: TokenStream2,
-    map_err: bool,
 ) -> TokenStream2 {
     let rc_check = quote! {
         if rc != userlib::ResponseCode::SUCCESS {
@@ -1185,11 +971,6 @@ fn gen_parse_reply(
                 #server_expr,
             );
         }
-    };
-    let map = if map_err {
-        quote! { .map_err(|e: ipc::Error| e.upcast()) }
-    } else {
-        quote! {}
     };
     if let Some(rt) = return_type {
         quote! {
@@ -1206,7 +987,7 @@ fn gen_parse_reply(
                     "ipc: server {:?} sent malformed reply ({} bytes received)",
                     #server_expr, len,
                 ));
-            result #map
+            result
         }
     } else {
         quote! {
@@ -1218,13 +999,13 @@ fn gen_parse_reply(
                     "ipc: server {:?} sent malformed reply ({} bytes received)",
                     #server_expr, len,
                 ));
-            result #map
+            result
         }
     }
 }
 
 // ===========================================================================
-// Constructor reply helpers — shared between gen_constructor & reconstruct
+// Constructor reply helpers
 // ===========================================================================
 
 /// The deserialization wire type for a constructor reply.
@@ -1248,20 +1029,10 @@ fn ctor_wire_type(ctor_return: &ConstructorReturn) -> TokenStream2 {
     }
 }
 
-/// Retbuffer size for a constructor call (concrete error type known).
+/// Retbuffer size for a constructor call.
 fn ctor_retbuffer_size(ctor_return: &ConstructorReturn) -> TokenStream2 {
     let wire_type = ctor_wire_type(ctor_return);
     quote! { <#wire_type as hubpack::SerializedSize>::MAX_SIZE }
-}
-
-/// Retbuffer size for reconstruction (error type is generic `E`).
-/// For `Result` variants, falls back to `HUBRIS_MESSAGE_SIZE_LIMIT` since
-/// the concrete error type isn't known at the reconstruction call site.
-fn ctor_retbuffer_size_reconstruct(ctor_return: &ConstructorReturn) -> TokenStream2 {
-    match ctor_return {
-        ConstructorReturn::Result(_) => quote! { ipc::HUBRIS_MESSAGE_SIZE_LIMIT },
-        _ => ctor_retbuffer_size(ctor_return),
-    }
 }
 
 // ===========================================================================
