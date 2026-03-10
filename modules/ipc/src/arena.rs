@@ -92,15 +92,14 @@ impl<T, const N: usize> Arena<T, N> {
             }
         };
 
-        // Find a free map entry, or evict to free one.
-        let map_idx = match self.map.iter().position(|e| !e.occupied) {
-            Some(idx) => idx,
-            None => {
-                let victim = self.find_eviction_victim(priority)?;
-                self.release_entry(victim);
-                self.map.iter().position(|e| !e.occupied)?
-            }
-        };
+        // release_entry always marks the victim's map entry as unoccupied,
+        // so a free map entry must exist. If it doesn't, the arena is in
+        // an inconsistent state.
+        let map_idx = self
+            .map
+            .iter()
+            .position(|e| !e.occupied)
+            .expect("ipc: arena has a free slot but no free map entry");
 
         let generation = self.slots[slot_idx].generation;
         self.slots[slot_idx].value = Some(value);
