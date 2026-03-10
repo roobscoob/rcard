@@ -279,16 +279,19 @@ pub fn gen_dispatcher(
     quote! {
         pub struct #dispatcher_name<'a, T: #trait_bound, #(#peer_generic_defs),*> {
             arena: &'a ipc::SharedArena<T, #arena_size>,
+            priority_fn: fn(u16) -> i8,
             #(#peer_fields,)*
         }
 
         impl<'a, T: #trait_bound, #(#peer_generic_defs),*> #dispatcher_name<'a, T, #(#peer_generic_names),*> {
             pub fn new(
                 arena: &'a ipc::SharedArena<T, #arena_size>,
+                priority_fn: fn(u16) -> i8,
                 #(#peer_ctor_params,)*
             ) -> Self {
                 Self {
                     arena,
+                    priority_fn,
                     #(#peer_ctor_inits,)*
                 }
             }
@@ -344,7 +347,7 @@ pub fn gen_dispatcher(
                         .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
                     let (handle, new_owner) = args;
                     let result: core::result::Result<ipc::RawHandle, ipc::Error> =
-                        match self.arena.clone_handle(handle, sender_index, new_owner) {
+                        match self.arena.clone_handle(handle, sender_index, new_owner, (self.priority_fn)(new_owner)) {
                             Ok(new_handle) => Ok(new_handle),
                             Err(ipc::CloneError::InvalidHandle) => {
                                 userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
@@ -419,8 +422,8 @@ pub fn gen_wiring_macro(
             #[doc(hidden)]
             #[macro_export]
             macro_rules! #macro_name {
-                ($own_arena:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {
-                    $crate::#dispatcher_name::new($own_arena)
+                ($own_arena:expr, $priority_fn:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {
+                    $crate::#dispatcher_name::new($own_arena, $priority_fn)
                 };
             }
         }
@@ -436,11 +439,11 @@ pub fn gen_wiring_macro(
             #[doc(hidden)]
             #[macro_export]
             macro_rules! #macro_name {
-                ($own_arena:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {{
+                ($own_arena:expr, $priority_fn:expr; $($all_name:ident => $all_arena:expr),* $(,)?) => {{
                     macro_rules! __find {
                         $( ($all_name) => { $all_arena }; )*
                     }
-                    $crate::#dispatcher_name::new($own_arena, #(#find_calls),*)
+                    $crate::#dispatcher_name::new($own_arena, $priority_fn, #(#find_calls),*)
                 }};
             }
         }
@@ -510,8 +513,9 @@ fn gen_dispatch_arm(
                 ConstructorReturn::Bare => {
                     quote! {
                         let value = T::#method_name(meta, #(#call_args),*);
+                        let __priority = (self.priority_fn)(sender_index);
                         let result: core::result::Result<ipc::RawHandle, ipc::Error> =
-                            match self.arena.alloc(value, sender_index) {
+                            match self.arena.alloc(value, sender_index, __priority) {
                                 Some(handle) => Ok(handle),
                                 None => Err(ipc::Error::ArenaFull),
                             };
@@ -526,11 +530,12 @@ fn gen_dispatch_arm(
                 ConstructorReturn::Result(error_type) => {
                     quote! {
                         let ctor_result = T::#method_name(meta, #(#call_args),*);
+                        let __priority = (self.priority_fn)(sender_index);
                         let result: core::result::Result<
                             core::result::Result<ipc::RawHandle, #error_type>,
                             ipc::Error,
                         > = match ctor_result {
-                            Ok(value) => match self.arena.alloc(value, sender_index) {
+                            Ok(value) => match self.arena.alloc(value, sender_index, __priority) {
                                 Some(handle) => Ok(Ok(handle)),
                                 None => Err(ipc::Error::ArenaFull),
                             },
@@ -549,11 +554,12 @@ fn gen_dispatch_arm(
                 ConstructorReturn::OptionSelf => {
                     quote! {
                         let ctor_result = T::#method_name(meta, #(#call_args),*);
+                        let __priority = (self.priority_fn)(sender_index);
                         let result: core::result::Result<
                             core::option::Option<ipc::RawHandle>,
                             ipc::Error,
                         > = match ctor_result {
-                            Some(value) => match self.arena.alloc(value, sender_index) {
+                            Some(value) => match self.arena.alloc(value, sender_index, __priority) {
                                 Some(handle) => Ok(Some(handle)),
                                 None => Err(ipc::Error::ArenaFull),
                             },
@@ -783,6 +789,24 @@ fn gen_reply(
         quote! { self.arena.get_mut_owned(handle, sender_index) }
     };
 
+    // Shared handle-miss guard: reply HANDLE_EVICTED if tombstoned, else INVALID_HANDLE (→ client panic).
+    let handle_miss = quote! {
+        if self.arena.was_evicted(handle) {
+            // Eviction is a recoverable condition: client gets HandleLost.
+            let mut reply_buf = [0u8;
+                <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+            let n = hubpack::serialize(
+                &mut reply_buf,
+                &core::result::Result::<(), ipc::Error>::Err(ipc::Error::HandleLost),
+            ).expect("ipc: failed to serialize HandleLost reply");
+            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+        } else {
+            // Not evicted → programming error. Client panics.
+            userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
+        }
+        return Ok(());
+    };
+
     if let Some(rt) = return_type {
         quote! {
             const _: () = assert!(
@@ -793,8 +817,7 @@ fn gen_reply(
             let mut reply_buf = [0u8;
                 <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
             let Some(resource) = #arena_op else {
-                userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
-                return Ok(());
+                #handle_miss
             };
             let result_value = resource.#method_name(meta, #(#call_args),*);
             let n = hubpack::serialize(
@@ -808,8 +831,7 @@ fn gen_reply(
             let mut reply_buf =
                 [0u8; <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
             let Some(resource) = #arena_op else {
-                userlib::sys_reply(msg.sender, ipc::INVALID_HANDLE, &[]);
-                return Ok(());
+                #handle_miss
             };
             resource.#method_name(meta, #(#call_args),*);
             let n = hubpack::serialize(

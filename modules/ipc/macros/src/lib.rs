@@ -118,53 +118,67 @@ struct NotificationConfig {
     handlers: Vec<syn::Path>,
 }
 
+struct PrioritiesConfig {
+    /// Function with signature `fn(u16) -> i8` that maps task index → priority.
+    priority_fn: syn::Path,
+}
+
 struct ServerInput {
     entries: Vec<ServerEntry>,
     notifications: Option<NotificationConfig>,
+    priorities: Option<PrioritiesConfig>,
 }
 
 impl syn::parse::Parse for ServerInput {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut entries = Vec::new();
         let mut notifications = None;
+        let mut priorities = None;
 
         while !input.is_empty() {
-            // Check for @notifications
+            // Check for @annotations
             if input.peek(syn::Token![@]) {
                 input.parse::<syn::Token![@]>()?;
                 let kw: syn::Ident = input.parse()?;
-                if kw != "notifications" {
-                    return Err(syn::Error::new(kw.span(), "expected `notifications`"));
-                }
+                if kw == "notifications" {
+                    // Parse (ReactorClient)
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let reactor_client: syn::Path = content.parse()?;
 
-                // Parse (ReactorClient)
-                let content;
-                syn::parenthesized!(content in input);
-                let reactor_client: syn::Path = content.parse()?;
+                    input.parse::<syn::Token![=>]>()?;
 
-                input.parse::<syn::Token![=>]>()?;
-
-                // Parse handler1, handler2, ...
-                let mut handlers = Vec::new();
-                handlers.push(input.parse::<syn::Path>()?);
-                while input.peek(syn::Token![,]) && !input.is_empty() {
-                    input.parse::<syn::Token![,]>()?;
-                    if input.is_empty() || input.peek(syn::Token![@]) {
-                        break;
-                    }
-                    // Check if next token is an ident followed by `:` (a ServerEntry)
-                    // If so, break out — this comma was the trailing comma before the next entry
-                    if input.peek(syn::Ident) && input.peek2(syn::Token![:]) {
-                        break;
-                    }
+                    // Parse handler1, handler2, ...
+                    let mut handlers = Vec::new();
                     handlers.push(input.parse::<syn::Path>()?);
-                }
+                    while input.peek(syn::Token![,]) && !input.is_empty() {
+                        input.parse::<syn::Token![,]>()?;
+                        if input.is_empty() || input.peek(syn::Token![@]) {
+                            break;
+                        }
+                        if input.peek(syn::Ident) && input.peek2(syn::Token![:]) {
+                            break;
+                        }
+                        handlers.push(input.parse::<syn::Path>()?);
+                    }
 
-                notifications = Some(NotificationConfig {
-                    reactor_client,
-                    handlers,
-                });
-            } else {
+                    notifications = Some(NotificationConfig {
+                        reactor_client,
+                        handlers,
+                    });
+                } else if kw == "priorities" {
+                    // Parse (priority_fn)
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let priority_fn: syn::Path = content.parse()?;
+                    priorities = Some(PrioritiesConfig { priority_fn });
+                    // consume optional trailing comma
+                    if input.peek(syn::Token![,]) {
+                        input.parse::<syn::Token![,]>()?;
+                    }
+                } else {
+                    return Err(syn::Error::new(kw.span(), "expected `notifications` or `priorities`"));
+                }
                 let trait_name: syn::Ident = input.parse()?;
                 input.parse::<syn::Token![:]>()?;
                 let concrete_type: syn::Path = input.parse()?;
@@ -180,6 +194,7 @@ impl syn::parse::Parse for ServerInput {
         Ok(ServerInput {
             entries,
             notifications,
+            priorities,
         })
     }
 }
@@ -203,6 +218,14 @@ impl syn::parse::Parse for ServerInput {
 pub fn server(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ServerInput);
     let count = input.entries.len();
+
+    // Resolve the priority function: use specified fn or default to always-zero.
+    let priority_fn_expr = if let Some(prio_cfg) = &input.priorities {
+        let pf = &prio_cfg.priority_fn;
+        quote! { #pf }
+    } else {
+        quote! { { fn __default_priority(_: u16) -> i8 { 0 } __default_priority } }
+    };
 
     let mut arena_decls = Vec::new();
     let mut dispatcher_decls = Vec::new();
@@ -242,7 +265,7 @@ pub fn server(input: TokenStream) -> TokenStream {
 
         dispatcher_decls.push(quote! {
             let mut #disp_var = #wiring_macro!(
-                &#arena_var;
+                &#arena_var, #priority_fn_expr;
                 #(#arena_kvs),*
             );
         });

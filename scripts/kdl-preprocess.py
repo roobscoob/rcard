@@ -1064,20 +1064,32 @@ def check_dependency_cycles(doc):
 def transform_task_directives(doc):
     """Transform preprocessor directives into uses-task lines for hubake.
 
-    Returns (peers_dict, uses_dict).
+    Returns (peers_dict, uses_dict, priorities_dict).
+    priorities_dict maps task_name -> {sysmodule_task_name -> priority_int}.
     """
     all_names = collect_task_names(doc)
     all_peers = {}
     all_uses = {}
+    all_priorities = {}
 
     for task_node in find_tasks(doc):
         tname = task_name(task_node)
         uses_tasks = set()
         real_uses = set()
+        task_priorities = {}
 
-        # uses-sysmodule X -> sysmodule_X
+        # uses-sysmodule X [priority=N] -> sysmodule_X
         for c in find_children(task_node, 'uses-sysmodule'):
-            dep = f'sysmodule_{node_arg(c)}'
+            sysmodule_name = node_arg(c)
+            dep = f'sysmodule_{sysmodule_name}'
+            priority = c.props.get('priority')
+            if priority is None:
+                die(
+                    f"task '{tname}' uses-sysmodule \"{sysmodule_name}\" "
+                    f"without a priority declaration. "
+                    f"Add 'priority=N' (e.g. priority=0 for nominal, priority=-1 for background/lossy)."
+                )
+            task_priorities[dep] = int(str(priority))
             uses_tasks.add(dep)
             real_uses.add(dep)
 
@@ -1100,21 +1112,27 @@ def transform_task_directives(doc):
                 uses_tasks.add(val)
                 real_uses.add(val)
 
-        # uses-partition -> implicit sysmodule_storage
+        # uses-partition -> implicit sysmodule_storage at priority 0
         if any(True for _ in find_children(task_node, 'uses-partition')):
             uses_tasks.add('sysmodule_storage')
             real_uses.add('sysmodule_storage')
+            task_priorities.setdefault('sysmodule_storage', 0)
 
-        # uses-notification / pushes-notification -> implicit sysmodule_reactor
+        # uses-notification / pushes-notification -> implicit sysmodule_reactor at priority 0
         if any(True for _ in find_children(task_node, 'uses-notification')):
             uses_tasks.add('sysmodule_reactor')
             real_uses.add('sysmodule_reactor')
+            task_priorities.setdefault('sysmodule_reactor', 0)
         if any(True for _ in find_children(task_node, 'pushes-notification')):
             uses_tasks.add('sysmodule_reactor')
             real_uses.add('sysmodule_reactor')
+            task_priorities.setdefault('sysmodule_reactor', 0)
 
         if real_uses:
             all_uses[tname] = sorted(real_uses)
+
+        if task_priorities:
+            all_priorities[tname] = task_priorities
 
         # Strip preprocessor directives, inject uses-task nodes
         strip_names = {
@@ -1128,7 +1146,7 @@ def transform_task_directives(doc):
                 kdl.Node(name='uses-task', args=[kdl.String(value=t, tag=None)])
             )
 
-    return all_peers, all_uses
+    return all_peers, all_uses, all_priorities
 
 
 def inject_storage_uses_task(doc, partition_acl):
@@ -1279,7 +1297,7 @@ def main():
         transform_allocation_uses(doc)
 
     # Transform task directives (uses-sysmodule, peer-sysmodule, etc.)
-    peers, uses = transform_task_directives(doc)
+    peers, uses, priorities = transform_task_directives(doc)
 
     # Inject uses-task entries into sysmodule_storage for ACL enforcement
     inject_storage_uses_task(doc, partition_acl)
@@ -1344,6 +1362,13 @@ def main():
         json_path = output_path.rsplit('.', 1)[0] + '.uses.json'
         with open(json_path, 'w') as f:
             json.dump(uses, f, indent=2)
+
+    # Write priorities JSON alongside the output
+    # Format: {task: {sysmodule_task: priority_int}}
+    if priorities:
+        json_path = output_path.rsplit('.', 1)[0] + '.priorities.json'
+        with open(json_path, 'w') as f:
+            json.dump(priorities, f, indent=2)
 
     # Write chip memory regions JSON alongside the output
     if chip_regions:

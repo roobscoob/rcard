@@ -16,6 +16,9 @@ struct HandleEntry {
     occupied: bool,
     owner: u16,
     parent: Option<RawHandle>,
+    /// Priority of the owner at the time of allocation.
+    /// Used for eviction: a higher-priority requester can evict a lower-priority holder.
+    priority: i8,
 }
 
 struct Slot<T> {
@@ -32,9 +35,20 @@ struct Slot<T> {
 ///
 /// Supports refcounting: multiple `HandleEntry` rows can point to the same
 /// slot. The slot's value is only dropped when the last reference is removed.
+///
+/// Supports priority-based eviction: when the arena is full, a requester
+/// with strictly higher priority than the lowest-priority current holder
+/// can evict that holder's handle. Evicted keys are recorded in a tombstone
+/// ring so clients can distinguish eviction (`HandleLost`) from programming
+/// errors (`INVALID_HANDLE`).
 pub struct Arena<T, const N: usize> {
     slots: [Slot<T>; N],
     map: [HandleEntry; N],
+    /// Ring buffer of recently-evicted handle keys.
+    /// When lookup_owned fails, we check here to return HandleLost vs panic.
+    tombstone: [u64; N],
+    tombstone_len: usize,
+    tombstone_head: usize,
     // TODO: Replace with hardware PRNG when available. Currently a
     // deterministic LCG — handle keys are predictable across servers.
     next_key: u64,
@@ -54,6 +68,7 @@ impl<T, const N: usize> Arena<T, N> {
         occupied: false,
         owner: 0,
         parent: None,
+        priority: 0,
     };
 
     pub const fn new(kind: u8) -> Self {
@@ -61,6 +76,9 @@ impl<T, const N: usize> Arena<T, N> {
         Self {
             slots: [Self::EMPTY_SLOT; N],
             map: [Self::EMPTY_ENTRY; N],
+            tombstone: [0u64; N],
+            tombstone_len: 0,
+            tombstone_head: 0,
             // Seed with kind byte so different arenas produce different key sequences.
             next_key: (kind as u64) << 56 | 1,
         }
@@ -76,8 +94,14 @@ impl<T, const N: usize> Arena<T, N> {
     }
 
     /// Allocate a new slot, returning a handle to it.
-    pub fn alloc(&mut self, value: T, owner: u16) -> Option<RawHandle> {
-        self.alloc_inner(value, owner, None)
+    ///
+    /// `priority` is the requester's declared priority for this sysmodule.
+    /// When the arena is full, a requester with strictly higher priority than
+    /// the lowest-priority current holder will evict that holder's handle.
+    /// Equal priority → returns `None` (ArenaFull). Evicted keys are recorded
+    /// in the tombstone ring so clients get `HandleLost` rather than a panic.
+    pub fn alloc(&mut self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+        self.alloc_inner(value, owner, priority, None)
     }
 
     /// Allocate a new slot with a parent handle reference.
@@ -86,19 +110,68 @@ impl<T, const N: usize> Arena<T, N> {
         &mut self,
         value: T,
         owner: u16,
+        priority: i8,
         parent: RawHandle,
     ) -> Option<RawHandle> {
-        self.alloc_inner(value, owner, Some(parent))
+        self.alloc_inner(value, owner, priority, Some(parent))
     }
 
     fn alloc_inner(
         &mut self,
         value: T,
         owner: u16,
+        priority: i8,
         parent: Option<RawHandle>,
     ) -> Option<RawHandle> {
-        let slot_idx = self.slots.iter().position(|s| s.value.is_none())?;
-        let map_idx = self.map.iter().position(|e| !e.occupied)?;
+        // Fast path: free slot available.
+        let slot_idx_opt = self.slots.iter().position(|s| s.value.is_none());
+        let map_idx_opt = self.map.iter().position(|e| !e.occupied);
+
+        let (slot_idx, map_idx) = match (slot_idx_opt, map_idx_opt) {
+            (Some(s), Some(m)) => (s, m),
+            _ => {
+                // Arena full — attempt eviction.
+                // Find the map entry with the lowest priority that is strictly
+                // less than `priority`. If multiple entries tie for lowest,
+                // pick the first one (deterministic).
+                let victim_idx = self
+                    .map
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.occupied)
+                    .min_by_key(|(_, e)| e.priority)
+                    .and_then(|(i, e)| {
+                        if e.priority < priority {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    });
+
+                let victim_idx = victim_idx?; // None → ArenaFull, requester loses
+
+                // Record the evicted key in the tombstone ring before releasing.
+                let evicted_key = self.map[victim_idx].key;
+                self.tombstone_push(evicted_key);
+
+                // Release the victim entry (may free the slot if refcount hits 0).
+                let victim_slot = self.map[victim_idx].slot as usize;
+                let victim_handle = RawHandle(evicted_key);
+                self.release_entry(victim_idx);
+                // Cascade-remove any children of the evicted handle.
+                self.remove_by_parent_tombstoning(victim_handle);
+
+                // The slot may now be free. If not (still has other refs via
+                // clone), we can't reuse it — fall back to ArenaFull.
+                if self.slots[victim_slot].value.is_some() {
+                    return None;
+                }
+
+                // Find the now-free map entry.
+                let map_idx = self.map.iter().position(|e| !e.occupied)?;
+                (victim_slot, map_idx)
+            }
+        };
 
         let generation = self.slots[slot_idx].generation;
         self.slots[slot_idx].value = Some(value);
@@ -113,9 +186,24 @@ impl<T, const N: usize> Arena<T, N> {
             occupied: true,
             owner,
             parent,
+            priority,
         };
 
         Some(RawHandle(key))
+    }
+
+    /// Push a key into the tombstone ring, overwriting the oldest entry when full.
+    fn tombstone_push(&mut self, key: u64) {
+        self.tombstone[self.tombstone_head] = key;
+        self.tombstone_head = (self.tombstone_head + 1) % N;
+        if self.tombstone_len < N {
+            self.tombstone_len += 1;
+        }
+    }
+
+    /// Check whether a key is in the tombstone ring (was recently evicted).
+    pub fn is_tombstoned(&self, key: u64) -> bool {
+        self.tombstone[..self.tombstone_len].contains(&key)
     }
 
     fn lookup(&self, handle: RawHandle) -> Option<usize> {
@@ -134,6 +222,13 @@ impl<T, const N: usize> Arena<T, N> {
             return None;
         }
         Some(entry.slot as usize)
+    }
+
+    /// Check whether a handle was evicted (vs never existing / wrong owner).
+    /// Returns `true` if the key is in the tombstone ring.
+    /// Used by server dispatch to reply `HANDLE_EVICTED` vs `INVALID_HANDLE`.
+    pub fn was_evicted(&self, handle: RawHandle) -> bool {
+        self.is_tombstoned(handle.0)
     }
 
     pub fn get(&self, handle: RawHandle) -> Option<&T> {
@@ -233,6 +328,7 @@ impl<T, const N: usize> Arena<T, N> {
         handle: RawHandle,
         owner: u16,
         new_owner: u16,
+        new_priority: i8,
     ) -> Result<RawHandle, CloneError> {
         // Find source entry — only if the caller owns it.
         let (slot_idx, generation, parent) = {
@@ -273,9 +369,40 @@ impl<T, const N: usize> Arena<T, N> {
             occupied: true,
             owner: new_owner,
             parent,
+            priority: new_priority,
         };
 
         Ok(RawHandle(key))
+    }
+
+    /// Remove all entries whose parent matches the given handle, recording
+    /// evicted keys in the tombstone ring. Used during eviction cascades.
+    fn remove_by_parent_tombstoning(&mut self, parent: RawHandle) {
+        let mut pending = [RawHandle(0); N];
+        let mut pending_len = 1;
+        pending[0] = parent;
+
+        while pending_len > 0 {
+            pending_len -= 1;
+            let current_parent = pending[pending_len];
+
+            for i in 0..N {
+                if self.map[i].occupied {
+                    if let Some(p) = self.map[i].parent {
+                        if p == current_parent {
+                            let child_key = self.map[i].key;
+                            self.tombstone_push(child_key);
+                            let child = RawHandle(child_key);
+                            self.release_entry(i);
+                            if pending_len < N {
+                                pending[pending_len] = child;
+                                pending_len += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Remove all entries whose parent matches the given handle.
@@ -353,17 +480,18 @@ impl<T, const N: usize> SharedArena<T, N> {
         self.arena().get_mut_owned(handle, owner)
     }
 
-    pub fn alloc(&self, value: T, owner: u16) -> Option<RawHandle> {
-        self.arena().alloc(value, owner)
+    pub fn alloc(&self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+        self.arena().alloc(value, owner, priority)
     }
 
     pub fn alloc_with_parent(
         &self,
         value: T,
         owner: u16,
+        priority: i8,
         parent: RawHandle,
     ) -> Option<RawHandle> {
-        self.arena().alloc_with_parent(value, owner, parent)
+        self.arena().alloc_with_parent(value, owner, priority, parent)
     }
 
     pub fn remove(&self, handle: RawHandle) -> Option<T> {
@@ -396,7 +524,12 @@ impl<T, const N: usize> SharedArena<T, N> {
         handle: RawHandle,
         owner: u16,
         new_owner: u16,
+        new_priority: i8,
     ) -> Result<RawHandle, CloneError> {
-        self.arena().clone_handle(handle, owner, new_owner)
+        self.arena().clone_handle(handle, owner, new_owner, new_priority)
+    }
+
+    pub fn was_evicted(&self, handle: RawHandle) -> bool {
+        self.arena().was_evicted(handle)
     }
 }

@@ -26,6 +26,9 @@ pub enum Error {
     ServerDied,
     /// The server's resource arena is full; could not allocate.
     ArenaFull,
+    /// The handle was evicted to make room for a higher-priority client.
+    /// The client should re-acquire the resource if it still needs it.
+    HandleLost,
 }
 
 impl hubpack::SerializedSize for Error {
@@ -41,6 +44,12 @@ pub const MALFORMED_MESSAGE: userlib::ResponseCode = userlib::ResponseCode(1);
 /// (stale, wrong owner, or already freed). The client's generated code
 /// panics on any non-SUCCESS response code.
 pub const INVALID_HANDLE: userlib::ResponseCode = userlib::ResponseCode(2);
+
+/// `ResponseCode` sent by the server when a client's handle was evicted to
+/// make room for a higher-priority requester. Unlike `INVALID_HANDLE` (which
+/// triggers a client panic as a programming error), the client's generated
+/// code returns `Err(ipc::Error::HandleLost)` so the caller can recover.
+pub const HANDLE_EVICTED: userlib::ResponseCode = userlib::ResponseCode(3);
 
 pub mod alloc_take;
 mod arena;
