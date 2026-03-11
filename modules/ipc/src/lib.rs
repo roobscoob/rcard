@@ -3,6 +3,10 @@
 /// Maximum size of a Hubris message or reply buffer, in bytes.
 pub const HUBRIS_MESSAGE_SIZE_LIMIT: usize = 256;
 
+pub mod kern;
+pub mod dispatch;
+pub mod call;
+
 /// IPC-layer error returned to all callers.
 ///
 /// Layer breakdown:
@@ -41,12 +45,12 @@ impl hubpack::SerializedSize for Error {
 /// `ResponseCode` sent by the server when a client message is malformed
 /// (bad size, bad contents, or bad leases, or unknown kind byte).
 /// The client's generated code panics on any non-SUCCESS response code.
-pub const MALFORMED_MESSAGE: userlib::ResponseCode = userlib::ResponseCode(1);
+pub const MALFORMED_MESSAGE: kern::ResponseCode = kern::ResponseCode(1);
 
 /// `ResponseCode` sent by the server when a client is not in the server's
 /// runtime ACL (i.e. the task did not declare `uses-sysmodule` for this server).
 /// The client's generated code panics on this response code.
-pub const ACCESS_VIOLATION: userlib::ResponseCode = userlib::ResponseCode(2);
+pub const ACCESS_VIOLATION: kern::ResponseCode = kern::ResponseCode(2);
 
 
 pub mod alloc_take;
@@ -114,25 +118,25 @@ pub trait Transferable {
 /// handle's server. Does NOT consume `self`. Returns a `DynHandle` with the
 /// new handle key.
 pub trait Cloneable {
-    fn clone_for(&self, new_owner: userlib::TaskId) -> Result<DynHandle, CloneError>;
+    fn clone_for(&self, new_owner: kern::TaskId) -> Result<DynHandle, CloneError>;
 }
 
 /// A `Sync` wrapper around a `TaskId` for use in statics. Safe because Hubris
 /// tasks are single-threaded.
-pub struct StaticTaskId(core::cell::UnsafeCell<userlib::TaskId>);
+pub struct StaticTaskId(core::cell::UnsafeCell<kern::TaskId>);
 
 unsafe impl Sync for StaticTaskId {}
 
 impl StaticTaskId {
-    pub const fn new(id: userlib::TaskId) -> Self {
+    pub const fn new(id: kern::TaskId) -> Self {
         Self(core::cell::UnsafeCell::new(id))
     }
 
-    pub fn get(&self) -> userlib::TaskId {
+    pub fn get(&self) -> kern::TaskId {
         unsafe { *self.0.get() }
     }
 
-    pub fn set(&self, id: userlib::TaskId) {
+    pub fn set(&self, id: kern::TaskId) {
         unsafe {
             *self.0.get() = id;
         }
@@ -176,7 +180,7 @@ macro_rules! notify_dead {
         static REENTERED: AtomicBool = AtomicBool::new(false);
         if !REENTERED.swap(true, Ordering::Relaxed) {
             $(
-                let _ = userlib::sys_send(
+                let _ = $crate::kern::sys_send(
                     <$Server>::server_task_id(),
                     ipc::opcode(0, ipc::NOTIFY_DEAD_METHOD),
                     &[],

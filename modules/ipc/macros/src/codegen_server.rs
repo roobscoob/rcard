@@ -56,14 +56,14 @@ pub fn gen_server_trait(
             for p in &m.params {
                 let pname = &p.name;
                 if p.is_lease {
-                    if let Some((inner_ty, mutable)) = parse_slice_ref(&p.ty) {
+                    if let Some((_inner_ty, mutable)) = parse_slice_ref(&p.ty) {
                         if mutable {
                             params.push(
-                                quote! { #pname: idyll_runtime::Leased<idyll_runtime::Write, #inner_ty> },
+                                quote! { #pname: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write> },
                             );
                         } else {
                             params.push(
-                                quote! { #pname: idyll_runtime::Leased<idyll_runtime::Read, #inner_ty> },
+                                quote! { #pname: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read> },
                             );
                         }
                     }
@@ -304,31 +304,29 @@ pub fn gen_dispatcher(
             fn dispatch(
                 &mut self,
                 method_id: u8,
-                msg: &userlib::Message<'_>,
-            ) -> core::result::Result<(), userlib::ReplyFaultReason> {
-                let sender_index = msg.sender.task_index();
+                msg: ipc::dispatch::MessageData<'_>,
+                reply: ipc::dispatch::PendingReply,
+            ) {
+                let sender_index = msg.sender_index();
                 let __priority = (self.priority_fn)(sender_index);
 
                 // Handle implicit destroy (Drop on client handle).
                 if method_id == ipc::IMPLICIT_DESTROY_METHOD {
-                    let Ok(msg_data) = &msg.data else {
-                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    let handle = match msg.decode_args::<ipc::RawHandle>() {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
                     };
-                    let (handle, _) = hubpack::deserialize::<ipc::RawHandle>(msg_data)
-                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
                     let _ = self.arena.remove_owned(handle, sender_index);
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
-                    return Ok(());
+                    reply.reply_ok(&[]);
+                    return;
                 }
 
                 // Handle clone (refcounted resources).
                 if method_id == ipc::CLONE_METHOD {
-                    let Ok(msg_data) = &msg.data else {
-                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    let (handle, new_owner) = match msg.decode_args::<(ipc::RawHandle, u16)>() {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
                     };
-                    let (args, _) = hubpack::deserialize::<(ipc::RawHandle, u16)>(msg_data)
-                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
-                    let (handle, new_owner) = args;
                     let new_owner_priority = (self.priority_fn)(new_owner);
                     let result: core::result::Result<ipc::RawHandle, ipc::Error> =
                         match self.arena.clone_handle(handle, sender_index, new_owner, new_owner_priority) {
@@ -337,80 +335,62 @@ pub fn gen_dispatcher(
                             Err(ipc::CloneError::ArenaFull) => Err(ipc::Error::ArenaFull),
                             Err(ipc::CloneError::ServerDied) => unreachable!(),
                         };
-                    let mut reply_buf = [0u8;
-                        <core::result::Result<ipc::RawHandle, ipc::Error>
-                            as hubpack::SerializedSize>::MAX_SIZE];
-                    let n = hubpack::serialize(&mut reply_buf, &result)
-                        .expect("ipc: failed to serialize clone reply");
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
-                    return Ok(());
+                    reply.reply_serialize(&result);
+                    return;
                 }
 
                 // 2PC: prepare_transfer — freeze handle for transfer to target.
                 if method_id == ipc::PREPARE_TRANSFER_METHOD {
-                    let Ok(msg_data) = &msg.data else {
-                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    let (handle, target) = match msg.decode_args::<(ipc::RawHandle, u16)>() {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
                     };
-                    let (args, _) = hubpack::deserialize::<(ipc::RawHandle, u16)>(msg_data)
-                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
-                    let (handle, target) = args;
-                    let mut reply_buf = [0u8;
-                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
                     let result: core::result::Result<(), ipc::Error> =
                         if self.arena.prepare_transfer(handle, sender_index, target) {
                             Ok(())
                         } else {
                             Err(ipc::Error::HandleLost)
                         };
-                    let n = hubpack::serialize(&mut reply_buf, &result)
-                        .expect("ipc: failed to serialize prepare_transfer reply");
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
-                    return Ok(());
+                    reply.reply_serialize(&result);
+                    return;
                 }
 
                 // 2PC: cancel_transfer — unfreeze a pending handle.
                 if method_id == ipc::CANCEL_TRANSFER_METHOD {
-                    let Ok(msg_data) = &msg.data else {
-                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    let (handle,) = match msg.decode_args::<(ipc::RawHandle,)>() {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
                     };
-                    let ((handle,), _) = hubpack::deserialize::<(ipc::RawHandle,)>(msg_data)
-                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
                     let _ = self.arena.cancel_transfer(handle, sender_index);
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
-                    return Ok(());
+                    reply.reply_ok(&[]);
+                    return;
                 }
 
                 // 2PC: acquire — complete transfer, acquirer takes ownership.
                 if method_id == ipc::ACQUIRE_METHOD {
-                    let Ok(msg_data) = &msg.data else {
-                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    let (handle,) = match msg.decode_args::<(ipc::RawHandle,)>() {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
                     };
-                    let ((handle,), _) = hubpack::deserialize::<(ipc::RawHandle,)>(msg_data)
-                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
-                    let mut reply_buf = [0u8;
-                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
                     let result: core::result::Result<(), ipc::Error> =
                         if self.arena.acquire(handle, sender_index, __priority) {
                             Ok(())
                         } else {
                             Err(ipc::Error::TransferFailed)
                         };
-                    let n = hubpack::serialize(&mut reply_buf, &result)
-                        .expect("ipc: failed to serialize acquire reply");
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
-                    return Ok(());
+                    reply.reply_serialize(&result);
+                    return;
                 }
 
                 // 2PC: try_drop — cleanup after failed transfer.
                 if method_id == ipc::TRY_DROP_METHOD {
-                    let Ok(msg_data) = &msg.data else {
-                        return Err(userlib::ReplyFaultReason::BadMessageSize);
+                    let (handle,) = match msg.decode_args::<(ipc::RawHandle,)>() {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
                     };
-                    let ((handle,), _) = hubpack::deserialize::<(ipc::RawHandle,)>(msg_data)
-                        .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
                     let _ = self.arena.try_drop(handle, sender_index);
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
-                    return Ok(());
+                    reply.reply_ok(&[]);
+                    return;
                 }
 
                 let op = match #enum_name::try_from(method_id) {
@@ -422,15 +402,7 @@ pub fn gen_dispatcher(
                     ),
                 };
 
-                let Ok(msg_data) = &msg.data else {
-                    return Err(userlib::ReplyFaultReason::BadMessageSize);
-                };
-
-                let meta = ipc::Meta {
-                    sender: msg.sender,
-                    lease_count: u8::try_from(msg.lease_count)
-                        .expect("ipc: lease_count exceeds u8"),
-                };
+                let meta = msg.meta();
 
                 match op {
                     #(#dispatch_arms)*
@@ -530,35 +502,13 @@ fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
             // Cross-server: send ACQUIRE_METHOD IPC to source server
             acquire_stmts.push(quote! {
                 let #acquired_flag = {
-                    let acquire_args: (ipc::RawHandle,) = (#pname.handle,);
-                    let mut __acq_argbuf = [0u8;
-                        <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
-                    let __acq_n = hubpack::serialize(&mut __acq_argbuf, &acquire_args)
-                        .expect("ipc: serialize acquire args");
-                    let __acq_opcode = ipc::opcode(#pname.kind, ipc::ACQUIRE_METHOD);
-                    let mut __acq_retbuf = [0u8;
-                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                    let mut __acq_leases = [];
-                    match userlib::sys_send(
-                        #pname.task_id(),
-                        __acq_opcode,
-                        &__acq_argbuf[..__acq_n],
-                        &mut __acq_retbuf,
-                        &mut __acq_leases,
-                    ) {
-                        Ok((__acq_rc, __acq_len)) => {
-                            if __acq_rc == userlib::ResponseCode::SUCCESS {
-                                match hubpack::deserialize::<core::result::Result<(), ipc::Error>>(
-                                    &__acq_retbuf[..__acq_len],
-                                ) {
-                                    Ok((Ok(()), _)) => true,
-                                    _ => false,
-                                }
-                            } else {
-                                false
-                            }
-                        }
-                        Err(_) => false,
+                    let mut __acq_call = ipc::call::IpcCall::new(
+                        #pname.task_id(), #pname.kind, ipc::ACQUIRE_METHOD,
+                    );
+                    __acq_call.set_args(&(#pname.handle,));
+                    match __acq_call.send::<core::result::Result<(), ipc::Error>>() {
+                        Ok((_, Ok(()))) => true,
+                        _ => false,
                     }
                 };
             });
@@ -590,21 +540,11 @@ fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
                         // Cross-server: we acquired ownership, so destroy it on the source
                         Some(quote! {
                             if #prev_flag {
-                                let __destroy_args: (ipc::RawHandle,) = (#prev_name.handle,);
-                                let mut __destroy_buf = [0u8;
-                                    <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
-                                let __destroy_n = hubpack::serialize(&mut __destroy_buf, &__destroy_args)
-                                    .expect("ipc: serialize destroy args");
-                                let __destroy_op = ipc::opcode(#prev_name.kind, ipc::IMPLICIT_DESTROY_METHOD);
-                                let mut __destroy_retbuf = [0u8; 0];
-                                let mut __destroy_leases = [];
-                                let _ = userlib::sys_send(
-                                    #prev_name.task_id(),
-                                    __destroy_op,
-                                    &__destroy_buf[..__destroy_n],
-                                    &mut __destroy_retbuf,
-                                    &mut __destroy_leases,
+                                let mut __destroy_call = ipc::call::IpcCall::new(
+                                    #prev_name.task_id(), #prev_name.kind, ipc::IMPLICIT_DESTROY_METHOD,
                                 );
+                                __destroy_call.set_args(&(#prev_name.handle,));
+                                let _ = __destroy_call.send_void();
                             }
                         })
                     } else {
@@ -620,14 +560,10 @@ fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
                 if !#flag {
                     // Release all previously acquired handles
                     #(#rollback_stmts)*
-                    let mut __err_reply_buf = [0u8;
-                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                    let __err_n = hubpack::serialize(
-                        &mut __err_reply_buf,
+                    reply.reply_serialize(
                         &core::result::Result::<(), ipc::Error>::Err(ipc::Error::TransferFailed),
-                    ).expect("ipc: serialize TransferFailed");
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &__err_reply_buf[..__err_n]);
-                    return Ok(());
+                    );
+                    return;
                 }
             }
         })
@@ -672,14 +608,10 @@ fn gen_peer_resolution(m: &ParsedMethod) -> Vec<TokenStream2> {
             let field = peer_field_name(trait_name);
             Some(quote! {
                 let Some(#name) = self.#field.get(#name.handle) else {
-                    let mut __peer_err_buf = [0u8;
-                        <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-                    let __peer_err_n = hubpack::serialize(
-                        &mut __peer_err_buf,
+                    reply.reply_serialize(
                         &core::result::Result::<(), ipc::Error>::Err(ipc::Error::HandleLost),
-                    ).expect("ipc: failed to serialize HandleLost reply");
-                    userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &__peer_err_buf[..__peer_err_n]);
-                    return Ok(());
+                    );
+                    return;
                 };
             })
         })
@@ -719,12 +651,7 @@ fn gen_dispatch_arm(
                                 Some(handle) => Ok(handle),
                                 None => Err(ipc::Error::ArenaFull),
                             };
-                        let mut reply_buf = [0u8;
-                            <core::result::Result<ipc::RawHandle, ipc::Error>
-                                as hubpack::SerializedSize>::MAX_SIZE];
-                        let n = hubpack::serialize(&mut reply_buf, &result)
-                            .expect("ipc: failed to serialize constructor reply");
-                        userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                        reply.reply_serialize(&result);
                     }
                 }
                 ConstructorReturn::Result(error_type) => {
@@ -740,14 +667,7 @@ fn gen_dispatch_arm(
                             },
                             Err(e) => Ok(Err(e)),
                         };
-                        let mut reply_buf = [0u8;
-                            <core::result::Result<
-                                core::result::Result<ipc::RawHandle, #error_type>,
-                                ipc::Error,
-                            > as hubpack::SerializedSize>::MAX_SIZE];
-                        let n = hubpack::serialize(&mut reply_buf, &result)
-                            .expect("ipc: failed to serialize constructor reply");
-                        userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                        reply.reply_serialize(&result);
                     }
                 }
                 ConstructorReturn::OptionSelf => {
@@ -763,14 +683,7 @@ fn gen_dispatch_arm(
                             },
                             None => Ok(None),
                         };
-                        let mut reply_buf = [0u8;
-                            <core::result::Result<
-                                core::option::Option<ipc::RawHandle>,
-                                ipc::Error,
-                            > as hubpack::SerializedSize>::MAX_SIZE];
-                        let n = hubpack::serialize(&mut reply_buf, &result)
-                            .expect("ipc: failed to serialize constructor reply");
-                        userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+                        reply.reply_serialize(&result);
                     }
                 }
             };
@@ -783,7 +696,6 @@ fn gen_dispatch_arm(
                     #(#peer_resolution)*
                     #acquire_block
                     #ctor_body
-                    Ok(())
                 }
             }
         }
@@ -801,7 +713,6 @@ fn gen_dispatch_arm(
                     #(#peer_resolution)*
                     #acquire_block
                     #handle_result
-                    Ok(())
                 }
             }
         }
@@ -817,7 +728,6 @@ fn gen_dispatch_arm(
                     #(#peer_resolution)*
                     #acquire_block
                     #handle_result
-                    Ok(())
                 }
             }
         }
@@ -835,7 +745,6 @@ fn gen_dispatch_arm(
                     #(#peer_resolution)*
                     #acquire_block
                     #static_reply
-                    Ok(())
                 }
             }
         }
@@ -866,13 +775,17 @@ fn gen_deserialize_args(
     if include_handle {
         let deserialize = if arg_types.is_empty() {
             quote! {
-                let (handle, _) = hubpack::deserialize::<ipc::RawHandle>(msg_data)
-                    .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                let handle = match msg.decode_args::<ipc::RawHandle>() {
+                    Ok(v) => v,
+                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
+                };
             }
         } else {
             quote! {
-                let (args, _) = hubpack::deserialize::<(ipc::RawHandle, #(#arg_types,)*)>(msg_data)
-                    .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                let args = match msg.decode_args::<(ipc::RawHandle, #(#arg_types,)*)>() {
+                    Ok(v) => v,
+                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
+                };
             }
         };
 
@@ -893,13 +806,17 @@ fn gen_deserialize_args(
             let ty = &arg_types[0];
             let n = &arg_names[0];
             quote! {
-                let (#n, _) = hubpack::deserialize::<#ty>(msg_data)
-                    .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                let #n = match msg.decode_args::<#ty>() {
+                    Ok(v) => v,
+                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
+                };
             }
         } else {
             quote! {
-                let (args, _) = hubpack::deserialize::<(#(#arg_types,)*)>(msg_data)
-                    .map_err(|_| userlib::ReplyFaultReason::BadMessageContents)?;
+                let args = match msg.decode_args::<(#(#arg_types,)*)>() {
+                    Ok(v) => v,
+                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
+                };
             }
         };
 
@@ -921,13 +838,17 @@ fn gen_lease_bindings(lease_params: &[&ParsedParam]) -> Vec<TokenStream2> {
             let pname = &p.name;
             if p.lease_mutable {
                 quote! {
-                    let #pname = idyll_runtime::Leased::<idyll_runtime::Write, _>::new(msg.sender, #i)
-                        .ok_or(userlib::ReplyFaultReason::BadLeases)?;
+                    let #pname = match msg.lease::<ipc::dispatch::Write>(#i) {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
+                    };
                 }
             } else {
                 quote! {
-                    let #pname = idyll_runtime::Leased::<idyll_runtime::Read, _>::new(msg.sender, #i)
-                        .ok_or(userlib::ReplyFaultReason::BadLeases)?;
+                    let #pname = match msg.lease::<ipc::dispatch::Read>(#i) {
+                        Ok(v) => v,
+                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
+                    };
                 }
             }
         })
@@ -957,24 +878,16 @@ fn gen_static_reply(
                 "return type exceeds Hubris message size limit (256 bytes)",
             );
             let result_value = T::#method_name(meta, #(#call_args),*);
-            let mut reply_buf = [0u8;
-                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-            let n = hubpack::serialize(
-                &mut reply_buf,
+            reply.reply_serialize(
                 &core::result::Result::<#rt, ipc::Error>::Ok(result_value),
-            ).expect("ipc: failed to serialize reply");
-            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+            );
         }
     } else {
         quote! {
             T::#method_name(meta, #(#call_args),*);
-            let mut reply_buf =
-                [0u8; <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
-            let n = hubpack::serialize(
-                &mut reply_buf,
+            reply.reply_serialize(
                 &core::result::Result::<(), ipc::Error>::Ok(()),
-            ).expect("ipc: failed to serialize reply");
-            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+            );
         }
     }
 }
@@ -998,41 +911,29 @@ fn gen_reply(
                     <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
                 "return type exceeds Hubris message size limit (256 bytes)",
             );
-            let mut reply_buf = [0u8;
-                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
             let Some(resource) = #arena_op else {
-                let n = hubpack::serialize(
-                    &mut reply_buf,
+                reply.reply_serialize(
                     &core::result::Result::<#rt, ipc::Error>::Err(ipc::Error::HandleLost),
-                ).expect("ipc: failed to serialize HandleLost reply");
-                userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
-                return Ok(());
+                );
+                return;
             };
             let result_value = resource.#method_name(meta, #(#call_args),*);
-            let n = hubpack::serialize(
-                &mut reply_buf,
+            reply.reply_serialize(
                 &core::result::Result::<#rt, ipc::Error>::Ok(result_value),
-            ).expect("ipc: failed to serialize reply");
-            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+            );
         }
     } else {
         quote! {
-            let mut reply_buf =
-                [0u8; <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
             let Some(resource) = #arena_op else {
-                let n = hubpack::serialize(
-                    &mut reply_buf,
+                reply.reply_serialize(
                     &core::result::Result::<(), ipc::Error>::Err(ipc::Error::HandleLost),
-                ).expect("ipc: failed to serialize HandleLost reply");
-                userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
-                return Ok(());
+                );
+                return;
             };
             resource.#method_name(meta, #(#call_args),*);
-            let n = hubpack::serialize(
-                &mut reply_buf,
+            reply.reply_serialize(
                 &core::result::Result::<(), ipc::Error>::Ok(()),
-            ).expect("ipc: failed to serialize reply");
-            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &reply_buf[..n]);
+            );
         }
     }
 }

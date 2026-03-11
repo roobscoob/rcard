@@ -1,5 +1,4 @@
 use core::mem::MaybeUninit;
-use userlib::{Message, ReplyFaultReason};
 
 use crate::split_opcode;
 
@@ -40,7 +39,15 @@ pub mod debug_uart {
 /// Trait implemented by generated dispatcher structs for each resource.
 pub trait ResourceDispatch {
     /// Dispatch a method call given the method ID and incoming message.
-    fn dispatch(&mut self, method_id: u8, msg: &Message<'_>) -> Result<(), ReplyFaultReason>;
+    ///
+    /// The `reply` token MUST be consumed (via `reply_ok`, `reply_error`,
+    /// or `reply_serialize`). If dropped without consuming, a fault is sent.
+    fn dispatch(
+        &mut self,
+        method_id: u8,
+        msg: crate::dispatch::MessageData<'_>,
+        reply: crate::dispatch::PendingReply,
+    );
 
     /// Remove all resources owned by the given task index.
     /// Called when the server detects that a client has restarted.
@@ -50,7 +57,7 @@ pub trait ResourceDispatch {
 /// Per-client generation tracker entry.
 struct ClientGen {
     task_index: u16,
-    generation: userlib::Gen,
+    generation: crate::kern::Gen,
     active: bool,
 }
 
@@ -73,7 +80,7 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
             clients: [const {
                 ClientGen {
                     task_index: 0,
-                    generation: userlib::Gen::DEFAULT,
+                    generation: crate::kern::Gen::DEFAULT,
                     active: false,
                 }
             }; crate::TASK_COUNT],
@@ -106,7 +113,7 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
 
     /// Check if a client's generation has changed (indicating restart).
     /// If so, clean up all resources for that client across all dispatchers.
-    fn check_client_generation(&mut self, sender: userlib::TaskId) {
+    fn check_client_generation(&mut self, sender: crate::kern::TaskId) {
         let task_index = sender.task_index();
         let sender_gen = sender.generation();
 
@@ -165,14 +172,14 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
 
         loop {
             if notification_mask == 0 {
-                let msg = userlib::sys_recv_msg_open(buf);
+                let msg = crate::kern::sys_recv_msg_open(buf);
                 self.dispatch_message(&msg);
             } else {
-                match userlib::sys_recv_open(buf, notification_mask) {
-                    userlib::MessageOrNotification::Notification(bits) => {
+                match crate::kern::sys_recv_open(buf, notification_mask) {
+                    crate::kern::MessageOrNotification::Notification(bits) => {
                         on_notification(bits);
                     }
-                    userlib::MessageOrNotification::Message(msg) => {
+                    crate::kern::MessageOrNotification::Message(msg) => {
                         self.dispatch_message(&msg);
                     }
                 }
@@ -180,11 +187,11 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
         }
     }
 
-    fn dispatch_message(&mut self, msg: &userlib::Message<'_>) {
+    fn dispatch_message(&mut self, msg: &crate::kern::Message<'_>) {
         self.check_client_generation(msg.sender);
 
         if !(self.acl_fn)(msg.sender.task_index()) {
-            userlib::sys_reply(msg.sender, crate::ACCESS_VIOLATION, &[]);
+            crate::kern::sys_reply(msg.sender, crate::ACCESS_VIOLATION, &[]);
             return;
         }
 
@@ -209,41 +216,35 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
                     d.cleanup_client(task_index);
                 }
             }
-            userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
+            crate::kern::sys_reply(msg.sender, crate::kern::ResponseCode::SUCCESS, &[]);
             return;
         }
 
-        let result = self.dispatchers.iter_mut().find_map(|entry| {
-            let (k, d) = entry.as_mut()?;
-            if *k == kind {
-                Some(d.dispatch(method, msg))
-            } else {
-                None
+        // Split the raw message into a typed MessageData + PendingReply.
+        let (msg_data, reply) = match crate::dispatch::split_message(msg) {
+            Ok(pair) => pair,
+            Err(reason) => {
+                crate::kern::sys_reply_fault(msg.sender, reason);
+                return;
             }
+        };
+
+        // Find the dispatcher for this kind byte.
+        let found = self.dispatchers.iter_mut().find_map(|entry| {
+            let (k, d) = entry.as_mut()?;
+            if *k == kind { Some(d) } else { None }
         });
 
-        match result {
-            Some(Ok(())) => {
+        match found {
+            Some(d) => {
+                d.dispatch(method, msg_data, reply);
                 #[cfg(feature = "dangerously_enable_uart3_debugging")]
                 { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc ok]\n"); }
-            }
-            Some(Err(e)) => {
-                #[cfg(feature = "dangerously_enable_uart3_debugging")]
-                { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc DISPATCH ERR k=0x{kind:02x} m=0x{method:02x}]\n"); }
-                // The client sent a malformed message (bad size, bad
-                // contents, or bad leases). Reply with non-SUCCESS so the
-                // client's generated panic handler fires — its panic handler
-                // will log and/or restart the task. The server continues.
-                let _ = e;
-                userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
             }
             None => {
                 #[cfg(feature = "dangerously_enable_uart3_debugging")]
                 { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc NO DISPATCHER k=0x{kind:02x}]\n"); }
-                // Client sent a kind byte we have no dispatcher for —
-                // malformed message. Same treatment as bad contents:
-                // reply non-SUCCESS to fire the client's panic handler.
-                userlib::sys_reply(msg.sender, crate::MALFORMED_MESSAGE, &[]);
+                reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
             }
         }
     }

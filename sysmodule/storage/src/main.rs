@@ -99,13 +99,6 @@ impl Partition for PartitionResource {
             return Err(AcquireError::InUse);
         }
 
-        log::info!(
-            "partition {:?} acquired (offset={}, size={})",
-            config.name,
-            config.offset_blocks,
-            config.size_blocks
-        );
-
         Ok(PartitionResource {
             index: idx,
             offset: config.offset_blocks as u32,
@@ -158,7 +151,6 @@ impl Partition for PartitionResource {
 
 impl Drop for PartitionResource {
     fn drop(&mut self) {
-        log::info!("partition {:?} released", PARTITIONS[self.index].name);
         ACQUIRED[self.index].store(false, Ordering::Release);
     }
 }
@@ -167,29 +159,11 @@ impl Drop for PartitionResource {
 
 #[export_name = "main"]
 fn main() -> ! {
-    sysmodule_log_api::init_logger!(Log);
-
     // Acquire the raw SDMMC device.
     let sdmmc = Sdmmc::open()
         .unwrap()
         .expect("storage: failed to acquire SDMMC");
     SDMMC.set(sdmmc).ok();
-
-    log::info!("storage: {} partitions configured", PARTITIONS.len());
-    for p in PARTITIONS {
-        log::info!(
-            "  {:?}: offset={} size={} format={:?}{}",
-            p.name,
-            p.offset_blocks,
-            p.size_blocks,
-            p.format,
-            if is_managed(p.name) {
-                " [filesystem]"
-            } else {
-                ""
-            }
-        );
-    }
 
     ipc::server! {
         Partition: PartitionResource,

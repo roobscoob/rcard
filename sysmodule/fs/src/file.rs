@@ -13,19 +13,11 @@ use crate::filesystem::{lease_to_cstr, FileSystemResource};
 use crate::state;
 
 /// Find an already-open file with the same fs_id and path, bump refcount.
-fn find_existing(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], lfs_flags: i32) -> Option<usize> {
+fn find_existing(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], _lfs_flags: i32) -> Option<usize> {
     let idx = s
         .open_files
         .iter()
         .position(|f| f.occupied && f.fs_id == fs_id && f.path == *path)?;
-    if s.open_files[idx].lfs_flags != lfs_flags {
-        log::warn!(
-            "find_existing: reusing file slot {} with different flags (existing=0x{:x}, requested=0x{:x})",
-            idx,
-            s.open_files[idx].lfs_flags,
-            lfs_flags,
-        );
-    }
     s.open_files[idx].refcount = s.open_files[idx].refcount.saturating_add(1);
     Some(idx)
 }
@@ -36,15 +28,9 @@ fn open_new(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], lfs_flags: i32) 
         .open_files
         .iter()
         .position(|f| !f.occupied)
-        .ok_or_else(|| {
-            log::error!("open_new: no free file slots");
-            OpenError::Io
-        })?;
+        .ok_or(OpenError::Io)?;
 
-    let mounted = s.fs_table.get(fs_id).ok_or_else(|| {
-        log::error!("open_new: fs not mounted (fs_id={})", fs_id);
-        OpenError::Io
-    })?;
+    let mounted = s.fs_table.get(fs_id).ok_or(OpenError::Io)?;
     let lfs_ptr = mounted.lfs_ptr();
 
     let slot = &mut s.open_files[idx];
@@ -70,14 +56,12 @@ fn open_new(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], lfs_flags: i32) 
     };
 
     if rc != 0 {
-        log::error!("open_new: lfs_file_opencfg failed with rc={}", rc);
         return Err(lfs_err_to_open_error(rc));
     }
 
     slot.refcount = 1;
     slot.occupied = true;
     slot.unlinked = false;
-    log::info!("open_new: file slot {} opened", idx);
     Ok(idx)
 }
 
@@ -95,20 +79,10 @@ impl FileResource {
 
         let mut pathbuf = [0u8; 64];
         lease_to_cstr(path, &mut pathbuf);
-        let path_len = pathbuf.iter().position(|&b| b == 0).unwrap_or(pathbuf.len());
-        log::info!(
-            "open_inner: fs_id={}, path={:?}, flags=0x{:x}",
-            fs_id,
-            core::str::from_utf8(&pathbuf[..path_len]).unwrap_or("?"),
-            lfs_flags,
-        );
 
         state::with_state(|s| {
             let slot = match find_existing(s, fs_id, &pathbuf, lfs_flags) {
-                Some(idx) => {
-                    log::info!("open_inner: reusing file slot {}", idx);
-                    idx
-                }
+                Some(idx) => idx,
                 None => open_new(s, fs_id, &pathbuf, lfs_flags)?,
             };
 
@@ -118,20 +92,9 @@ impl FileResource {
 
     /// Open a file by fs_id directly (used by scheme-path constructors).
     fn open_by_id(fs_id: u8, pathbuf: &[u8; 64], lfs_flags: i32) -> Result<Self, OpenError> {
-        let path_len = pathbuf.iter().position(|&b| b == 0).unwrap_or(pathbuf.len());
-        log::info!(
-            "open_by_id: fs_id={}, path={:?}, flags=0x{:x}",
-            fs_id,
-            core::str::from_utf8(&pathbuf[..path_len]).unwrap_or("?"),
-            lfs_flags,
-        );
-
         state::with_state(|s| {
             let slot = match find_existing(s, fs_id, pathbuf, lfs_flags) {
-                Some(idx) => {
-                    log::info!("open_by_id: reusing file slot {}", idx);
-                    idx
-                }
+                Some(idx) => idx,
                 None => open_new(s, fs_id, pathbuf, lfs_flags)?,
             };
 

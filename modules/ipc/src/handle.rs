@@ -61,6 +61,6 @@ pub const NOTIFY_DEAD_METHOD: u8 = 0xF8;
 /// Metadata about the incoming message, passed to handler methods.
 #[derive(Copy, Clone, Debug)]
 pub struct Meta {
-    pub sender: userlib::TaskId,
+    pub sender: crate::kern::TaskId,
     pub lease_count: u8,
 }

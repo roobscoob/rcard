@@ -13,8 +13,6 @@ sysmodule_fs_api::bind_file!(FsFile = SLOTS.sysmodule_fs);
 
 #[export_name = "main"]
 fn main() -> ! {
-    sysmodule_log_api::init_logger!(Log);
-
     let display = DisplayConfiguration::builder(128, 64)
         .build()
         .open::<DisplayServer>()
@@ -35,18 +33,10 @@ fn main() -> ! {
     let buf = &mut [0u8; 128];
     let file = FsFile::get(b"main:/demo.txt").unwrap().unwrap();
     let size = file.size().unwrap();
-    let read = file.read(sysmodule_fs_api::FileOffset::new(0).unwrap(), &mut buf[..size as usize]).unwrap();
+    let _read = file.read(sysmodule_fs_api::FileOffset::new(0).unwrap(), &mut buf[..size as usize]).unwrap();
     file.close().unwrap();
 
-    log::info!(
-        "Read {} bytes from demo.txt: {:?}",
-        read,
-        core::str::from_utf8(&buf[..read as usize]).unwrap_or("<invalid utf8>")
-    );
-
     loop {
-        log::info!("tick");
-
         for _ in 0..100_000_000 {
             core::hint::spin_loop();
         }

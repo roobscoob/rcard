@@ -112,17 +112,13 @@ impl FsTable {
     /// Allocate a slot and configure littlefs for the given storage, but do NOT
     /// call `lfs_mount`. Returns the slot index (fs_id).
     fn allocate(&mut self, storage: StorageDyn) -> Result<u8, sysmodule_fs_api::FileSystemError> {
-        let idx = self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
-            log::error!("allocate: no free slots");
-            sysmodule_fs_api::FileSystemError::TooManyFilesystems
-        })?;
-        log::info!("allocate: using slot {}", idx);
+        let idx = self.slots.iter().position(|s| s.is_none()).ok_or(
+            sysmodule_fs_api::FileSystemError::TooManyFilesystems,
+        )?;
 
         let block_count = storage.block_count().map_err(|_| {
-            log::error!("allocate: block_count() failed");
             sysmodule_fs_api::FileSystemError::StorageError
         })?;
-        log::info!("allocate: {} blocks", block_count);
 
         let mut fs = MountedFs {
             lfs: UnsafeCell::new(unsafe { core::mem::zeroed() }),
@@ -166,15 +162,12 @@ impl FsTable {
         let idx = self.allocate(storage)?;
         let slot = self.slots[idx as usize].as_mut().unwrap();
 
-        log::info!("mount: calling lfs_mount for slot {}", idx);
         let rc = unsafe { lfs_mount(slot.lfs.get(), &slot.config) };
         if rc != 0 {
-            log::error!("mount: lfs_mount failed rc={}", rc);
             self.slots[idx as usize] = None;
             return Err(sysmodule_fs_api::FileSystemError::CorruptFilesystem);
         }
         slot.mounted = true;
-        log::info!("mount: slot {} mounted", idx);
 
         Ok(idx)
     }
@@ -184,23 +177,18 @@ impl FsTable {
         let idx = self.allocate(storage)?;
         let slot = self.slots[idx as usize].as_mut().unwrap();
 
-        log::info!("format: calling lfs_format for slot {}", idx);
         let rc = unsafe { lfs_format(slot.lfs.get(), &slot.config) };
         if rc != 0 {
-            log::error!("format: lfs_format failed rc={}", rc);
             self.slots[idx as usize] = None;
             return Err(sysmodule_fs_api::FileSystemError::StorageError);
         }
 
-        log::info!("format: calling lfs_mount for slot {}", idx);
         let rc = unsafe { lfs_mount(slot.lfs.get(), &slot.config) };
         if rc != 0 {
-            log::error!("format: lfs_mount after format failed rc={}", rc);
             self.slots[idx as usize] = None;
             return Err(sysmodule_fs_api::FileSystemError::StorageError);
         }
         slot.mounted = true;
-        log::info!("format: slot {} formatted and mounted", idx);
         Ok(idx)
     }
 
@@ -214,7 +202,6 @@ impl FsTable {
         if let Some(slot) = self.slots.get_mut(fs_id as usize) {
             if let Some(fs) = slot.as_mut() {
                 if fs.mounted {
-                    log::info!("unmount: unmounting slot {}", fs_id);
                     unsafe { lfs_unmount(fs.lfs.get()) };
                     fs.mounted = false;
                 }

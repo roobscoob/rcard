@@ -252,12 +252,8 @@ struct SdmmcResource {
 }
 
 impl Sdmmc for SdmmcResource {
-    fn open(meta: ipc::Meta) -> Result<Self, SdmmcOpenError> {
-        log::trace!("Task {:?} attempting acquire", meta.sender);
-
+    fn open(_meta: ipc::Meta) -> Result<Self, SdmmcOpenError> {
         if SDMMC_OPEN.swap(true, Ordering::Acquire) {
-            log::error!("Task {:?} failed to acquire (already in use)", meta.sender);
-
             return Err(SdmmcOpenError::ReservedSlot);
         }
 
@@ -266,7 +262,6 @@ impl Sdmmc for SdmmcResource {
                 block_count: info.block_count,
             }),
             Err(e) => {
-                log::error!("Task {:?} failed to initialize: {:?}", meta.sender, e);
                 SDMMC_OPEN.store(false, Ordering::Release);
                 Err(e)
             }
@@ -279,8 +274,6 @@ impl Sdmmc for SdmmcResource {
         block: u32,
         buf: idyll_runtime::Leased<idyll_runtime::Write, u8>,
     ) -> Result<(), BlockError> {
-        log::trace!("read_block block={} len={}", block, buf.len());
-
         if block >= self.block_count {
             return Err(BlockError::OutOfRange);
         }
@@ -298,10 +291,7 @@ impl Sdmmc for SdmmcResource {
                 }
                 Ok(())
             }
-            Err(e) => {
-                log::warn!("sdmmc read_block failed: {:?}", e);
-                Err(BlockError::Device(e as u16))
-            }
+            Err(e) => Err(BlockError::Device(e as u16)),
         }
     }
 
@@ -311,8 +301,6 @@ impl Sdmmc for SdmmcResource {
         block: u32,
         buf: idyll_runtime::Leased<idyll_runtime::Read, u8>,
     ) -> Result<(), BlockError> {
-        log::trace!("write_block block={} len={}", block, buf.len());
-
         if block >= self.block_count {
             return Err(BlockError::OutOfRange);
         }
@@ -328,10 +316,7 @@ impl Sdmmc for SdmmcResource {
         }
         match write_block_hw(block, &tmp) {
             Ok(()) => Ok(()),
-            Err(e) => {
-                log::warn!("sdmmc write_block failed: {:?}", e);
-                Err(BlockError::Device(e as u16))
-            }
+            Err(e) => Err(BlockError::Device(e as u16)),
         }
     }
 
@@ -342,15 +327,12 @@ impl Sdmmc for SdmmcResource {
 
 impl Drop for SdmmcResource {
     fn drop(&mut self) {
-        log::trace!("Released");
         SDMMC_OPEN.store(false, Ordering::Release);
     }
 }
 
 #[export_name = "main"]
 fn main() -> ! {
-    sysmodule_log_api::init_logger!(Log);
-
     ipc::server! {
         Sdmmc: SdmmcResource,
     }

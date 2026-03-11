@@ -34,21 +34,13 @@ fn name_to_buf(s: &str) -> [u8; 16] {
 
 fn auto_mount_filesystems() {
     for entry in AUTO_MOUNT {
-        log::debug!(
-            "auto-mount: partition {:?} as {:?}",
-            entry.partition,
-            entry.name
-        );
-
         let part_name = name_to_buf(entry.partition);
         let storage = match StoragePartition::acquire(part_name) {
             Ok(Ok(handle)) => storage_api::StorageDyn::from_dyn_handle(handle.into()),
-            Ok(Err(e)) => {
-                log::error!("auto-mount: acquire {:?} failed: {:?}", entry.partition, e);
+            Ok(Err(_e)) => {
                 continue;
             }
-            Err(e) => {
-                log::error!("auto-mount: acquire {:?} failed: {:?}", entry.partition, e);
+            Err(_e) => {
                 continue;
             }
         };
@@ -56,55 +48,37 @@ fn auto_mount_filesystems() {
         let fs_id = match state::with_state(|s| s.fs_table.mount(storage)) {
             Ok(id) => id,
             Err(FileSystemError::CorruptFilesystem) => {
-                log::warn!("auto-mount: {:?} corrupt, formatting", entry.partition);
                 let part_name = name_to_buf(entry.partition);
                 let storage = match StoragePartition::acquire(part_name) {
                     Ok(Ok(handle)) => storage_api::StorageDyn::from_dyn_handle(handle.into()),
-                    Ok(Err(e)) => {
-                        log::error!(
-                            "auto-mount: re-acquire {:?} failed: {:?}",
-                            entry.partition,
-                            e
-                        );
+                    Ok(Err(_e)) => {
                         continue;
                     }
-                    Err(e) => {
-                        log::error!(
-                            "auto-mount: re-acquire {:?} failed: {:?}",
-                            entry.partition,
-                            e
-                        );
+                    Err(_e) => {
                         continue;
                     }
                 };
                 match state::with_state(|s| s.fs_table.format(storage)) {
                     Ok(id) => id,
-                    Err(e) => {
-                        log::error!("auto-mount: format {:?} failed: {:?}", entry.partition, e);
+                    Err(_e) => {
                         continue;
                     }
                 }
             }
-            Err(e) => {
-                log::error!("auto-mount: mount {:?} failed: {:?}", entry.partition, e);
+            Err(_e) => {
                 continue;
             }
         };
 
         let reg_name = name_to_buf(entry.name);
-        if let Err(e) = registry::register_entry(reg_name, fs_id) {
-            log::error!("auto-mount: register {:?} failed: {:?}", entry.name, e);
+        if let Err(_e) = registry::register_entry(reg_name, fs_id) {
             continue;
         }
-
-        log::debug!("auto-mount: {:?} ready (fs_id={})", entry.name, fs_id);
     }
 }
 
 #[export_name = "main"]
 fn main() -> ! {
-    sysmodule_log_api::init_logger!(Log);
-
     auto_mount_filesystems();
 
     ipc::server! {

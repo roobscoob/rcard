@@ -17,12 +17,12 @@ pub struct DynHandle {
 impl DynHandle {
     /// Extract the task index from the stored server ID.
     pub fn task_index(&self) -> u16 {
-        userlib::TaskId::from(self.server_id).task_index()
+        crate::kern::TaskId::from(self.server_id).task_index()
     }
 
     /// Reconstruct the `TaskId` from the stored raw value.
-    pub fn task_id(&self) -> userlib::TaskId {
-        userlib::TaskId::from(self.server_id)
+    pub fn task_id(&self) -> crate::kern::TaskId {
+        crate::kern::TaskId::from(self.server_id)
     }
 }
 

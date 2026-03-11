@@ -11,7 +11,7 @@ ipc = { path = "../../modules/ipc" }
 ipc-macros = { path = "../../modules/ipc/macros" }
 sysmodule_compositor_api = { path = "api" }
 sysmodule_display_api = { path = "../display/api" }
-sysmodule_log_api = { path = "../log/api", features = ["logger"] }
+sysmodule_log_api = { path = "../log/api" }
 userlib.workspace = true
 
 [[bin]]

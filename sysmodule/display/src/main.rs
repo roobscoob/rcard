@@ -135,12 +135,8 @@ struct DisplayResource {
 }
 
 impl Display for DisplayResource {
-    fn open(meta: ipc::Meta, config: DisplayConfiguration) -> Result<Self, DisplayOpenError> {
-        log::trace!("Task {:?} attempting acquire", meta.sender);
-
+    fn open(_meta: ipc::Meta, config: DisplayConfiguration) -> Result<Self, DisplayOpenError> {
         if DISPLAY_IN_USE.swap(true, Ordering::Acquire) {
-            log::error!("Task {:?} failed to acquire (already in use)", meta.sender);
-
             return Err(DisplayOpenError::AlreadyOpen);
         }
 
@@ -174,8 +170,6 @@ impl Display for DisplayResource {
 
 impl Drop for DisplayResource {
     fn drop(&mut self) {
-        log::trace!("DisplayResource dropped, shutting down display");
-
         ssd1312_cmd(0xAE); // Display off
         DISPLAY_IN_USE.store(false, Ordering::Release);
     }
@@ -183,8 +177,6 @@ impl Drop for DisplayResource {
 
 #[export_name = "main"]
 fn main() -> ! {
-    sysmodule_log_api::init_logger!(Log);
-
     ipc::server! {
         Display: DisplayResource,
     }

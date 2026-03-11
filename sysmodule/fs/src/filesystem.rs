@@ -10,11 +10,8 @@ pub struct FileSystemResource {
 
 impl FileSystem for FileSystemResource {
     fn mount(_meta: ipc::Meta, storage: ipc::DynHandle) -> Result<Self, FileSystemError> {
-        log::info!("fs: mount called");
         let dyn_storage = storage_api::StorageDyn::from_dyn_handle(storage);
-        let fs_id = state::with_state(|s| s.fs_table.mount(dyn_storage))
-            .inspect_err(|e| log::error!("fs: mount failed: {:?}", e))?;
-        log::info!("fs: mount complete, fs_id={}", fs_id);
+        let fs_id = state::with_state(|s| s.fs_table.mount(dyn_storage))?;
         Ok(FileSystemResource { fs_id })
     }
 
@@ -28,11 +25,8 @@ impl FileSystem for FileSystemResource {
     }
 
     fn format(_meta: ipc::Meta, storage: ipc::DynHandle) -> Result<Self, FileSystemError> {
-        log::info!("fs: format called");
         let dyn_storage = storage_api::StorageDyn::from_dyn_handle(storage);
-        let fs_id = state::with_state(|s| s.fs_table.format(dyn_storage))
-            .inspect_err(|e| log::error!("fs: format failed: {:?}", e))?;
-        log::info!("fs: format complete, fs_id={}", fs_id);
+        let fs_id = state::with_state(|s| s.fs_table.format(dyn_storage))?;
         Ok(FileSystemResource { fs_id })
     }
 
@@ -52,7 +46,6 @@ impl FileSystem for FileSystemResource {
 
 impl Drop for FileSystemResource {
     fn drop(&mut self) {
-        log::info!("fs: dropping FileSystemResource fs_id={}", self.fs_id);
         state::with_state(|s| s.fs_table.unmount(self.fs_id));
     }
 }

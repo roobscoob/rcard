@@ -81,12 +81,12 @@ pub fn gen_client(
             use super::*;
 
             pub trait #server_trait_name {
-                fn task_id() -> userlib::TaskId;
+                fn task_id() -> ipc::kern::TaskId;
                 fn server_id() -> &'static ipc::StaticTaskId;
             }
 
             pub struct #handle_name<S: #server_trait_name> {
-                server: core::cell::Cell<userlib::TaskId>,
+                server: core::cell::Cell<ipc::kern::TaskId>,
                 handle: core::cell::Cell<ipc::RawHandle>,
                 destroyed: core::cell::Cell<bool>,
                 _server: core::marker::PhantomData<S>,
@@ -114,7 +114,7 @@ pub fn gen_client(
                 }
 
                 /// Get the server's TaskId (for use in panic handlers / `notify_dead!`).
-                pub fn server_task_id() -> userlib::TaskId {
+                pub fn server_task_id() -> ipc::kern::TaskId {
                     S::task_id()
                 }
 
@@ -138,7 +138,7 @@ pub fn gen_client(
                     let opcode = ipc::opcode(#kind_lit, ipc::IMPLICIT_DESTROY_METHOD);
                     let mut retbuffer = [0u8; 0];
                     let mut leases = [];
-                    let _ = userlib::sys_send(
+                    let _ = ipc::kern::sys_send(
                         self.server.get(),
                         opcode,
                         argbuffer,
@@ -156,7 +156,7 @@ pub fn gen_client(
                 #[doc(hidden)]
                 struct #binding_struct_name;
                 impl $crate::#mod_name::#server_trait_name for #binding_struct_name {
-                    fn task_id() -> userlib::TaskId { $slot }
+                    fn task_id() -> $crate::kern::TaskId { $slot }
                     fn server_id() -> &'static ipc::StaticTaskId {
                         static SERVER_ID: ipc::StaticTaskId = ipc::StaticTaskId::new($slot);
                         &SERVER_ID
@@ -199,7 +199,7 @@ pub fn gen_dyn_client(
             /// Dynamic client for any server implementing this interface.
             /// Created from a `DynHandle` received via handle forwarding.
             pub struct #dyn_name {
-                server: core::cell::Cell<userlib::TaskId>,
+                server: core::cell::Cell<ipc::kern::TaskId>,
                 kind: u8,
                 handle: core::cell::Cell<ipc::RawHandle>,
             }
@@ -251,7 +251,7 @@ pub fn gen_dyn_client(
                     let opcode = ipc::opcode(self.kind, ipc::IMPLICIT_DESTROY_METHOD);
                     let mut retbuffer = [0u8; 0];
                     let mut leases = [];
-                    let _ = userlib::sys_send(
+                    let _ = ipc::kern::sys_send(
                         self.server.get(),
                         opcode,
                         &argbuffer[..n],
@@ -299,7 +299,7 @@ fn gen_cloneable_impl(
 
     quote! {
         impl<S: #server_trait_name> ipc::Cloneable for #handle_name<S> {
-            fn clone_for(&self, new_owner: userlib::TaskId) -> core::result::Result<ipc::DynHandle, ipc::CloneError> {
+            fn clone_for(&self, new_owner: ipc::kern::TaskId) -> core::result::Result<ipc::DynHandle, ipc::CloneError> {
                 let args: (ipc::RawHandle, u16) = (self.handle.get(), new_owner.task_index());
                 let mut argbuffer = [0u8;
                     <(ipc::RawHandle, u16) as hubpack::SerializedSize>::MAX_SIZE];
@@ -309,7 +309,7 @@ fn gen_cloneable_impl(
                         as hubpack::SerializedSize>::MAX_SIZE];
                 let mut leases = [];
                 let opcode = ipc::opcode(#kind_lit, ipc::CLONE_METHOD);
-                let (rc, len) = userlib::sys_send(
+                let (rc, len) = ipc::kern::sys_send(
                     self.server.get(),
                     opcode,
                     &argbuffer[..n],
@@ -320,7 +320,7 @@ fn gen_cloneable_impl(
                     panic!("ipc: clone rejected: access violation \
                            (this task is not authorized to use this server)");
                 }
-                if rc != userlib::ResponseCode::SUCCESS {
+                if rc != ipc::kern::ResponseCode::SUCCESS {
                     panic!("ipc: clone got non-SUCCESS response code");
                 }
                 let (result, _) = hubpack::deserialize::<
@@ -511,7 +511,7 @@ fn gen_constructor(
             #lease_arr
             let argbuffer = &argbuffer[..n];
             let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-            let (rc, len) = userlib::sys_send(
+            let (rc, len) = ipc::kern::sys_send(
                 server.get(),
                 opcode,
                 argbuffer,
@@ -525,7 +525,7 @@ fn gen_constructor(
                     server.get(),
                 );
             }
-            if rc != userlib::ResponseCode::SUCCESS {
+            if rc != ipc::kern::ResponseCode::SUCCESS {
                 panic!(
                     "ipc: server {:?} sent unexpected non-SUCCESS response code",
                     server.get(),
@@ -688,7 +688,7 @@ fn gen_static_message(
             let argbuffer = &argbuffer[..n];
             let opcode = ipc::opcode(#kind_lit, #method_id_expr);
             let mut retbuffer = [0u8; ipc::HUBRIS_MESSAGE_SIZE_LIMIT];
-            let send_result = userlib::sys_send(
+            let send_result = ipc::kern::sys_send(
                 server_id.get(),
                 opcode,
                 argbuffer,
@@ -702,7 +702,7 @@ fn gen_static_message(
                 Err(dead) => {
                     server_id.set(server_id.get().with_generation(dead.new_generation()));
                     // Retry once with new generation.
-                    let (rc, len) = userlib::sys_send(
+                    let (rc, len) = ipc::kern::sys_send(
                         server_id.get(),
                         opcode,
                         argbuffer,
@@ -764,7 +764,7 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
             let argbuffer = &argbuffer[..n];
             let opcode = ipc::opcode(self.kind, #method_id_lit);
             let mut retbuffer = [0u8; ipc::HUBRIS_MESSAGE_SIZE_LIMIT];
-            let send_result = userlib::sys_send(
+            let send_result = ipc::kern::sys_send(
                 self.server.get(),
                 opcode,
                 argbuffer,
@@ -777,7 +777,7 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
                 }
                 Err(dead) => {
                     self.server.set(self.server.get().with_generation(dead.new_generation()));
-                    let (rc, len) = userlib::sys_send(
+                    let (rc, len) = ipc::kern::sys_send(
                         self.server.get(),
                         opcode,
                         argbuffer,
@@ -911,7 +911,7 @@ fn gen_handle_transfer_stmts(
                         let __cancel_opcode = ipc::opcode(#prev_dh.kind, ipc::CANCEL_TRANSFER_METHOD);
                         let mut __cancel_ret = [0u8; 0];
                         let mut __cancel_leases = [];
-                        let _ = userlib::sys_send(
+                        let _ = ipc::kern::sys_send(
                             #prev_dh.task_id(),
                             __cancel_opcode,
                             &__cancel_buf[..__cancel_n],
@@ -946,7 +946,7 @@ fn gen_handle_transfer_stmts(
                 let mut __prep_ret = [0u8;
                     <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
                 let mut __prep_leases = [];
-                let __prep_ok = match userlib::sys_send(
+                let __prep_ok = match ipc::kern::sys_send(
                     #dh_var.task_id(),
                     __prep_opcode,
                     &__prep_buf[..__prep_n],
@@ -954,7 +954,7 @@ fn gen_handle_transfer_stmts(
                     &mut __prep_leases,
                 ) {
                     Ok((__prep_rc, __prep_len)) => {
-                        if __prep_rc == userlib::ResponseCode::SUCCESS {
+                        if __prep_rc == ipc::kern::ResponseCode::SUCCESS {
                             match hubpack::deserialize::<core::result::Result<(), ipc::Error>>(
                                 &__prep_ret[..__prep_len],
                             ) {
@@ -1052,9 +1052,9 @@ fn gen_lease_array(lease_params: &[&ParsedParam]) -> TokenStream2 {
             .map(|p| {
                 let pname = &p.name;
                 if p.lease_mutable {
-                    quote! { userlib::Lease::read_write(zerocopy::IntoBytes::as_mut_bytes(#pname)) }
+                    quote! { ipc::kern::Lease::read_write(zerocopy::IntoBytes::as_mut_bytes(#pname)) }
                 } else {
-                    quote! { userlib::Lease::read_only(zerocopy::IntoBytes::as_bytes(#pname)) }
+                    quote! { ipc::kern::Lease::read_only(zerocopy::IntoBytes::as_bytes(#pname)) }
                 }
             })
             .collect();
@@ -1069,7 +1069,7 @@ fn gen_send_body(kind: u8, method_id_expr: &TokenStream2, lease_arr: &TokenStrea
         let argbuffer = &argbuffer[..n];
         let opcode = ipc::opcode(#kind_lit, #method_id_expr);
         let mut retbuffer = [0u8; ipc::HUBRIS_MESSAGE_SIZE_LIMIT];
-        let send_result = userlib::sys_send(
+        let send_result = ipc::kern::sys_send(
             self.server.get(),
             opcode,
             argbuffer,
@@ -1091,7 +1091,7 @@ fn gen_parse_reply(
                 #server_expr,
             );
         }
-        if rc != userlib::ResponseCode::SUCCESS {
+        if rc != ipc::kern::ResponseCode::SUCCESS {
             panic!(
                 "ipc: server {:?} sent unexpected non-SUCCESS response code; \
                  this indicates a protocol violation",

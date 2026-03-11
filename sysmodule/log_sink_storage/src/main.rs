@@ -77,14 +77,10 @@ fn handle_logs(_sender: u16, _code: u32) {
 
 #[export_name = "main"]
 fn main() -> ! {
-    sysmodule_log_api::init_logger!(Log);
-
     // Acquire the "logs" partition.
     let partition = Partition::acquire(partitions::LOGS)
         .expect("failed to acquire logs partition")
         .expect("failed to acquire logs partition");
-
-    log::info!("acquired logs partition");
 
     // Initialize the ring writer.
     let storage = storage_api::StorageDyn::from_dyn_handle(partition.into());
