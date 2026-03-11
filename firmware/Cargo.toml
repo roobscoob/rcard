@@ -21,13 +21,13 @@ members = [
     "sysmodule/compositor/api",
     "sysmodule/log_sink_storage",
     "modules/storage_api",
-    "fob",
+    "tasks/fob",
     "modules/ipc",
     "modules/ipc/macros",
     "modules/once_cell",
-    "kernel-sf32lb52",
-    "supervisor",
-    "idle",
+    "tasks/kernel-sf32lb52",
+    "tasks/supervisor",
+    "tasks/idle",
 ]
 
 [workspace.lints.rust]

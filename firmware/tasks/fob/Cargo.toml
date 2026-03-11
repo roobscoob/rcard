@@ -1,0 +1,22 @@
+[package]
+name = "fob"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hubris-task-slots.workspace = true
+ipc = { path = "../../modules/ipc" }
+sysmodule_display_api = { path = "../../sysmodule/display/api" }
+sysmodule_log_api = { path = "../../sysmodule/log/api" }
+sysmodule_storage_api = { path = "../../sysmodule/storage/api" }
+sysmodule_fs_api = { path = "../../sysmodule/fs/api" }
+sysmodule_usart_api = { path = "../../sysmodule/usart/api" }
+userlib = { workspace = true, features = ["no-panic-handler"] }
+
+[[bin]]
+name = "fob"
+test = false
+bench = false
+
+[lints]
+workspace = true
