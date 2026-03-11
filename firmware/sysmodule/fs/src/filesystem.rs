@@ -52,7 +52,7 @@ impl Drop for FileSystemResource {
 
 /// Read a lease into a null-terminated stack buffer.
 pub fn lease_to_cstr(
-    lease: &idyll_runtime::Leased<idyll_runtime::Read, u8>,
+    lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     buf: &mut [u8; 64],
 ) -> usize {
     let len = lease.len().min(63);

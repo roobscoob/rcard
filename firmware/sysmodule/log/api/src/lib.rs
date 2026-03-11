@@ -1,49 +1,9 @@
 #![no_std]
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    serde::Serialize,
-    serde::Deserialize,
-    hubpack::SerializedSize,
-)]
-#[repr(u8)]
-pub enum LogLevel {
-    Panic,
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
-}
-
-impl LogLevel {
-    pub fn from_u8(v: u8) -> Self {
-        match v {
-            0 => LogLevel::Panic,
-            1 => LogLevel::Error,
-            2 => LogLevel::Warn,
-            3 => LogLevel::Info,
-            4 => LogLevel::Debug,
-            _ => LogLevel::Trace,
-        }
-    }
-}
+pub use rcard_log::LogLevel;
 
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    hubpack::SerializedSize,
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, hubpack::SerializedSize,
 )]
 pub enum LogError {
     Unauthorized,
@@ -52,10 +12,10 @@ pub enum LogError {
 #[ipc::resource(arena_size = 16, kind = 0x03)]
 pub trait Log {
     #[message]
-    fn log(level: LogLevel, #[lease] data: &[u8]);
+    fn log(level: LogLevel, species: u64, #[lease] argument_stream: &[u8]);
 
     #[constructor]
-    fn start(level: LogLevel) -> Option<Self>;
+    fn start(level: LogLevel, species: u64) -> Option<Self>;
 
     #[message]
     fn write(&self, #[lease] data: &[u8]);

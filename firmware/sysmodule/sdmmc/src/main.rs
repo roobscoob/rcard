@@ -272,7 +272,7 @@ impl Sdmmc for SdmmcResource {
         &mut self,
         _meta: ipc::Meta,
         block: u32,
-        buf: idyll_runtime::Leased<idyll_runtime::Write, u8>,
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> Result<(), BlockError> {
         if block >= self.block_count {
             return Err(BlockError::OutOfRange);
@@ -299,7 +299,7 @@ impl Sdmmc for SdmmcResource {
         &mut self,
         _meta: ipc::Meta,
         block: u32,
-        buf: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<(), BlockError> {
         if block >= self.block_count {
             return Err(BlockError::OutOfRange);

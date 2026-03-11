@@ -248,11 +248,9 @@ version = "0.1.0"
 dependencies = [
  "hubris-task-slots",
  "ipc",
- "sysmodule_display_api",
- "sysmodule_fs_api",
+ "rcard-log",
+ "rcard-log-macros",
  "sysmodule_log_api",
- "sysmodule_storage_api",
- "sysmodule_usart_api",
  "userlib",
 ]
 
@@ -600,6 +598,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
+name = "rcard-log"
+version = "0.1.0"
+dependencies = [
+ "hubpack",
+ "rcard-log-macros",
+ "serde",
+]
+
+[[package]]
+name = "rcard-log-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -888,6 +905,7 @@ dependencies = [
  "idyll_runtime",
  "ipc",
  "once-cell",
+ "rcard-log",
  "serde_json",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
@@ -903,6 +921,7 @@ dependencies = [
  "hubpack",
  "idyll_runtime",
  "ipc",
+ "rcard-log",
  "serde",
  "userlib",
  "zerocopy 0.8.40",

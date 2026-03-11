@@ -48,7 +48,7 @@ impl Usart for UsartResource {
         Ok(UsartResource { index, regs })
     }
 
-    fn write(&mut self, _meta: ipc::Meta, data: idyll_runtime::Leased<idyll_runtime::Read, u8>) {
+    fn write(&mut self, _meta: ipc::Meta, data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>) {
         for i in 0..data.len() {
             let b = data.read(i).unwrap_or(0);
             while self.regs.isr().read().txe().bit_is_clear() {}

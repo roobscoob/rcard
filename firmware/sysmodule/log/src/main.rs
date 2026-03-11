@@ -11,9 +11,9 @@ mod server;
 
 sysmodule_usart_api::bind_usart!(Usart = SLOTS.sysmodule_usart);
 sysmodule_time_api::bind_time!(Time = SLOTS.sysmodule_time);
-
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
+#[allow(dead_code)]
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/task_names.rs"));
     include!(concat!(env!("OUT_DIR"), "/notifications.rs"));
@@ -51,9 +51,6 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 fn main() -> ! {
     let usart = Usart::open(2).unwrap().unwrap();
     USART.set(usart).ok();
-
-    fmt::write_prefix_to(LogLevel::Trace, "sysmodule_log", |d| usart_write(d));
-    usart_write(b"sysmodule_log: Awake\r\n");
 
     ipc::server! {
         Log: server::LogResource,

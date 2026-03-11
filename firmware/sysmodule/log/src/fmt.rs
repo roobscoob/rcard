@@ -49,8 +49,9 @@ pub fn write_prefix_to<F: FnMut(&[u8])>(level: LogLevel, task_name: &str, mut ou
     write_tag(level, task_name, &mut out);
 }
 
+#[allow(dead_code)]
 pub fn read_leased_chunks(
-    data: &idyll_runtime::Leased<idyll_runtime::Read, u8>,
+    data: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     mut f: impl FnMut(&[u8]),
 ) {
     let len = data.len();

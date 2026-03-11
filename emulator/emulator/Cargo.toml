@@ -1,0 +1,9 @@
+[package]
+name = "emulator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hubpack = "0.1"
+rcard-log = { path = "../../shared/log", features = ["alloc"] }
+tempfile = "3"

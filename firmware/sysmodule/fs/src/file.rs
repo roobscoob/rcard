@@ -72,7 +72,7 @@ pub struct FileResource {
 impl FileResource {
     fn open_inner(
         fs: &FileSystemResource,
-        path: &idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
         lfs_flags: i32,
     ) -> Result<Self, OpenError> {
         let fs_id = fs.fs_id;
@@ -109,7 +109,7 @@ impl FileResource {
 /// in the filesystem registry, and returns the fs_id plus the path portion
 /// (starting from the `/` after the `:`).
 fn parse_scheme_path(
-    lease: &idyll_runtime::Leased<idyll_runtime::Read, u8>,
+    lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     buf: &mut [u8; 64],
 ) -> Result<(u8, usize), OpenError> {
     let len = lease.len().min(buf.len());
@@ -148,14 +148,14 @@ impl File<FileSystemResource> for FileResource {
     fn get_in(
         _meta: ipc::Meta,
         fs: &FileSystemResource,
-        path: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         Self::open_inner(fs, &path, 3)
     }
 
     fn get(
         _meta: ipc::Meta,
-        path: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         let mut pathbuf = [0u8; 64];
         let (fs_id, _) = parse_scheme_path(&path, &mut pathbuf)?;
@@ -165,14 +165,14 @@ impl File<FileSystemResource> for FileResource {
     fn get_or_create_in(
         _meta: ipc::Meta,
         fs: &FileSystemResource,
-        path: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         Self::open_inner(fs, &path, 3 | 0x0100)
     }
 
     fn get_or_create(
         _meta: ipc::Meta,
-        path: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         let mut pathbuf = [0u8; 64];
         let (fs_id, _) = parse_scheme_path(&path, &mut pathbuf)?;
@@ -183,7 +183,7 @@ impl File<FileSystemResource> for FileResource {
         &mut self,
         _meta: ipc::Meta,
         offset: FileOffset,
-        buf: idyll_runtime::Leased<idyll_runtime::Write, u8>,
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> u32 {
         debug_assert!(offset.get() <= i32::MAX as u32);
         state::with_state(|s| {
@@ -224,7 +224,7 @@ impl File<FileSystemResource> for FileResource {
         &mut self,
         _meta: ipc::Meta,
         offset: FileOffset,
-        buf: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> u32 {
         debug_assert!(offset.get() <= i32::MAX as u32);
         state::with_state(|s| {

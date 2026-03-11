@@ -62,7 +62,7 @@ pub struct FolderResource {
 impl FolderResource {
     fn open_inner(
         fs: &FileSystemResource,
-        path: &idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         let fs_id = fs.fs_id;
 
@@ -96,7 +96,7 @@ impl Folder<FileSystemResource> for FolderResource {
     fn get(
         _meta: ipc::Meta,
         fs: &FileSystemResource,
-        path: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         Self::open_inner(fs, &path)
     }
@@ -104,7 +104,7 @@ impl Folder<FileSystemResource> for FolderResource {
     fn get_or_create(
         _meta: ipc::Meta,
         fs: &FileSystemResource,
-        path: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         match Self::open_inner(fs, &path) {
             Ok(r) => Ok(r),

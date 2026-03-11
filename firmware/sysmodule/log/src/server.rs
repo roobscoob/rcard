@@ -1,8 +1,9 @@
+use hubpack::SerializedSize;
 use ipc::Meta;
 use once_cell::GlobalState;
-use sysmodule_log_api::*;
+use rcard_log::{LogLevel, LogMetadata};
+use sysmodule_log_api::LogError;
 
-use crate::fmt::{level_str, read_leased_chunks, write_prefix_to, write_tag, write_timestamp};
 use crate::ringbuf::{pack_time, LogRing};
 use crate::{generated, usart_write, Reactor, Time};
 
@@ -12,6 +13,10 @@ fn get_packed_time() -> u64 {
         .flatten()
         .map(|dt| pack_time(&dt))
         .unwrap_or(0)
+}
+
+fn get_timestamp() -> u64 {
+    get_packed_time()
 }
 
 fn notify_logs(level: LogLevel) {
@@ -31,243 +36,174 @@ fn notify_logs(level: LogLevel) {
     );
 }
 
-// --- Log state ---
+// --- Framing protocol ---
+//
+// Wire format per frame: [u64 stream_id LE][u8 length][data...]
+// Each log message gets a unique stream_id. Within a stream:
+// - First bytes: hubpack-serialized LogMetadata
+// - Remaining bytes: Format-encoded argument data
 
-/// Maximum size for inline log messages (Log::log without a Log::start/write
-/// sequence). Messages longer than this are silently truncated in the ring
-/// buffer; USART output is unaffected.
+/// Maximum size for inline log messages in the ring buffer.
 const MAX_INLINE_LOG_SIZE: usize = 128;
 
-const MAX_WRITER_DEPTH: usize = 16;
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-struct WriterEntry {
-    id: u32,
-    task_index: usize,
-    level: LogLevel,
-}
-
-struct InterruptTracker {
-    stack: [WriterEntry; MAX_WRITER_DEPTH],
-    depth: usize,
-    needs_cont: bool,
-}
-
-impl InterruptTracker {
-    const fn new() -> Self {
-        const EMPTY: WriterEntry = WriterEntry {
-            id: 0,
-            task_index: 0,
-            level: LogLevel::Trace,
-        };
-        Self {
-            stack: [EMPTY; MAX_WRITER_DEPTH],
-            depth: 0,
-            needs_cont: false,
-        }
+/// Send a frame over USART: [u64 stream_id LE][u8 length][data...]
+fn send_frame(stream_id: u64, data: &[u8]) {
+    let mut offset = 0;
+    while offset < data.len() {
+        let chunk_len = (data.len() - offset).min(255);
+        usart_write(&stream_id.to_le_bytes());
+        usart_write(&[chunk_len as u8]);
+        usart_write(&data[offset..offset + chunk_len]);
+        offset += chunk_len;
     }
 }
 
+/// Build and send LogMetadata + data as framed output.
+fn send_log_framed(
+    stream_id: u64,
+    level: LogLevel,
+    species: u64,
+    source: u16,
+    generation: u16,
+    log_id: u64,
+    data_fn: impl FnOnce(&mut [u8]) -> usize,
+) {
+    let metadata = LogMetadata {
+        level,
+        timestamp: get_timestamp(),
+        source,
+        generation,
+        log_id,
+        log_species: species,
+    };
+
+    let mut buf = [0u8; LogMetadata::MAX_SIZE + MAX_INLINE_LOG_SIZE];
+    let meta_len = hubpack::serialize(&mut buf, &metadata).unwrap_or(0);
+    let data_len = data_fn(&mut buf[meta_len..]);
+
+    send_frame(stream_id, &buf[..meta_len + data_len]);
+}
+
+// --- Log state ---
+
 struct LogState {
     ring: LogRing,
-    tracker: InterruptTracker,
+    next_stream_id: u64,
 }
 
 impl LogState {
     const fn new() -> Self {
         Self {
             ring: LogRing::new(),
-            tracker: InterruptTracker::new(),
+            next_stream_id: 1,
         }
+    }
+
+    fn alloc_stream_id(&mut self) -> u64 {
+        let id = self.next_stream_id;
+        self.next_stream_id = self.next_stream_id.wrapping_add(1);
+        id
     }
 }
 
 static LOG_STATE: GlobalState<LogState> = GlobalState::new(LogState::new());
 
-/// Write an indented prefix: "TIMESTAMP     ↳ [LEVEL task] "
-fn write_indented_prefix(level: LogLevel, task_name: &str, depth: usize) {
-    write_timestamp(|d| usart_write(d));
-    for _ in 1..depth {
-        usart_write(b"    ");
-    }
-    usart_write(b"\xe2\x86\xb3 "); // "↳ "
-    write_tag(level, task_name, |d| usart_write(d));
-}
-
-/// Write a plain indented prefix (no ↳): "TIMESTAMP       [LEVEL task] "
-fn write_plain_indented_prefix(level: LogLevel, task_name: &str, depth: usize) {
-    write_timestamp(|d| usart_write(d));
-    for _ in 1..depth {
-        usart_write(b"    ");
-    }
-    usart_write(b"  "); // align with where ↳ would be
-    write_tag(level, task_name, |d| usart_write(d));
-}
-
-/// Compute the display width of a prefix: timestamp + indent + tag
-fn prefix_pad(level: LogLevel, task_name: &str, depth: usize) -> usize {
-    // Timestamp: "DD/MM/YY HH:MM:SS " = 18 chars
-    let ts = 18;
-    // Tag: "[LEVEL task] " = level_str.len() + task_name.len() + 4
-    let tag = level_str(level).len() + task_name.len() + 4;
-    // Indent: (depth-1)*4 + 2 for depth >= 2, 0 for depth <= 1
-    let indent = if depth > 1 { (depth - 1) * 4 + 2 } else { 0 };
-    ts + indent + tag
-}
-
-/// Write data to USART, replacing \n with \r\n + padding spaces.
-fn usart_write_padded(data: &[u8], pad: usize) {
-    static SPACES: [u8; 64] = [b' '; 64];
-    let mut start = 0;
-    for i in 0..data.len() {
-        if data[i] == b'\n' {
-            if i > start {
-                usart_write(&data[start..i]);
-            }
-            usart_write(b"\r\n");
-            let mut rem = pad;
-            while rem > 0 {
-                let n = rem.min(SPACES.len());
-                usart_write(&SPACES[..n]);
-                rem -= n;
-            }
-            start = i + 1;
-        }
-    }
-    if start < data.len() {
-        usart_write(&data[start..]);
-    }
-}
-
 // --- LogResource ---
 
 pub struct LogResource {
-    id: u32,
+    ring_id: u32,
+    stream_id: u64,
     level: LogLevel,
     idx: usize,
     task_index: usize,
-    pad: usize,
 }
 
-impl Log for LogResource {
-    fn log(meta: Meta, level: LogLevel, data: idyll_runtime::Leased<idyll_runtime::Read, u8>) {
+impl sysmodule_log_api::Log for LogResource {
+    fn log(
+        meta: Meta,
+        level: LogLevel,
+        species: u64,
+        data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+    ) {
         let task_index = meta.sender.task_index() as usize;
-        let task_name = generated::TASK_NAMES.get(task_index).unwrap_or(&"???");
+        let generation = 0u16;
 
         LOG_STATE.with(|s| {
-            // Handle interrupt of active writer
-            let t = &mut s.tracker;
-            let depth = if t.depth > 0 {
-                let d = t.depth + 1;
-                if !t.needs_cont {
-                    usart_write(b" [INTR]\r\n");
-                    t.needs_cont = true;
-                    write_indented_prefix(level, task_name, d);
-                } else {
-                    write_plain_indented_prefix(level, task_name, d);
-                }
-                d
-            } else {
-                write_prefix_to(level, task_name, |d| usart_write(d));
-                0
-            };
-            let pad = prefix_pad(level, task_name, depth);
-            read_leased_chunks(&data, |chunk| usart_write_padded(chunk, pad));
-            usart_write(b"\r\n");
+            let stream_id = s.alloc_stream_id();
+            let ring_id = s.ring.alloc_id();
 
-            // Push single entry to ring buffer
-            let id = s.ring.alloc_id();
-            let mut buf = [0u8; MAX_INLINE_LOG_SIZE];
-            let len = data.len().min(buf.len());
-            let _ = data.read_range(0, &mut buf[..len]);
+            send_log_framed(
+                stream_id,
+                level,
+                species,
+                task_index as u16,
+                generation,
+                ring_id as u64,
+                |buf| {
+                    let len = data.len().min(buf.len());
+                    let _ = data.read_range(0, &mut buf[..len]);
+                    len
+                },
+            );
+
+            let mut ring_buf = [0u8; MAX_INLINE_LOG_SIZE];
+            let len = data.len().min(ring_buf.len());
+            let _ = data.read_range(0, &mut ring_buf[..len]);
             let time = get_packed_time();
-            s.ring.push(id, level, task_index as u16, &buf[..len], 0, time);
+            s.ring.push(ring_id, level, task_index as u16, &ring_buf[..len], 0, time);
         });
         notify_logs(level);
     }
 
-    fn start(meta: Meta, level: LogLevel) -> Option<Self> {
+    fn start(meta: Meta, level: LogLevel, species: u64) -> Option<Self> {
         let task_index = meta.sender.task_index() as usize;
-        let task_name = generated::TASK_NAMES.get(task_index).unwrap_or(&"???");
+        let generation = 0u16;
 
         LOG_STATE.with(|s| {
-            let t = &mut s.tracker;
+            let stream_id = s.alloc_stream_id();
+            let ring_id = s.ring.alloc_id();
 
-            // Handle interrupt of active writer
-            let was_active = t.depth > 0;
-            let was_mid_line = was_active && !t.needs_cont;
-            if was_mid_line {
-                usart_write(b" [INTR]\r\n");
-            }
-
-            // Push onto writer stack
-            if t.depth < MAX_WRITER_DEPTH {
-                t.stack[t.depth] = WriterEntry {
-                    id: 0, // filled below
-                    task_index,
-                    level,
-                };
-                t.depth += 1;
-            }
-            t.needs_cont = false;
-
-            // Write prefix
-            let depth = t.depth;
-            if was_mid_line {
-                write_indented_prefix(level, task_name, depth);
-            } else if was_active {
-                write_plain_indented_prefix(level, task_name, depth);
-            } else {
-                write_prefix_to(level, task_name, |d| usart_write(d));
-            }
-            let pad = prefix_pad(level, task_name, depth);
-
-            let id = s.ring.alloc_id();
-
-            // Update the stack entry with the allocated id
-            if t.depth > 0 {
-                t.stack[t.depth - 1].id = id;
-            }
+            // Send metadata frame (data arrives via write())
+            send_log_framed(
+                stream_id,
+                level,
+                species,
+                task_index as u16,
+                generation,
+                ring_id as u64,
+                |_| 0,
+            );
 
             Some(LogResource {
-                id,
+                ring_id,
+                stream_id,
                 level,
                 idx: 0,
                 task_index,
-                pad,
             })
         })
     }
 
-    fn write(&mut self, _meta: Meta, data: idyll_runtime::Leased<idyll_runtime::Read, u8>) {
+    fn write(
+        &mut self,
+        _meta: Meta,
+        data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+    ) {
+        let mut buf = [0u8; MAX_INLINE_LOG_SIZE];
+        let len = data.len().min(buf.len());
+        let _ = data.read_range(0, &mut buf[..len]);
+        send_frame(self.stream_id, &buf[..len]);
+
         LOG_STATE.with(|s| {
-            // If this writer was interrupted and is now resuming, print CONT prefix
-            let t = &mut s.tracker;
-            if t.needs_cont && t.depth > 0 && t.stack[t.depth - 1].id == self.id {
-                let task_name = generated::TASK_NAMES.get(self.task_index).unwrap_or(&"???");
-                write_timestamp(|d| usart_write(d));
-                for _ in 1..t.depth {
-                    usart_write(b"    ");
-                }
-                if t.depth > 1 {
-                    usart_write(b"  ");
-                }
-                usart_write(b"[CONT ");
-                usart_write(task_name.as_bytes());
-                usart_write(b"] ");
-                t.needs_cont = false;
-            }
-
-            // Write to USART
-            read_leased_chunks(&data, |chunk| usart_write_padded(chunk, self.pad));
-
-            // Push entry to ring buffer
-            let mut buf = [0u8; MAX_INLINE_LOG_SIZE];
-            let len = data.len().min(buf.len());
-            let _ = data.read_range(0, &mut buf[..len]);
             let time = get_packed_time();
-            s.ring.push(self.id, self.level, self.task_index as u16, &buf[..len], self.idx, time);
+            s.ring.push(
+                self.ring_id,
+                self.level,
+                self.task_index as u16,
+                &buf[..len],
+                self.idx,
+                time,
+            );
             self.idx += 1;
         });
     }
@@ -275,15 +211,13 @@ impl Log for LogResource {
     fn consume_since(
         meta: Meta,
         since_id: u32,
-        buf: idyll_runtime::Leased<idyll_runtime::Write, u8>,
-    ) -> Result<u32, sysmodule_log_api::LogError> {
-        // Only allow tasks that subscribe to "logs" notifications.
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
+    ) -> Result<u32, LogError> {
         let caller = meta.sender.task_index();
         if !generated::LOGS_SUBSCRIBERS.contains(&caller) {
-            return Err(sysmodule_log_api::LogError::Unauthorized);
+            return Err(LogError::Unauthorized);
         }
 
-        // Entry wire format: [id: 4][level: 1][task: 2][idx: 2][time: 8][len: 2][data: len]
         const HEADER_SIZE: usize = 19;
         let buf_len = buf.len();
 
@@ -341,28 +275,6 @@ impl Log for LogResource {
 
 impl Drop for LogResource {
     fn drop(&mut self) {
-        usart_write(b"\r\n");
-
-        LOG_STATE.with(|s| {
-            let t = &mut s.tracker;
-            // Pop from writer stack
-            if t.depth > 0 && t.stack[t.depth - 1].id == self.id {
-                t.depth -= 1;
-                // The writer below (if any) will need a CONT prefix on next write
-                t.needs_cont = t.depth > 0;
-            } else {
-                // Dropped out of order — find and remove from stack
-                for i in 0..t.depth {
-                    if t.stack[i].id == self.id {
-                        // Shift entries down
-                        for j in i..t.depth - 1 {
-                            t.stack[j] = t.stack[j + 1];
-                        }
-                        t.depth -= 1;
-                        break;
-                    }
-                }
-            }
-        });
+        // No action needed — stream stays in the emulator-side HashMap.
     }
 }

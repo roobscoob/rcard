@@ -135,12 +135,12 @@ def "sdmmc open" [
         if $part.format == "ringbuffer" {
             # Extract raw partition slice, pipe through ring buffer reader
             let tmp = (mktemp -t sdmmc_ring_XXXXXX)
-            open $resolved | bytes at $part.offset_bytes..($part.offset_bytes + $part.size_bytes) | save -f $tmp
+            open $resolved | bytes at $part.offset_bytes..<($part.offset_bytes + $part.size_bytes) | save -f $tmp
             let lines = (python (project-root | path join scripts read_ringbuf.py) $tmp | lines | each { |l| $l | decode base64 })
             rm -f $tmp
             $lines
         } else if $part.format in [raw boot] {
-            open $resolved | bytes at $part.offset_bytes..($part.offset_bytes + $part.size_bytes)
+            open $resolved | bytes at $part.offset_bytes..<($part.offset_bytes + $part.size_bytes)
         } else {
             error make { msg: $"Partition '($target)' has format '($part.format)', expected 'raw', 'boot', or 'ringbuffer'" }
         }

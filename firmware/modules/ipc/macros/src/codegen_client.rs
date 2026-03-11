@@ -156,7 +156,7 @@ pub fn gen_client(
                 #[doc(hidden)]
                 struct #binding_struct_name;
                 impl $crate::#mod_name::#server_trait_name for #binding_struct_name {
-                    fn task_id() -> $crate::kern::TaskId { $slot }
+                    fn task_id() -> ipc::kern::TaskId { $slot }
                     fn server_id() -> &'static ipc::StaticTaskId {
                         static SERVER_ID: ipc::StaticTaskId = ipc::StaticTaskId::new($slot);
                         &SERVER_ID

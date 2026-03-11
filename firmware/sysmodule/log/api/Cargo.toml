@@ -7,6 +7,7 @@ edition = "2021"
 hubpack = "0.1.2"
 ipc = { path = "../../../modules/ipc" }
 idyll_runtime.workspace = true
+rcard-log = { path = "../../../../shared/log" }
 userlib.workspace = true
 zerocopy = "0.8"
 serde = { version = "1.0.228", default-features = false }

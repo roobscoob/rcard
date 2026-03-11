@@ -149,7 +149,7 @@ impl Display for DisplayResource {
     fn draw(
         &mut self,
         _meta: ipc::Meta,
-        framebuffer: idyll_runtime::Leased<idyll_runtime::Read, u8>,
+        framebuffer: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) {
         let width = self.config.width as usize;
         let height = self.config.height;

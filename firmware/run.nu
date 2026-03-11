@@ -245,6 +245,10 @@ def main [
         ($build_dir | path join sdmmc.img)
     }
 
+    # Extract boot.bin from the sdmmc image so the emulator can load it
+    rm -rf ($build_dir | path join boot.bin)
+    sdmmc open firmware --img $fw | save --raw ($build_dir | path join boot.bin)
+
     if $build_only { return }
 
     # Copy sdmmc image to .state/ so runtime mutations don't affect the build
@@ -252,9 +256,6 @@ def main [
     if not ($state_dir | path exists) { mkdir $state_dir }
     let state_img = ($state_dir | path join sdmmc.img)
     cp $fw $state_img
-
-    rm -rf ($build_dir | path join boot.bin)
-    sdmmc open firmware --img $state_img | save ($build_dir | path join boot.bin)
 
     if not ($elf | path exists) {
         error make { msg: $"ELF not found at ($elf). Run without --skip-build first." }

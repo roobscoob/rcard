@@ -6,11 +6,9 @@ edition = "2021"
 [dependencies]
 hubris-task-slots.workspace = true
 ipc = { path = "../../modules/ipc" }
-sysmodule_display_api = { path = "../../sysmodule/display/api" }
+rcard-log = { path = "../../../shared/log", features = ["writer"] }
+rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
-sysmodule_storage_api = { path = "../../sysmodule/storage/api" }
-sysmodule_fs_api = { path = "../../sysmodule/fs/api" }
-sysmodule_usart_api = { path = "../../sysmodule/usart/api" }
 userlib = { workspace = true, features = ["no-panic-handler"] }
 
 [[bin]]

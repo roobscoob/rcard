@@ -156,6 +156,7 @@ task "sysmodule_fs" {
     workspace-crate "sysmodule_fs"
     stack-size (KiB)32
     priority (workgroup)"sysmodule"
+    uses-sysmodule "sdmmc" { with-priority 0; }
     uses-sysmodule "storage" { with-priority 0; }
     uses-sysmodule "log" { with-priority 0; }
 }
@@ -164,8 +165,5 @@ task "fob" {
     workspace-crate "fob"
     stack-size (KiB)8
     priority (workgroup)"app"
-    uses-sysmodule "display" { with-priority 0; }
     uses-sysmodule "log" { with-priority 0; }
-    uses-sysmodule "storage" { with-priority 0; }
-    uses-sysmodule "fs" { with-priority 0; }
 }

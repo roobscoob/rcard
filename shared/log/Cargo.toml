@@ -1,0 +1,16 @@
+[package]
+name = "rcard-log"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+alloc = []
+writer = []
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive"] }
+hubpack = "0.1"
+rcard-log-macros = { path = "macros" }
+
+[dev-dependencies]
+rcard-log = { path = ".", features = ["writer"] }
