@@ -2,7 +2,7 @@
 #[macro_export]
 macro_rules! trace {
     ($($args:tt)*) => {
-        rcard_log_macros::__species!(rcard_log::LogLevel::Trace, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Trace, $($args)*)
     };
 }
 
@@ -10,7 +10,7 @@ macro_rules! trace {
 #[macro_export]
 macro_rules! debug {
     ($($args:tt)*) => {
-        rcard_log_macros::__species!(rcard_log::LogLevel::Debug, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Debug, $($args)*)
     };
 }
 
@@ -18,7 +18,7 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! info {
     ($($args:tt)*) => {
-        rcard_log_macros::__species!(rcard_log::LogLevel::Info, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Info, $($args)*)
     };
 }
 
@@ -26,7 +26,7 @@ macro_rules! info {
 #[macro_export]
 macro_rules! warn {
     ($($args:tt)*) => {
-        rcard_log_macros::__species!(rcard_log::LogLevel::Warn, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Warn, $($args)*)
     };
 }
 
@@ -34,8 +34,23 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! error {
     ($($args:tt)*) => {
-        rcard_log_macros::__species!(rcard_log::LogLevel::Error, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Error, $($args)*)
     };
+}
+
+/// Log at `Panic` level, then panic without pulling in `core::fmt`.
+///
+/// This sends the full message through the binary logging pipeline via
+/// `Format`, then triggers a bare `core::panic!("panic")` (no format
+/// arguments, so `core::fmt` is never linked).
+#[macro_export]
+macro_rules! panic {
+    ($($args:tt)*) => {{
+        $crate::__species!($crate, $crate::LogLevel::Panic, $($args)*);
+        $crate::PANIC_LOGGED.store(true, core::sync::atomic::Ordering::Relaxed);
+        #[allow(clippy::panic)]
+        { core::panic!("panic") }
+    }};
 }
 
 /// Provide the log backend implementation for this binary.
@@ -55,7 +70,7 @@ macro_rules! bind_logger {
     ($backend:ty) => {
         #[no_mangle]
         fn __rcard_log_send(level: u8, species: u64, data: &[u8]) {
-            let lvl = rcard_log::LogLevel::from_u8(level);
+            let lvl = $crate::LogLevel::from_u8(level);
             if <$backend>::log(lvl, species, data).is_err() {
                 // ServerDied — retry once
                 let _ = <$backend>::log(lvl, species, data);
@@ -64,7 +79,7 @@ macro_rules! bind_logger {
 
         #[no_mangle]
         fn __rcard_log_start(level: u8, species: u64) -> Option<u64> {
-            let lvl = rcard_log::LogLevel::from_u8(level);
+            let lvl = $crate::LogLevel::from_u8(level);
             match <$backend>::start(lvl, species) {
                 Ok(Some(handle)) => {
                     let raw = handle.raw().0;

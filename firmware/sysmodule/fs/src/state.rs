@@ -9,6 +9,7 @@ use core::ffi::{c_int, c_void};
 
 use littlefs2_sys::*;
 use once_cell::GlobalState;
+use rcard_log::OptionExt;
 use storage_api::StorageDyn;
 
 /// Maximum number of simultaneously mounted filesystems.
@@ -112,13 +113,15 @@ impl FsTable {
     /// Allocate a slot and configure littlefs for the given storage, but do NOT
     /// call `lfs_mount`. Returns the slot index (fs_id).
     fn allocate(&mut self, storage: StorageDyn) -> Result<u8, sysmodule_fs_api::FileSystemError> {
-        let idx = self.slots.iter().position(|s| s.is_none()).ok_or(
-            sysmodule_fs_api::FileSystemError::TooManyFilesystems,
-        )?;
+        let idx = self
+            .slots
+            .iter()
+            .position(|s| s.is_none())
+            .ok_or(sysmodule_fs_api::FileSystemError::TooManyFilesystems)?;
 
-        let block_count = storage.block_count().map_err(|_| {
-            sysmodule_fs_api::FileSystemError::StorageError
-        })?;
+        let block_count = storage
+            .block_count()
+            .map_err(|_| sysmodule_fs_api::FileSystemError::StorageError)?;
 
         let mut fs = MountedFs {
             lfs: UnsafeCell::new(unsafe { core::mem::zeroed() }),
@@ -145,7 +148,7 @@ impl FsTable {
         fs.config.name_max = 31;
 
         self.slots[idx] = Some(fs);
-        let slot = self.slots[idx].as_mut().unwrap();
+        let slot = self.slots[idx].as_mut().log_unwrap();
 
         // Now that the struct is at its final address, wire up the raw pointers.
         slot.config.context = slot as *mut MountedFs as *mut c_void;
@@ -160,7 +163,7 @@ impl FsTable {
     /// Returns the slot index (fs_id) on success.
     pub fn mount(&mut self, storage: StorageDyn) -> Result<u8, sysmodule_fs_api::FileSystemError> {
         let idx = self.allocate(storage)?;
-        let slot = self.slots[idx as usize].as_mut().unwrap();
+        let slot = self.slots[idx as usize].as_mut().log_unwrap();
 
         let rc = unsafe { lfs_mount(slot.lfs.get(), &slot.config) };
         if rc != 0 {
@@ -175,7 +178,7 @@ impl FsTable {
     /// Allocate a slot, format the storage, then mount.
     pub fn format(&mut self, storage: StorageDyn) -> Result<u8, sysmodule_fs_api::FileSystemError> {
         let idx = self.allocate(storage)?;
-        let slot = self.slots[idx as usize].as_mut().unwrap();
+        let slot = self.slots[idx as usize].as_mut().log_unwrap();
 
         let rc = unsafe { lfs_format(slot.lfs.get(), &slot.config) };
         if rc != 0 {
@@ -264,7 +267,7 @@ static FS_STATE: GlobalState<FsState> = GlobalState::new(FsState::new());
 ///
 /// Panics if called reentrantly (e.g. from within a littlefs callback).
 pub fn with_state<R>(f: impl FnOnce(&mut FsState) -> R) -> R {
-    FS_STATE.with(f)
+    FS_STATE.with(f).log_unwrap()
 }
 
 // ---------------------------------------------------------------------------

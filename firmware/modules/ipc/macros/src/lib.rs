@@ -1,3 +1,7 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse_macro_input;
@@ -15,7 +19,7 @@ use codegen_client::{gen_client, gen_dyn_client};
 use codegen_server::{
     gen_constants, gen_dispatcher, gen_operation_enum, gen_server_trait, gen_wiring_macro,
 };
-use parse::{parse_methods, InterfaceAttr, MethodKind, ResourceAttr};
+use parse::{InterfaceAttr, MethodKind, ResourceAttr, parse_methods};
 use util::to_screaming_snake_case;
 
 #[proc_macro_attribute]
@@ -56,9 +60,10 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Emit metadata for post-build handle ACL verification.
     {
         let crate_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-        let implements_str = attrs.implements.as_ref().and_then(|p| {
-            p.segments.last().map(|s| s.ident.to_string())
-        });
+        let implements_str = attrs
+            .implements
+            .as_ref()
+            .and_then(|p| p.segments.last().map(|s| s.ident.to_string()));
         let clone_str = attrs.clone_mode.map(|_| "refcount");
         let handle_params: Vec<emit_meta::HandleParam> = methods
             .iter()
@@ -410,7 +415,6 @@ fn gen_acl_fn() -> proc_macro2::TokenStream {
             let arms: Vec<proc_macro2::TokenStream> = allowed
                 .iter()
                 .map(|&idx| {
-                    let idx = idx as u16;
                     quote! { #idx => true }
                 })
                 .collect();
@@ -542,8 +546,8 @@ pub fn __check_uses(input: TokenStream) -> TokenStream {
     // Inline the check logic so we can distinguish file-not-found (skip)
     // from JSON parse errors (compile error).
     let result = (|| -> Result<Option<String>, (bool, String)> {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .map_err(|e| (true, e.to_string()))?;
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").map_err(|e| (true, e.to_string()))?;
         let project_root = std::path::PathBuf::from(&manifest_dir)
             .ancestors()
             .find(|p| p.join(".work").exists())
@@ -557,18 +561,22 @@ pub fn __check_uses(input: TokenStream) -> TokenStream {
             (is_not_found, e.to_string())
         })?;
 
-        let pkg_name = std::env::var("CARGO_PKG_NAME")
-            .map_err(|e| (true, e.to_string()))?;
+        let pkg_name = std::env::var("CARGO_PKG_NAME").map_err(|e| (true, e.to_string()))?;
 
         // JSON parse errors should be compile errors, not silently skipped
         let root: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| (false, format!("failed to parse app.uses.json: {}", e)))?;
-        let obj = root.as_object()
+        let obj = root
+            .as_object()
             .ok_or_else(|| (false, "app.uses.json is not a JSON object".to_string()))?;
 
         let deps = match obj.get(&pkg_name) {
-            Some(v) => v.as_array()
-                .ok_or_else(|| (false, format!("app.uses.json: value for '{}' is not an array", pkg_name)))?,
+            Some(v) => v.as_array().ok_or_else(|| {
+                (
+                    false,
+                    format!("app.uses.json: value for '{}' is not an array", pkg_name),
+                )
+            })?,
             None => return Ok(None),
         };
 
@@ -675,7 +683,8 @@ pub fn allocation(input: TokenStream) -> TokenStream {
 
     // Sentinel symbol: prevents two statics from using the same allocation
     // within one binary. The linker will error on duplicate symbols.
-    let sentinel_ident = format_ident!("__only_one_usage_allowed_for_allocation_{}", alloc_name_str);
+    let sentinel_ident =
+        format_ident!("__only_one_usage_allowed_for_allocation_{}", alloc_name_str);
 
     let output = quote! {
         const _: () = assert!(
@@ -691,8 +700,8 @@ pub fn allocation(input: TokenStream) -> TokenStream {
         struct #wrapper_type;
 
         impl #wrapper_type {
-            /// Take the allocation. Panics if called twice.
-            fn get(&self) -> &'static mut core::mem::MaybeUninit<#ty> {
+            /// Take the allocation. Returns `None` if already taken.
+            fn get(&self) -> Option<&'static mut core::mem::MaybeUninit<#ty>> {
                 static TAKEN: core::sync::atomic::AtomicBool =
                     core::sync::atomic::AtomicBool::new(false);
                 ipc::alloc_take::take::<#ty>(&TAKEN, #alloc_base)

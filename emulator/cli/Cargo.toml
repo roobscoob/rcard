@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 emulator = { path = "../emulator" }
+rcard-log = { path = "../../shared/log", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+terminal_size = "0.4"

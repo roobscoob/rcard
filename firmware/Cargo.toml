@@ -33,6 +33,12 @@ members = [
 [workspace.lints.rust]
 warnings = "deny"
 
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+declare_interior_mutable_const = "allow"
+
 [workspace.dependencies]
 userlib = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173", features = [
     "no-panic-handler",
@@ -53,6 +59,7 @@ debug = true
 panic = "abort"
 lto = true
 codegen-units = 1
+opt-level = "z"
 
 [workspace.metadata.rust-analyzer]
 cargo.target = "thumbv8m.main-none-eabihf"

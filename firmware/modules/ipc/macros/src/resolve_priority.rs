@@ -22,8 +22,7 @@ pub fn resolve() -> Result<Vec<PriorityEntry>, String> {
     let content = std::fs::read_to_string(&json_path)
         .map_err(|_| format!("cannot read {}", json_path.display()))?;
 
-    let server_name =
-        std::env::var("CARGO_PKG_NAME").map_err(|_| "CARGO_PKG_NAME not set")?;
+    let server_name = std::env::var("CARGO_PKG_NAME").map_err(|_| "CARGO_PKG_NAME not set")?;
 
     // Parse HUBRIS_TASKS: comma-separated task names, position = task index.
     let task_names: Vec<String> = std::env::var("HUBRIS_TASKS")

@@ -5,9 +5,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hubris_task_slots::SLOTS;
 use once_cell::OnceCell;
+use rcard_log::{OptionExt, ResultExt};
 use sysmodule_storage_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
+rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log; cleanup Sdmmc);
 sysmodule_sdmmc_api::bind_sdmmc!(Sdmmc = SLOTS.sysmodule_sdmmc);
 
@@ -64,7 +66,7 @@ fn is_managed(name: &str) -> bool {
 static SDMMC: OnceCell<Sdmmc> = OnceCell::new();
 
 fn sdmmc() -> &'static Sdmmc {
-    SDMMC.get().expect("SDMMC not initialized")
+    SDMMC.get().log_expect("SDMMC not initialized")
 }
 
 // ── Partition resource implementation ───────────────────────────────
@@ -113,14 +115,15 @@ impl Partition for PartitionResource {
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> Result<(), BlockError> {
         if block >= self.count {
-            return Err(BlockError::OutOfRange);
+            return Err(BlockError::out_of_range());
         }
         let mut tmp = [0u8; 512];
-        sdmmc().read_block(self.offset + block, &mut tmp)
-            .unwrap_or(Err(BlockError::Device(0xFFFF)))?;
+        sdmmc()
+            .read_block(self.offset + block, &mut tmp)
+            .unwrap_or(Err(BlockError::device(0xFFFF)))?;
         let len = buf.len().min(512);
-        for i in 0..len {
-            let _ = buf.write(i, tmp[i]);
+        for (i, &byte) in tmp.iter().enumerate().take(len) {
+            let _ = buf.write(i, byte);
         }
         Ok(())
     }
@@ -132,15 +135,16 @@ impl Partition for PartitionResource {
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<(), BlockError> {
         if block >= self.count {
-            return Err(BlockError::OutOfRange);
+            return Err(BlockError::out_of_range());
         }
         let mut tmp = [0u8; 512];
         let len = buf.len().min(512);
-        for i in 0..len {
-            tmp[i] = buf.read(i).unwrap_or(0);
+        for (i, byte) in tmp.iter_mut().enumerate().take(len) {
+            *byte = buf.read(i).unwrap_or(0);
         }
-        sdmmc().write_block(self.offset + block, &tmp)
-            .unwrap_or(Err(BlockError::Device(0xFFFF)))?;
+        sdmmc()
+            .write_block(self.offset + block, &tmp)
+            .unwrap_or(Err(BlockError::device(0xFFFF)))?;
         Ok(())
     }
 
@@ -159,10 +163,11 @@ impl Drop for PartitionResource {
 
 #[export_name = "main"]
 fn main() -> ! {
+    rcard_log::info!("Awake");
     // Acquire the raw SDMMC device.
     let sdmmc = Sdmmc::open()
-        .unwrap()
-        .expect("storage: failed to acquire SDMMC");
+        .log_unwrap()
+        .log_expect("storage: failed to acquire SDMMC");
     SDMMC.set(sdmmc).ok();
 
     ipc::server! {

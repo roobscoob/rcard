@@ -13,9 +13,12 @@ DARK = (18, 24, 32)
 UNUSED = (50, 58, 68)
 LOST = (220, 50, 60)
 
-# parse JSON from last argv
+# parse JSON from last argv, or from stdin if "--stdin" is passed
 ignore_empty = "--ignore-empty" in sys.argv
-raw = json.loads(sys.argv[-1])
+if "--stdin" in sys.argv:
+    raw = json.loads(sys.stdin.read())
+else:
+    raw = json.loads(sys.argv[-1])
 
 # build DATA: { memory_lower -> [(task, start, end, lost_bytes), ...] }
 # auto-assign colors per unique task name

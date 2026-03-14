@@ -5,7 +5,7 @@ use syn::Ident;
 use crate::parse::{
     CloneMode, ConstructorReturn, HandleMode, MethodKind, ParsedMethod, ParsedParam, ResourceAttr,
 };
-use crate::util::{replace_ident_in_type, to_pascal_case, to_snake_case};
+use crate::util::{panic_path, replace_ident_in_type, to_pascal_case, to_snake_case};
 
 // ===========================================================================
 // Concrete client (for resources with constructors / arena)
@@ -131,10 +131,8 @@ pub fn gen_client(
                         return;
                     }
                     // Send implicit destroy (0xFF) — best-effort, ignore errors.
-                    let args: (ipc::RawHandle,) = (self.handle.get(),);
-                    let mut argbuffer = [0u8; <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
-                    let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
-                    let argbuffer = &argbuffer[..n];
+                    let handle = self.handle.get();
+                    let argbuffer = zerocopy::IntoBytes::as_bytes(&handle);
                     let opcode = ipc::opcode(#kind_lit, ipc::IMPLICIT_DESTROY_METHOD);
                     let mut retbuffer = [0u8; 0];
                     let mut leases = [];
@@ -183,13 +181,13 @@ pub fn gen_dyn_client(
     let method_impls: Vec<TokenStream2> = methods
         .iter()
         .filter(|m| m.kind == MethodKind::Message)
-        .map(|m| gen_dyn_method(m))
+        .map(gen_dyn_method)
         .collect();
 
     let static_method_impls: Vec<TokenStream2> = methods
         .iter()
         .filter(|m| m.kind == MethodKind::StaticMessage)
-        .map(|m| gen_dyn_static_method(m))
+        .map(gen_dyn_static_method)
         .collect();
 
     quote! {
@@ -244,17 +242,15 @@ pub fn gen_dyn_client(
 
             impl Drop for #dyn_name {
                 fn drop(&mut self) {
-                    let args: (ipc::RawHandle,) = (self.handle.get(),);
-                    let mut argbuffer = [0u8;
-                        <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
-                    let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
+                    let handle = self.handle.get();
+                    let argbuffer = zerocopy::IntoBytes::as_bytes(&handle);
                     let opcode = ipc::opcode(self.kind, ipc::IMPLICIT_DESTROY_METHOD);
                     let mut retbuffer = [0u8; 0];
                     let mut leases = [];
                     let _ = ipc::kern::sys_send(
                         self.server.get(),
                         opcode,
-                        &argbuffer[..n],
+                        argbuffer,
                         &mut retbuffer,
                         &mut leases,
                     );
@@ -270,11 +266,7 @@ pub fn gen_dyn_client(
 // Transferable & Cloneable impls for concrete handles
 // ===========================================================================
 
-fn gen_transferable_impl(
-    handle_name: &Ident,
-    server_trait_name: &Ident,
-    kind: u8,
-) -> TokenStream2 {
+fn gen_transferable_impl(handle_name: &Ident, server_trait_name: &Ident, kind: u8) -> TokenStream2 {
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
 
     quote! {
@@ -290,48 +282,57 @@ fn gen_transferable_impl(
     }
 }
 
-fn gen_cloneable_impl(
-    handle_name: &Ident,
-    server_trait_name: &Ident,
-    kind: u8,
-) -> TokenStream2 {
+fn gen_cloneable_impl(handle_name: &Ident, server_trait_name: &Ident, kind: u8) -> TokenStream2 {
+    let _p = panic_path();
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
 
     quote! {
         impl<S: #server_trait_name> ipc::Cloneable for #handle_name<S> {
             fn clone_for(&self, new_owner: ipc::kern::TaskId) -> core::result::Result<ipc::DynHandle, ipc::CloneError> {
-                let args: (ipc::RawHandle, u16) = (self.handle.get(), new_owner.task_index());
-                let mut argbuffer = [0u8;
-                    <(ipc::RawHandle, u16) as hubpack::SerializedSize>::MAX_SIZE];
-                let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
-                let mut retbuffer = [0u8;
-                    <core::result::Result<ipc::RawHandle, ipc::Error>
-                        as hubpack::SerializedSize>::MAX_SIZE];
+                let mut argbuffer = [0u8; ipc::RawHandle::SIZE + core::mem::size_of::<u16>()];
+                let mut n = 0usize;
+                n += ipc::wire::write(&mut argbuffer[n..], &self.handle.get());
+                let owner_idx = new_owner.task_index();
+                n += ipc::wire::write(&mut argbuffer[n..], &owner_idx);
+                let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+                    unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+                let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
                 let mut leases = [];
                 let opcode = ipc::opcode(#kind_lit, ipc::CLONE_METHOD);
                 let (rc, len) = ipc::kern::sys_send(
                     self.server.get(),
                     opcode,
                     &argbuffer[..n],
-                    &mut retbuffer,
+                    retbuffer,
                     &mut leases,
                 ).map_err(|_| ipc::CloneError::ServerDied)?;
                 if rc == ipc::ACCESS_VIOLATION {
-                    panic!("ipc: clone rejected: access violation \
+                    #_p!("ipc: clone rejected: access violation \
                            (this task is not authorized to use this server)");
                 }
                 if rc != ipc::kern::ResponseCode::SUCCESS {
-                    panic!("ipc: clone got non-SUCCESS response code");
+                    #_p!("ipc: clone got non-SUCCESS response code");
                 }
-                let (result, _) = hubpack::deserialize::<
-                    core::result::Result<ipc::RawHandle, ipc::Error>
-                >(&retbuffer[..len])
-                    .unwrap_or_else(|_| panic!("ipc: malformed clone reply"));
-                let new_handle = match result {
-                    Ok(h) => h,
-                    Err(ipc::Error::HandleLost) => return Err(ipc::CloneError::InvalidHandle),
-                    Err(ipc::Error::ArenaFull) => return Err(ipc::CloneError::ArenaFull),
-                    Err(_) => return Err(ipc::CloneError::ServerDied),
+                // Wire format: tag(0=Ok,1=Err) + payload
+                if len == 0 { #_p!("ipc: empty clone reply"); }
+                let new_handle = match retbuffer[0] {
+                    0u8 => {
+                        let Some((h, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[1..len]) else {
+                            #_p!("ipc: malformed clone reply");
+                        };
+                        h
+                    }
+                    1u8 => {
+                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                            #_p!("ipc: malformed clone error reply");
+                        };
+                        match err {
+                            ipc::Error::HandleLost => return Err(ipc::CloneError::InvalidHandle),
+                            ipc::Error::ArenaFull => return Err(ipc::CloneError::ArenaFull),
+                            _ => return Err(ipc::CloneError::ServerDied),
+                        }
+                    }
+                    _ => #_p!("ipc: invalid clone reply tag"),
                 };
                 Ok(ipc::DynHandle {
                     server_id: u16::from(self.server.get()),
@@ -347,11 +348,7 @@ fn gen_cloneable_impl(
 // Per-method client codegen
 // ===========================================================================
 
-fn gen_client_method(
-    m: &ParsedMethod,
-    kind: u8,
-    enum_name: &Ident,
-) -> TokenStream2 {
+fn gen_client_method(m: &ParsedMethod, kind: u8, enum_name: &Ident) -> TokenStream2 {
     let method_name = &m.name;
     let variant = format_ident!("{}", to_pascal_case(&method_name.to_string()));
     let method_id_expr = quote! { #enum_name::#variant as u8 };
@@ -444,9 +441,11 @@ fn gen_constructor(
     ctor_return: &ConstructorReturn,
     err_type: &TokenStream2,
 ) -> TokenStream2 {
+    let _p = panic_path();
     // For serialization, we need to handle #[handle(move)] params specially.
     let ctor_server_expr = quote! { server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &ctor_server_expr, err_type);
+    let handle_transfer_stmts =
+        gen_handle_transfer_stmts(non_lease_params, &ctor_server_expr, err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -464,37 +463,95 @@ fn gen_constructor(
         }
     };
 
-    // Variant-specific pieces.
-    let wire_type = ctor_wire_type(ctor_return);
     let retbuf_size = ctor_retbuffer_size(ctor_return);
 
-    let (fn_ret, map_result) = match ctor_return {
+    // Generate inline tag+payload decoding for each constructor return variant.
+    // Wire format from server:
+    //   Bare:       tag(0=Ok,1=Err) + RawHandle | Error
+    //   Result(E):  tag(0=Ok,1=Err) + (tag(0=Ok,1=Err) + RawHandle | E) | Error
+    //   OptionSelf: tag(0=Ok,1=Err) + (tag(0=Some,1=None) + RawHandle | ()) | Error
+    let (fn_ret, parse_and_map) = match ctor_return {
         ConstructorReturn::Bare => (
             quote! { core::result::Result<Self, #err_type> },
             quote! {
-                match result {
-                    Ok(handle) => Ok(#make_self),
-                    Err(e) => Err(#err_type::from_wire(e)),
+                if len == 0 { #_p!("ipc: server {:?} sent empty ctor reply", server.get()); }
+                match retbuffer[0] {
+                    0u8 => {
+                        let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[1..len]) else {
+                            #_p!("ipc: server {:?} sent malformed ctor reply ({} bytes)", server.get(), len);
+                        };
+                        Ok(#make_self)
+                    }
+                    1u8 => {
+                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                            #_p!("ipc: server {:?} sent malformed ctor error ({} bytes)", server.get(), len);
+                        };
+                        Err(#err_type::from_wire(err))
+                    }
+                    tag => #_p!("ipc: server {:?} sent invalid ctor tag {}", server.get(), tag),
                 }
             },
         ),
         ConstructorReturn::Result(error_type) => (
             quote! { core::result::Result<core::result::Result<Self, #error_type>, #err_type> },
             quote! {
-                match result {
-                    Ok(Ok(handle)) => Ok(Ok(#make_self)),
-                    Ok(Err(e)) => Ok(Err(e)),
-                    Err(ipc_err) => Err(#err_type::from_wire(ipc_err)),
+                if len == 0 { #_p!("ipc: server {:?} sent empty ctor reply", server.get()); }
+                match retbuffer[0] {
+                    0u8 => {
+                        // Ok(inner) — inner is tag + (RawHandle | E)
+                        if len < 2 { #_p!("ipc: server {:?} sent truncated ctor reply", server.get()); }
+                        match retbuffer[1] {
+                            0u8 => {
+                                let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[2..len]) else {
+                                    #_p!("ipc: server {:?} sent malformed ctor reply ({} bytes)", server.get(), len);
+                                };
+                                Ok(Ok(#make_self))
+                            }
+                            1u8 => {
+                                let Some((e, _)) = ipc::wire::read::<#error_type>(&retbuffer[2..len]) else {
+                                    #_p!("ipc: server {:?} sent malformed ctor domain error ({} bytes)", server.get(), len);
+                                };
+                                Ok(Err(e))
+                            }
+                            tag => #_p!("ipc: server {:?} sent invalid inner ctor tag {}", server.get(), tag),
+                        }
+                    }
+                    1u8 => {
+                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                            #_p!("ipc: server {:?} sent malformed ctor error ({} bytes)", server.get(), len);
+                        };
+                        Err(#err_type::from_wire(err))
+                    }
+                    tag => #_p!("ipc: server {:?} sent invalid ctor tag {}", server.get(), tag),
                 }
             },
         ),
         ConstructorReturn::OptionSelf => (
             quote! { core::result::Result<core::option::Option<Self>, #err_type> },
             quote! {
-                match result {
-                    Ok(Some(handle)) => Ok(Some(#make_self)),
-                    Ok(None) => Ok(None),
-                    Err(ipc_err) => Err(#err_type::from_wire(ipc_err)),
+                if len == 0 { #_p!("ipc: server {:?} sent empty ctor reply", server.get()); }
+                match retbuffer[0] {
+                    0u8 => {
+                        // Ok(option) — inner is tag(0=Some,1=None) + RawHandle
+                        if len < 2 { #_p!("ipc: server {:?} sent truncated ctor reply", server.get()); }
+                        match retbuffer[1] {
+                            0u8 => {
+                                let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[2..len]) else {
+                                    #_p!("ipc: server {:?} sent malformed ctor reply ({} bytes)", server.get(), len);
+                                };
+                                Ok(Some(#make_self))
+                            }
+                            1u8 => Ok(None),
+                            tag => #_p!("ipc: server {:?} sent invalid option tag {}", server.get(), tag),
+                        }
+                    }
+                    1u8 => {
+                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                            #_p!("ipc: server {:?} sent malformed ctor error ({} bytes)", server.get(), len);
+                        };
+                        Err(#err_type::from_wire(err))
+                    }
+                    tag => #_p!("ipc: server {:?} sent invalid ctor tag {}", server.get(), tag),
                 }
             },
         ),
@@ -507,37 +564,33 @@ fn gen_constructor(
             let server = core::cell::Cell::new(S::task_id());
             #handle_transfer_stmts
             #serialize
-            let mut retbuffer = [0u8; #retbuf_size];
+            let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; #retbuf_size] =
+                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+            let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
             #lease_arr
-            let argbuffer = &argbuffer[..n];
+            let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
             let opcode = ipc::opcode(#kind_lit, #method_id_expr);
             let (rc, len) = ipc::kern::sys_send(
                 server.get(),
                 opcode,
                 argbuffer,
-                &mut retbuffer,
+                retbuffer,
                 &mut leases,
             ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
             if rc == ipc::ACCESS_VIOLATION {
-                panic!(
+                #_p!(
                     "ipc: server {:?} rejected our message: access violation \
                      (this task is not authorized to use this server)",
                     server.get(),
                 );
             }
             if rc != ipc::kern::ResponseCode::SUCCESS {
-                panic!(
+                #_p!(
                     "ipc: server {:?} sent unexpected non-SUCCESS response code",
                     server.get(),
                 );
             }
-            let (result, _) = hubpack::deserialize::<#wire_type>(&retbuffer[..len])
-                .unwrap_or_else(|_| panic!(
-                    "ipc: server {:?} sent malformed constructor reply \
-                     ({} bytes received)",
-                    server.get(), len,
-                ));
-            #map_result
+            #parse_and_map
         }
     }
 }
@@ -554,7 +607,8 @@ fn gen_message(
     err_type: &TokenStream2,
 ) -> TokenStream2 {
     let self_server_expr = quote! { self.server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &self_server_expr, err_type);
+    let handle_transfer_stmts =
+        gen_handle_transfer_stmts(non_lease_params, &self_server_expr, err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -571,13 +625,20 @@ fn gen_message(
         let (wire_rt, user_rt) = match return_type {
             Some(rt) => {
                 let wire = replace_ident_in_type(rt, generic_ident, &quote! { ipc::RawHandle });
-                let user = replace_ident_in_type(rt, generic_ident, &quote! { #handle_type<#generic_ident> });
+                let user = replace_ident_in_type(
+                    rt,
+                    generic_ident,
+                    &quote! { #handle_type<#generic_ident> },
+                );
                 (quote! { #wire }, quote! { #user })
             }
             None => (quote! { () }, quote! { () }),
         };
 
-        let parse_reply = gen_parse_reply(Some(&syn::parse2(wire_rt.clone()).unwrap()), quote! { self.server.get() });
+        let parse_reply = gen_parse_reply(
+            Some(&syn::parse2(wire_rt.clone()).unwrap()),
+            quote! { self.server.get() },
+        );
         let map_handles = gen_constructs_map(return_type, generic_ident, &handle_type);
 
         quote! {
@@ -624,7 +685,8 @@ fn gen_destructor(
     err_type: &TokenStream2,
 ) -> TokenStream2 {
     let self_server_expr = quote! { self.server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(non_lease_params, &self_server_expr, err_type);
+    let handle_transfer_stmts =
+        gen_handle_transfer_stmts(non_lease_params, &self_server_expr, err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -685,14 +747,16 @@ fn gen_static_message(
             #handle_transfer_stmts
             #serialize
             #lease_arr
-            let argbuffer = &argbuffer[..n];
+            let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
             let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-            let mut retbuffer = [0u8; ipc::HUBRIS_MESSAGE_SIZE_LIMIT];
+            let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+            let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
             let send_result = ipc::kern::sys_send(
                 server_id.get(),
                 opcode,
                 argbuffer,
-                &mut retbuffer,
+                retbuffer,
                 &mut leases,
             );
             let wire_result: core::result::Result<_, ipc::Error> = match send_result {
@@ -706,7 +770,7 @@ fn gen_static_message(
                         server_id.get(),
                         opcode,
                         argbuffer,
-                        &mut retbuffer,
+                        retbuffer,
                         &mut leases,
                     ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
                     #parse_reply
@@ -740,7 +804,8 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
         .collect();
 
     let server_expr = quote! { self.server.get() };
-    let handle_transfer_stmts = gen_handle_transfer_stmts(&non_lease_params, &server_expr, &err_type);
+    let handle_transfer_stmts =
+        gen_handle_transfer_stmts(&non_lease_params, &server_expr, &err_type);
 
     let wire_names: Vec<&Ident> = non_lease_params.iter().map(|p| &p.name).collect();
     let wire_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type_for(p)).collect();
@@ -761,14 +826,16 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
             #handle_transfer_stmts
             #serialize
             #lease_arr
-            let argbuffer = &argbuffer[..n];
+            let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
             let opcode = ipc::opcode(self.kind, #method_id_lit);
-            let mut retbuffer = [0u8; ipc::HUBRIS_MESSAGE_SIZE_LIMIT];
+            let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+            let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
             let send_result = ipc::kern::sys_send(
                 self.server.get(),
                 opcode,
                 argbuffer,
-                &mut retbuffer,
+                retbuffer,
                 &mut leases,
             );
             let wire_result: core::result::Result<_, ipc::Error> = match send_result {
@@ -781,7 +848,7 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
                         self.server.get(),
                         opcode,
                         argbuffer,
-                        &mut retbuffer,
+                        retbuffer,
                         &mut leases,
                     ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
                     #parse_reply
@@ -804,8 +871,12 @@ fn gen_dyn_static_method(_m: &ParsedMethod) -> TokenStream2 {
 /// Determine the precise client-side error type for a method based on its
 /// kind and whether it has move/clone handle params.
 fn error_type_for(method_kind: MethodKind, params: &[ParsedParam]) -> TokenStream2 {
-    let has_move = params.iter().any(|p| p.handle_mode == Some(HandleMode::Move));
-    let has_clone = params.iter().any(|p| p.handle_mode == Some(HandleMode::Clone));
+    let has_move = params
+        .iter()
+        .any(|p| p.handle_mode == Some(HandleMode::Move));
+    let has_clone = params
+        .iter()
+        .any(|p| p.handle_mode == Some(HandleMode::Clone));
 
     match method_kind {
         MethodKind::Constructor => match (has_move, has_clone) {
@@ -903,18 +974,16 @@ fn gen_handle_transfer_stmts(
                 let prev_dh = format_ident!("__dh_{}", prev_name);
                 quote! {
                     {
-                        let __cancel_args: (ipc::RawHandle,) = (#prev_dh.handle,);
-                        let mut __cancel_buf = [0u8;
-                            <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
-                        let __cancel_n = hubpack::serialize(&mut __cancel_buf, &__cancel_args)
-                            .expect("ipc: serialize cancel");
-                        let __cancel_opcode = ipc::opcode(#prev_dh.kind, ipc::CANCEL_TRANSFER_METHOD);
+                        let __cancel_h = #prev_dh.handle;
+                        let __cancel_buf = zerocopy::IntoBytes::as_bytes(&__cancel_h);
+                        let __cancel_k = #prev_dh.kind;
+                        let __cancel_opcode = ipc::opcode(__cancel_k, ipc::CANCEL_TRANSFER_METHOD);
                         let mut __cancel_ret = [0u8; 0];
                         let mut __cancel_leases = [];
                         let _ = ipc::kern::sys_send(
                             #prev_dh.task_id(),
                             __cancel_opcode,
-                            &__cancel_buf[..__cancel_n],
+                            __cancel_buf,
                             &mut __cancel_ret,
                             &mut __cancel_leases,
                         );
@@ -937,33 +1006,30 @@ fn gen_handle_transfer_stmts(
             };
             // Send PREPARE_TRANSFER to source server
             {
-                let __prep_args: (ipc::RawHandle, u16) = (#dh_var.handle, #server_expr.task_index());
-                let mut __prep_buf = [0u8;
-                    <(ipc::RawHandle, u16) as hubpack::SerializedSize>::MAX_SIZE];
-                let __prep_n = hubpack::serialize(&mut __prep_buf, &__prep_args)
-                    .expect("ipc: serialize prepare");
-                let __prep_opcode = ipc::opcode(#dh_var.kind, ipc::PREPARE_TRANSFER_METHOD);
-                let mut __prep_ret = [0u8;
-                    <core::result::Result<(), ipc::Error> as hubpack::SerializedSize>::MAX_SIZE];
+                let mut __prep_buf = [0u8; ipc::RawHandle::SIZE + core::mem::size_of::<u16>()];
+                let mut __prep_n = 0usize;
+                let __prep_h = #dh_var.handle;
+                __prep_n += ipc::wire::write(&mut __prep_buf[__prep_n..], &__prep_h);
+                let __target_idx: u16 = #server_expr.task_index();
+                __prep_n += ipc::wire::write(&mut __prep_buf[__prep_n..], &__target_idx);
+                let __prep_k = #dh_var.kind;
+                let __prep_opcode = ipc::opcode(__prep_k, ipc::PREPARE_TRANSFER_METHOD);
+                let mut __prep_ret_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+                    unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+                let __prep_ret = unsafe { ipc::wire::as_mut_byte_slice(&mut __prep_ret_mem) };
                 let mut __prep_leases = [];
                 let __prep_ok = match ipc::kern::sys_send(
                     #dh_var.task_id(),
                     __prep_opcode,
                     &__prep_buf[..__prep_n],
-                    &mut __prep_ret,
+                    __prep_ret,
                     &mut __prep_leases,
                 ) {
                     Ok((__prep_rc, __prep_len)) => {
-                        if __prep_rc == ipc::kern::ResponseCode::SUCCESS {
-                            match hubpack::deserialize::<core::result::Result<(), ipc::Error>>(
-                                &__prep_ret[..__prep_len],
-                            ) {
-                                Ok((Ok(()), _)) => true,
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        }
+                        // Wire: tag(0=Ok,1=Err) + payload
+                        __prep_rc == ipc::kern::ResponseCode::SUCCESS
+                            && __prep_len > 0
+                            && __prep_ret[0] == 0u8
                     }
                     Err(_) => false,
                 };
@@ -994,52 +1060,41 @@ fn gen_handle_transfer_stmts(
     quote! { #(#stmts)* }
 }
 
-
-/// Serialize method arguments into `argbuffer`.
+/// Serialize method arguments into `argbuffer` using sequential zerocopy writes.
 ///
-/// `handle_expr` — if `Some`, a `RawHandle` expression is prepended to the
-/// args tuple (used for instance methods that carry a handle).  Pass `None`
-/// for constructors / static messages.
+/// `handle_expr` — if `Some`, a `RawHandle` is written first (instance methods).
+/// Pass `None` for constructors / static messages.
 fn gen_serialize_wire(
     wire_names: &[&Ident],
     wire_types: &[TokenStream2],
     handle_expr: Option<&TokenStream2>,
 ) -> TokenStream2 {
+    let mut writes = Vec::new();
+    writes.push(quote! {
+        let mut argbuffer: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+            unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+        let mut n = 0usize;
+    });
+
     if let Some(handle) = handle_expr {
-        if wire_types.is_empty() {
-            quote! {
-                let args: (ipc::RawHandle,) = (#handle,);
-                let mut argbuffer = [0u8; <(ipc::RawHandle,) as hubpack::SerializedSize>::MAX_SIZE];
-                let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
-            }
-        } else {
-            quote! {
-                const _: () = assert!(
-                    <(ipc::RawHandle, #(#wire_types,)*) as hubpack::SerializedSize>::MAX_SIZE
-                        <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
-                    "argument types exceed Hubris message size limit (256 bytes)",
-                );
-                let args: (ipc::RawHandle, #(#wire_types,)*) = (#handle, #(#wire_names,)*);
-                let mut argbuffer = [0u8; <(ipc::RawHandle, #(#wire_types,)*) as hubpack::SerializedSize>::MAX_SIZE];
-                let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
-            }
-        }
-    } else if wire_types.is_empty() {
+        writes.push(quote! {
+            n += ipc::wire::write_uninit(&mut argbuffer[n..], &#handle);
+        });
+    }
+
+    for (name, _ty) in wire_names.iter().zip(wire_types.iter()) {
+        writes.push(quote! {
+            n += ipc::wire::write_uninit(&mut argbuffer[n..], &#name);
+        });
+    }
+
+    if handle_expr.is_none() && wire_types.is_empty() {
         quote! {
             let argbuffer = [];
             let n = 0usize;
         }
     } else {
-        quote! {
-            const _: () = assert!(
-                <(#(#wire_types,)*) as hubpack::SerializedSize>::MAX_SIZE
-                    <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
-                "argument types exceed Hubris message size limit (256 bytes)",
-            );
-            let args: (#(#wire_types,)*) = (#(#wire_names,)*);
-            let mut argbuffer = [0u8; <(#(#wire_types,)*) as hubpack::SerializedSize>::MAX_SIZE];
-            let n = hubpack::serialize(&mut argbuffer, &args).expect("ipc: serialize failed");
-        }
+        quote! { #(#writes)* }
     }
 }
 
@@ -1062,71 +1117,101 @@ fn gen_lease_array(lease_params: &[&ParsedParam]) -> TokenStream2 {
     }
 }
 
-fn gen_send_body(kind: u8, method_id_expr: &TokenStream2, lease_arr: &TokenStream2) -> TokenStream2 {
+fn gen_send_body(
+    kind: u8,
+    method_id_expr: &TokenStream2,
+    lease_arr: &TokenStream2,
+) -> TokenStream2 {
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
     quote! {
         #lease_arr
-        let argbuffer = &argbuffer[..n];
+        let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
         let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-        let mut retbuffer = [0u8; ipc::HUBRIS_MESSAGE_SIZE_LIMIT];
+        let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+            unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+        let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
         let send_result = ipc::kern::sys_send(
             self.server.get(),
             opcode,
             argbuffer,
-            &mut retbuffer,
+            retbuffer,
             &mut leases,
         );
     }
 }
 
-fn gen_parse_reply(
-    return_type: Option<&syn::Type>,
-    server_expr: TokenStream2,
-) -> TokenStream2 {
+fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream2) -> TokenStream2 {
+    let _p = panic_path();
     let rc_check = quote! {
         if rc == ipc::ACCESS_VIOLATION {
-            panic!(
+            #_p!(
                 "ipc: server {:?} rejected our message: access violation \
                  (this task is not authorized to use this server)",
                 #server_expr,
             );
         }
         if rc != ipc::kern::ResponseCode::SUCCESS {
-            panic!(
+            #_p!(
                 "ipc: server {:?} sent unexpected non-SUCCESS response code; \
                  this indicates a protocol violation",
                 #server_expr,
             );
         }
     };
+    // Wire format: tag byte (0=Ok, 1=Err) + payload
+    // The Ok payload may itself be Option<T> or Result<T, E>, handled by gen_decode_return_value.
     if let Some(rt) = return_type {
+        let decode = crate::util::gen_decode_return_value(rt, &server_expr);
         quote! {
             #rc_check
-            const _: () = assert!(
-                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE
-                    <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
-                "return type exceeds Hubris message size limit (256 bytes)",
-            );
-            let (result, _) = hubpack::deserialize::<
-                core::result::Result<#rt, ipc::Error>
-            >(&retbuffer[..len])
-                .unwrap_or_else(|_| panic!(
-                    "ipc: server {:?} sent malformed reply ({} bytes received)",
-                    #server_expr, len,
-                ));
-            result
+            if len == 0 {
+                #_p!("ipc: server {:?} sent empty reply", #server_expr);
+            }
+            let mut __off = 0usize;
+            match retbuffer[0] {
+                0u8 => {
+                    __off += 1;
+                    let __decoded = #decode;
+                    Ok(__decoded)
+                }
+                1u8 => {
+                    __off += 1;
+                    let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[__off..len]) else {
+                        #_p!(
+                            "ipc: server {:?} sent malformed error reply ({} bytes received)",
+                            #server_expr, len,
+                        );
+                    };
+                    Err(err)
+                }
+                tag => #_p!(
+                    "ipc: server {:?} sent invalid result tag {}",
+                    #server_expr, tag,
+                ),
+            }
         }
     } else {
         quote! {
             #rc_check
-            let (result, _) = hubpack::deserialize::<
-                core::result::Result<(), ipc::Error>
-            >(&retbuffer[..len])
-                .unwrap_or_else(|_| panic!(
-                    "ipc: server {:?} sent malformed reply ({} bytes received)",
-                    #server_expr, len,
-                ));
-            result
+            if len == 0 {
+                #_p!("ipc: server {:?} sent empty reply", #server_expr);
+            }
+            match retbuffer[0] {
+                0u8 => Ok(()),
+                1u8 => {
+                    let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                        #_p!(
+                            "ipc: server {:?} sent malformed error reply ({} bytes received)",
+                            #server_expr, len,
+                        );
+                    };
+                    Err(err)
+                }
+                tag => #_p!(
+                    "ipc: server {:?} sent invalid result tag {}",
+                    #server_expr, tag,
+                ),
+            }
         }
     }
 }
@@ -1135,31 +1220,10 @@ fn gen_parse_reply(
 // Constructor reply helpers
 // ===========================================================================
 
-/// The deserialization wire type for a constructor reply.
-fn ctor_wire_type(ctor_return: &ConstructorReturn) -> TokenStream2 {
-    match ctor_return {
-        ConstructorReturn::Bare => quote! {
-            core::result::Result<ipc::RawHandle, ipc::Error>
-        },
-        ConstructorReturn::Result(error_type) => quote! {
-            core::result::Result<
-                core::result::Result<ipc::RawHandle, #error_type>,
-                ipc::Error,
-            >
-        },
-        ConstructorReturn::OptionSelf => quote! {
-            core::result::Result<
-                core::option::Option<ipc::RawHandle>,
-                ipc::Error,
-            >
-        },
-    }
-}
-
-/// Retbuffer size for a constructor call.
-fn ctor_retbuffer_size(ctor_return: &ConstructorReturn) -> TokenStream2 {
-    let wire_type = ctor_wire_type(ctor_return);
-    quote! { <#wire_type as hubpack::SerializedSize>::MAX_SIZE }
+/// Retbuffer size for a constructor call — use the full message size limit
+/// since we decode inline with tag+payload.
+fn ctor_retbuffer_size(_ctor_return: &ConstructorReturn) -> TokenStream2 {
+    quote! { ipc::HUBRIS_MESSAGE_SIZE_LIMIT }
 }
 
 // ===========================================================================
@@ -1197,7 +1261,11 @@ fn gen_constructs_map(
             }
         }
         // Bare FS → Handle::from_raw(v)
-        if p.path.get_ident().map(|i| i == generic_ident).unwrap_or(false) {
+        if p.path
+            .get_ident()
+            .map(|i| i == generic_ident)
+            .unwrap_or(false)
+        {
             return quote! {
                 #handle_type::<#generic_ident>::from_raw(v)
             };

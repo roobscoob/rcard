@@ -2,6 +2,15 @@ use core::cell::Cell;
 
 use crate::RawHandle;
 
+/// Error returned by `Arena::alloc`.
+#[derive(Debug)]
+pub enum AllocError {
+    /// No free slot could be found or evicted.
+    NoFreeSlot,
+    /// A slot was available but no free map entry exists.
+    NoFreeEntry,
+}
+
 /// Error returned by `Arena::clone_handle` and `Cloneable::clone_for`.
 #[derive(Debug)]
 pub enum CloneError {
@@ -47,6 +56,7 @@ pub struct Arena<T, const N: usize> {
     next_key: Cell<u64>,
 }
 
+#[allow(clippy::inline_always)]
 impl<T, const N: usize> Arena<T, N> {
     const EMPTY_SLOT: Slot<T> = Slot {
         value: core::cell::UnsafeCell::new(None),
@@ -65,12 +75,15 @@ impl<T, const N: usize> Arena<T, N> {
     };
 
     pub const fn new(kind: u8) -> Self {
-        assert!(N <= 255, "Arena: N must be <= 255 (slot index is stored as u8)");
+        assert!(
+            N <= 255,
+            "Arena: N must be <= 255 (slot index is stored as u8)"
+        );
         Self {
             slots: [Self::EMPTY_SLOT; N],
             map: [Self::EMPTY_ENTRY; N],
             // Seed with kind byte so different arenas produce different key sequences.
-            next_key: Cell::new((kind as u64) << 56 | 1),
+            next_key: Cell::new(((kind as u64) << 56) | 1),
         }
     }
 
@@ -88,29 +101,28 @@ impl<T, const N: usize> Arena<T, N> {
     /// If the arena is full and `priority` is strictly greater than the
     /// lowest-priority occupied entry, that entry is evicted (its value is
     /// dropped and its generation is bumped) to make room.
-    pub fn alloc(&self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+    #[inline]
+    pub fn alloc(&self, value: T, owner: u16, priority: i8) -> Result<RawHandle, AllocError> {
         // Find a free slot, or evict an entire slot to free one.
         let slot_idx = match self.slots.iter().position(|s| {
             // SAFETY: we only read the Option discriminant here, no outstanding &mut
             unsafe { (*s.value.get()).is_none() }
         }) {
             Some(idx) => idx,
-            None => self.evict_slot(priority)?,
+            None => self.evict_slot(priority).ok_or(AllocError::NoFreeSlot)?,
         };
 
-        // evict_slot releases all map entries for the victim slot, so at
-        // least one free map entry must exist. If none existed before
-        // eviction (no free slots implies no free map entries for
-        // non-refcounted resources), the eviction freed at least one.
         let map_idx = self
             .map
             .iter()
             .position(|e| !e.occupied.get())
-            .expect("ipc: arena has a free slot but no free map entry");
+            .ok_or(AllocError::NoFreeEntry)?;
 
         let generation = self.slots[slot_idx].generation.get();
         // SAFETY: single-threaded, no other references to this slot's value
-        unsafe { *self.slots[slot_idx].value.get() = Some(value); }
+        unsafe {
+            *self.slots[slot_idx].value.get() = Some(value);
+        }
         self.slots[slot_idx].refcount.set(1);
 
         let key = self.next_key();
@@ -123,7 +135,7 @@ impl<T, const N: usize> Arena<T, N> {
         self.map[map_idx].priority.set(priority);
         self.map[map_idx].pending_to.set(None);
 
-        Some(RawHandle(key))
+        Ok(RawHandle(key))
     }
 
     /// Evict an entire slot to free it for a new allocation.
@@ -147,12 +159,12 @@ impl<T, const N: usize> Arena<T, N> {
             let slot_idx = i as u8;
             let mut max_prio = i8::MIN;
             for j in 0..N {
-                if self.map[j].occupied.get() && self.map[j].slot.get() == slot_idx
+                if self.map[j].occupied.get()
+                    && self.map[j].slot.get() == slot_idx
                     && self.map[j].generation.get() == self.slots[i].generation.get()
+                    && self.map[j].priority.get() > max_prio
                 {
-                    if self.map[j].priority.get() > max_prio {
-                        max_prio = self.map[j].priority.get();
-                    }
+                    max_prio = self.map[j].priority.get();
                 }
             }
             if max_prio >= requester_priority {
@@ -175,7 +187,8 @@ impl<T, const N: usize> Arena<T, N> {
 
         // Pass 2: release all map entries pointing to the victim slot.
         for i in 0..N {
-            if self.map[i].occupied.get() && self.map[i].slot.get() == victim_slot
+            if self.map[i].occupied.get()
+                && self.map[i].slot.get() == victim_slot
                 && self.map[i].generation.get() == self.slots[victim_slot as usize].generation.get()
             {
                 self.release_entry(i);
@@ -204,7 +217,8 @@ impl<T, const N: usize> Arena<T, N> {
             if self.map[i].occupied.get() {
                 // Skip entries pointing to the excluded slot.
                 if let Some((slot, generation)) = exclude_slot {
-                    if self.map[i].slot.get() == slot && self.map[i].generation.get() == generation {
+                    if self.map[i].slot.get() == slot && self.map[i].generation.get() == generation
+                    {
                         continue;
                     }
                 }
@@ -221,32 +235,50 @@ impl<T, const N: usize> Arena<T, N> {
         best.map(|(idx, _)| idx)
     }
 
+    #[inline]
     fn lookup(&self, handle: RawHandle) -> Option<usize> {
-        let entry = self.map.iter().find(|e| e.occupied.get() && e.key.get() == handle.0 && e.pending_to.get().is_none())?;
-        let slot = &self.slots[entry.slot.get() as usize];
-        // SAFETY: single-threaded, only reading discriminant
-        if slot.generation.get() != entry.generation.get() || unsafe { (*slot.value.get()).is_none() } {
-            return None;
-        }
-        Some(entry.slot.get() as usize)
+        self.map.iter().find_map(|e| {
+            if e.occupied.get() && e.key.get() == handle.0 && e.pending_to.get().is_none() {
+                let slot = &self.slots[e.slot.get() as usize];
+                // SAFETY: single-threaded, only reading discriminant
+                if slot.generation.get() == e.generation.get()
+                    && unsafe { (*slot.value.get()).is_some() }
+                {
+                    return Some(e.slot.get() as usize);
+                }
+            }
+            None
+        })
     }
 
+    #[inline]
     fn lookup_owned(&self, handle: RawHandle, owner: u16) -> Option<usize> {
-        let entry = self.map.iter().find(|e| e.occupied.get() && e.key.get() == handle.0 && e.owner.get() == owner && e.pending_to.get().is_none())?;
-        let slot = &self.slots[entry.slot.get() as usize];
-        // SAFETY: single-threaded, only reading discriminant
-        if slot.generation.get() != entry.generation.get() || unsafe { (*slot.value.get()).is_none() } {
-            return None;
-        }
-        Some(entry.slot.get() as usize)
+        self.map.iter().find_map(|e| {
+            if e.occupied.get()
+                && e.key.get() == handle.0
+                && e.owner.get() == owner
+                && e.pending_to.get().is_none()
+            {
+                let slot = &self.slots[e.slot.get() as usize];
+                // SAFETY: single-threaded, only reading discriminant
+                if slot.generation.get() == e.generation.get()
+                    && unsafe { (*slot.value.get()).is_some() }
+                {
+                    return Some(e.slot.get() as usize);
+                }
+            }
+            None
+        })
     }
 
+    #[inline]
     pub fn get(&self, handle: RawHandle) -> Option<&T> {
         let idx = self.lookup(handle)?;
         // SAFETY: single-threaded; lookup verified the slot is occupied
         unsafe { (*self.slots[idx].value.get()).as_ref() }
     }
 
+    #[inline]
     pub fn get_mut(&self, handle: RawHandle) -> Option<&mut T> {
         let idx = self.lookup(handle)?;
         // SAFETY: single-threaded; no two &mut T to the same slot simultaneously
@@ -255,6 +287,7 @@ impl<T, const N: usize> Arena<T, N> {
     }
 
     /// Get a mutable reference, but only if `owner` owns the handle.
+    #[inline]
     pub fn get_mut_owned(&self, handle: RawHandle, owner: u16) -> Option<&mut T> {
         let idx = self.lookup_owned(handle, owner)?;
         // SAFETY: single-threaded; no two &mut T to the same slot simultaneously
@@ -264,6 +297,7 @@ impl<T, const N: usize> Arena<T, N> {
     /// Release a handle entry and decrement the slot's refcount.
     /// If this was the last reference, the value is dropped and the slot's
     /// generation is incremented. Returns `Some(value)` only on last release.
+    #[inline]
     fn release_entry(&self, entry_idx: usize) -> Option<T> {
         let slot_idx = self.map[entry_idx].slot.get() as usize;
         let entry_gen = self.map[entry_idx].generation.get();
@@ -288,6 +322,7 @@ impl<T, const N: usize> Arena<T, N> {
 
     /// Remove a handle entry. If this was the last reference (refcount hits 0),
     /// the value is dropped and returned. Otherwise returns `None` (value still alive).
+    #[inline]
     pub fn remove(&self, handle: RawHandle) -> Option<T> {
         let entry_idx = self
             .map
@@ -297,6 +332,7 @@ impl<T, const N: usize> Arena<T, N> {
     }
 
     /// Remove a handle entry, but only if `owner` owns it.
+    #[inline]
     pub fn remove_owned(&self, handle: RawHandle, owner: u16) -> Option<T> {
         let entry_idx = self
             .map
@@ -329,7 +365,12 @@ impl<T, const N: usize> Arena<T, N> {
             let src = self
                 .map
                 .iter()
-                .find(|e| e.occupied.get() && e.key.get() == handle.0 && e.owner.get() == owner && e.pending_to.get().is_none())
+                .find(|e| {
+                    e.occupied.get()
+                        && e.key.get() == handle.0
+                        && e.owner.get() == owner
+                        && e.pending_to.get().is_none()
+                })
                 .ok_or(CloneError::InvalidHandle)?;
             (src.slot.get(), src.generation.get())
         };
@@ -354,17 +395,14 @@ impl<T, const N: usize> Arena<T, N> {
                     .find_eviction_victim(priority, Some((slot_idx, generation)))
                     .ok_or(CloneError::ArenaFull)?;
                 self.release_entry(victim);
-                self.map
-                    .iter()
-                    .position(|e| !e.occupied.get())
-                    .expect("ipc: arena has no free map entry after eviction")
+                victim
             }
         };
 
         // Increment refcount (overflow checked above).
-        self.slots[slot_idx as usize].refcount.set(
-            self.slots[slot_idx as usize].refcount.get() + 1,
-        );
+        self.slots[slot_idx as usize]
+            .refcount
+            .set(self.slots[slot_idx as usize].refcount.get() + 1);
 
         let key = self.next_key();
         self.map[map_idx].key.set(key);
@@ -387,11 +425,16 @@ impl<T, const N: usize> Arena<T, N> {
     /// or is already pending transfer.
     pub fn prepare_transfer(&self, handle: RawHandle, owner: u16, target: u16) -> bool {
         if let Some(entry) = self.map.iter().find(|e| {
-            e.occupied.get() && e.key.get() == handle.0 && e.owner.get() == owner && e.pending_to.get().is_none()
+            e.occupied.get()
+                && e.key.get() == handle.0
+                && e.owner.get() == owner
+                && e.pending_to.get().is_none()
         }) {
             let slot = &self.slots[entry.slot.get() as usize];
             // SAFETY: single-threaded, only reading discriminant
-            if slot.generation.get() != entry.generation.get() || unsafe { (*slot.value.get()).is_none() } {
+            if slot.generation.get() != entry.generation.get()
+                || unsafe { (*slot.value.get()).is_none() }
+            {
                 return false;
             }
             entry.pending_to.set(Some(target));
@@ -405,7 +448,10 @@ impl<T, const N: usize> Arena<T, N> {
     /// Returns `false` if the handle isn't found or isn't pending.
     pub fn cancel_transfer(&self, handle: RawHandle, owner: u16) -> bool {
         if let Some(entry) = self.map.iter().find(|e| {
-            e.occupied.get() && e.key.get() == handle.0 && e.owner.get() == owner && e.pending_to.get().is_some()
+            e.occupied.get()
+                && e.key.get() == handle.0
+                && e.owner.get() == owner
+                && e.pending_to.get().is_some()
         }) {
             entry.pending_to.set(None);
             true
@@ -422,7 +468,9 @@ impl<T, const N: usize> Arena<T, N> {
         }) {
             let slot = &self.slots[entry.slot.get() as usize];
             // SAFETY: single-threaded, only reading discriminant
-            if slot.generation.get() != entry.generation.get() || unsafe { (*slot.value.get()).is_none() } {
+            if slot.generation.get() != entry.generation.get()
+                || unsafe { (*slot.value.get()).is_none() }
+            {
                 return false;
             }
             entry.owner.set(acquirer);
@@ -438,9 +486,11 @@ impl<T, const N: usize> Arena<T, N> {
     /// Used for cleanup after a failed 2PC transfer. Does NOT use `lookup_owned`
     /// (which rejects pending entries).
     pub fn try_drop(&self, handle: RawHandle, owner: u16) -> bool {
-        if let Some(idx) = self.map.iter().position(|e| {
-            e.occupied.get() && e.key.get() == handle.0 && e.owner.get() == owner
-        }) {
+        if let Some(idx) = self
+            .map
+            .iter()
+            .position(|e| e.occupied.get() && e.key.get() == handle.0 && e.owner.get() == owner)
+        {
             self.release_entry(idx);
             true
         } else {
@@ -457,14 +507,13 @@ impl<T, const N: usize> Arena<T, N> {
                 let slot = &self.slots[self.map[i].slot.get() as usize];
                 // SAFETY: single-threaded, only reading discriminant
                 if slot.generation.get() == self.map[i].generation.get()
-                    && unsafe { !(*slot.value.get()).is_none() }
+                    && unsafe { (*slot.value.get()).is_some() }
                 {
                     self.map[i].pending_to.set(None);
                 }
             }
         }
     }
-
 }
 
 /// Shared arena with interior mutability for single-threaded Hubris tasks.
@@ -491,40 +540,49 @@ impl<T, const N: usize> SharedArena<T, N> {
         }
     }
 
+    #[inline(always)]
     fn arena(&self) -> &Arena<T, N> {
         // SAFETY: single-threaded Hubris tasks. Arena methods use Cell/UnsafeCell
         // internally, so a shared reference is sufficient.
         unsafe { &*self.inner.get() }
     }
 
+    #[inline]
     pub fn get(&self, handle: RawHandle) -> Option<&T> {
         self.arena().get(handle)
     }
 
+    #[inline]
     pub fn get_mut(&self, handle: RawHandle) -> Option<&mut T> {
         self.arena().get_mut(handle)
     }
 
+    #[inline]
     pub fn get_mut_owned(&self, handle: RawHandle, owner: u16) -> Option<&mut T> {
         self.arena().get_mut_owned(handle, owner)
     }
 
-    pub fn alloc(&self, value: T, owner: u16, priority: i8) -> Option<RawHandle> {
+    #[inline]
+    pub fn alloc(&self, value: T, owner: u16, priority: i8) -> Result<RawHandle, AllocError> {
         self.arena().alloc(value, owner, priority)
     }
 
+    #[inline]
     pub fn remove(&self, handle: RawHandle) -> Option<T> {
         self.arena().remove(handle)
     }
 
+    #[inline]
     pub fn remove_owned(&self, handle: RawHandle, owner: u16) -> Option<T> {
         self.arena().remove_owned(handle, owner)
     }
 
+    #[inline]
     pub fn remove_by_owner(&self, task_index: u16) {
         self.arena().remove_by_owner(task_index);
     }
 
+    #[inline]
     pub fn clone_handle(
         &self,
         handle: RawHandle,
@@ -532,26 +590,141 @@ impl<T, const N: usize> SharedArena<T, N> {
         new_owner: u16,
         priority: i8,
     ) -> Result<RawHandle, CloneError> {
-        self.arena().clone_handle(handle, owner, new_owner, priority)
+        self.arena()
+            .clone_handle(handle, owner, new_owner, priority)
     }
 
+    #[inline]
     pub fn prepare_transfer(&self, handle: RawHandle, owner: u16, target: u16) -> bool {
         self.arena().prepare_transfer(handle, owner, target)
     }
 
+    #[inline]
     pub fn cancel_transfer(&self, handle: RawHandle, owner: u16) -> bool {
         self.arena().cancel_transfer(handle, owner)
     }
 
+    #[inline]
     pub fn acquire(&self, handle: RawHandle, acquirer: u16, new_priority: i8) -> bool {
         self.arena().acquire(handle, acquirer, new_priority)
     }
 
+    #[inline]
     pub fn try_drop(&self, handle: RawHandle, owner: u16) -> bool {
         self.arena().try_drop(handle, owner)
     }
 
+    #[inline]
     pub fn cancel_transfers_to(&self, target: u16) {
         self.arena().cancel_transfers_to(target);
+    }
+
+    /// Handle implicit protocol methods (destroy, clone, 2PC transfer).
+    ///
+    /// Returns `None` if `method_id` was an implicit method and was handled
+    /// (reply consumed). Returns `Some(reply)` if `method_id` is a
+    /// user-defined method (caller should dispatch it).
+    pub fn dispatch_implicit(
+        &self,
+        method_id: u8,
+        msg: &crate::dispatch::MessageData<'_>,
+        reply: crate::dispatch::PendingReply,
+        sender_index: u16,
+        priority_fn: fn(u16) -> i8,
+    ) -> Option<crate::dispatch::PendingReply> {
+        use crate::handle::*;
+
+        match method_id {
+            IMPLICIT_DESTROY_METHOD => {
+                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                let _ = self.remove_owned(handle, sender_index);
+                reply.reply_ok(&[]);
+                None
+            }
+            CLONE_METHOD => {
+                let Some((handle, rest)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                let Some((new_owner, _)) = crate::wire::read::<u16>(rest) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                let new_owner_priority = priority_fn(new_owner);
+                match self.clone_handle(handle, sender_index, new_owner, new_owner_priority) {
+                    Ok(new_handle) => {
+                        let mut buf = [0u8; 1 + RawHandle::SIZE];
+                        buf[0] = 0; // Ok
+                        crate::wire::write(&mut buf[1..], &new_handle);
+                        reply.reply_ok(&buf);
+                    }
+                    Err(CloneError::InvalidHandle) => {
+                        let mut buf = [0u8; 2];
+                        buf[0] = 1; // Err
+                        buf[1] = crate::Error::HandleLost as u8;
+                        reply.reply_ok(&buf);
+                    }
+                    Err(CloneError::ArenaFull) => {
+                        let mut buf = [0u8; 2];
+                        buf[0] = 1; // Err
+                        buf[1] = crate::Error::ArenaFull as u8;
+                        reply.reply_ok(&buf);
+                    }
+                    Err(CloneError::ServerDied) => unreachable!(),
+                };
+                None
+            }
+            PREPARE_TRANSFER_METHOD => {
+                let Some((handle, rest)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                let Some((target, _)) = crate::wire::read::<u16>(rest) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                if self.prepare_transfer(handle, sender_index, target) {
+                    reply.reply_ok(&[0u8]); // Ok(())
+                } else {
+                    reply.reply_ok(&[1u8, crate::Error::HandleLost as u8]); // Err
+                }
+                None
+            }
+            CANCEL_TRANSFER_METHOD => {
+                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                let _ = self.cancel_transfer(handle, sender_index);
+                reply.reply_ok(&[]);
+                None
+            }
+            ACQUIRE_METHOD => {
+                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                let __priority = priority_fn(sender_index);
+                if self.acquire(handle, sender_index, __priority) {
+                    reply.reply_ok(&[0u8]); // Ok(())
+                } else {
+                    reply.reply_ok(&[1u8, crate::Error::TransferFailed as u8]); // Err
+                }
+                None
+            }
+            TRY_DROP_METHOD => {
+                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                    return None;
+                };
+                let _ = self.try_drop(handle, sender_index);
+                reply.reply_ok(&[]);
+                None
+            }
+            _ => Some(reply),
+        }
     }
 }

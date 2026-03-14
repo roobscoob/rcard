@@ -1,15 +1,25 @@
+#![allow(clippy::unwrap_used)]
+
 use std::io::Write;
 use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let project_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
+
+    let project_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
     let json_path = project_root.join(".work").join("app.partitions.json");
 
     println!("cargo::rerun-if-changed={}", json_path.display());
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let out_path = out_dir.join("partition_names.rs");
+
     let mut out = std::fs::File::create(&out_path).unwrap();
 
     if !json_path.exists() {

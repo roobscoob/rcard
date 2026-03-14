@@ -1,22 +1,13 @@
-use hubpack::SerializedSize;
 use ipc::Meta;
 use once_cell::GlobalState;
 use rcard_log::{LogLevel, LogMetadata};
 use sysmodule_log_api::LogError;
 
-use crate::ringbuf::{pack_time, LogRing};
-use crate::{generated, usart_write, Reactor, Time};
-
-fn get_packed_time() -> u64 {
-    Time::get_time()
-        .ok()
-        .flatten()
-        .map(|dt| pack_time(&dt))
-        .unwrap_or(0)
-}
+use crate::ringbuf::LogRing;
+use crate::{generated, usart_write, Reactor};
 
 fn get_timestamp() -> u64 {
-    get_packed_time()
+    userlib::sys_get_timer().now
 }
 
 fn notify_logs(level: LogLevel) {
@@ -58,37 +49,12 @@ fn send_frame(stream_id: u64, data: &[u8]) {
     }
 }
 
-/// Build and send LogMetadata + data as framed output.
-fn send_log_framed(
-    stream_id: u64,
-    level: LogLevel,
-    species: u64,
-    source: u16,
-    generation: u16,
-    log_id: u64,
-    data_fn: impl FnOnce(&mut [u8]) -> usize,
-) {
-    let metadata = LogMetadata {
-        level,
-        timestamp: get_timestamp(),
-        source,
-        generation,
-        log_id,
-        log_species: species,
-    };
-
-    let mut buf = [0u8; LogMetadata::MAX_SIZE + MAX_INLINE_LOG_SIZE];
-    let meta_len = hubpack::serialize(&mut buf, &metadata).unwrap_or(0);
-    let data_len = data_fn(&mut buf[meta_len..]);
-
-    send_frame(stream_id, &buf[..meta_len + data_len]);
-}
-
 // --- Log state ---
 
 struct LogState {
     ring: LogRing,
     next_stream_id: u64,
+    next_log_id: u64,
 }
 
 impl LogState {
@@ -96,12 +62,19 @@ impl LogState {
         Self {
             ring: LogRing::new(),
             next_stream_id: 1,
+            next_log_id: 1,
         }
     }
 
     fn alloc_stream_id(&mut self) -> u64 {
         let id = self.next_stream_id;
         self.next_stream_id = self.next_stream_id.wrapping_add(1);
+        id
+    }
+
+    fn alloc_log_id(&mut self) -> u64 {
+        let id = self.next_log_id;
+        self.next_log_id = self.next_log_id.wrapping_add(1);
         id
     }
 }
@@ -111,11 +84,9 @@ static LOG_STATE: GlobalState<LogState> = GlobalState::new(LogState::new());
 // --- LogResource ---
 
 pub struct LogResource {
-    ring_id: u32,
+    metadata: LogMetadata,
     stream_id: u64,
-    level: LogLevel,
-    idx: usize,
-    task_index: usize,
+    idx: u8,
 }
 
 impl sysmodule_log_api::Log for LogResource {
@@ -126,91 +97,84 @@ impl sysmodule_log_api::Log for LogResource {
         data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) {
         let task_index = meta.sender.task_index() as usize;
-        let generation = 0u16;
 
         LOG_STATE.with(|s| {
             let stream_id = s.alloc_stream_id();
-            let ring_id = s.ring.alloc_id();
+            let log_id = s.alloc_log_id();
 
-            send_log_framed(
-                stream_id,
+            let metadata = LogMetadata {
                 level,
-                species,
-                task_index as u16,
-                generation,
-                ring_id as u64,
-                |buf| {
-                    let len = data.len().min(buf.len());
-                    let _ = data.read_range(0, &mut buf[..len]);
-                    len
-                },
-            );
+                timestamp: get_timestamp(),
+                source: task_index as u16,
+                generation: 0,
+                log_id,
+                log_species: species,
+            };
 
-            let mut ring_buf = [0u8; MAX_INLINE_LOG_SIZE];
-            let len = data.len().min(ring_buf.len());
-            let _ = data.read_range(0, &mut ring_buf[..len]);
-            let time = get_packed_time();
-            s.ring.push(ring_id, level, task_index as u16, &ring_buf[..len], 0, time);
+            // Send over USART
+            const META_SIZE: usize = core::mem::size_of::<LogMetadata>();
+            let mut buf = [0u8; META_SIZE + MAX_INLINE_LOG_SIZE];
+            let meta_bytes = zerocopy::IntoBytes::as_bytes(&metadata);
+            buf[..META_SIZE].copy_from_slice(meta_bytes);
+            let meta_len = META_SIZE;
+            let data_len = data.len().min(buf.len() - meta_len);
+            let _ = data.read_range(0, &mut buf[meta_len..meta_len + data_len]);
+            send_frame(stream_id, &buf[..meta_len + data_len]);
+
+            // Push to ring
+            s.ring.push(log_id, 0, &buf[..meta_len + data_len]);
         });
         notify_logs(level);
     }
 
     fn start(meta: Meta, level: LogLevel, species: u64) -> Option<Self> {
         let task_index = meta.sender.task_index() as usize;
-        let generation = 0u16;
 
-        LOG_STATE.with(|s| {
-            let stream_id = s.alloc_stream_id();
-            let ring_id = s.ring.alloc_id();
+        LOG_STATE
+            .with(|s| {
+                let stream_id = s.alloc_stream_id();
+                let log_id = s.alloc_log_id();
 
-            // Send metadata frame (data arrives via write())
-            send_log_framed(
-                stream_id,
-                level,
-                species,
-                task_index as u16,
-                generation,
-                ring_id as u64,
-                |_| 0,
-            );
+                let metadata = LogMetadata {
+                    level,
+                    timestamp: get_timestamp(),
+                    source: task_index as u16,
+                    generation: 0,
+                    log_id,
+                    log_species: species,
+                };
 
-            Some(LogResource {
-                ring_id,
-                stream_id,
-                level,
-                idx: 0,
-                task_index,
+                // Send metadata frame over USART (data arrives via write())
+                let meta_bytes = zerocopy::IntoBytes::as_bytes(&metadata);
+                send_frame(stream_id, meta_bytes);
+
+                // Push fragment 0 with LogMetadata
+                s.ring.push(log_id, 0, meta_bytes);
+
+                Some(LogResource {
+                    metadata,
+                    stream_id,
+                    idx: 1,
+                })
             })
-        })
+            .unwrap()
     }
 
-    fn write(
-        &mut self,
-        _meta: Meta,
-        data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
-    ) {
+    fn write(&mut self, _meta: Meta, data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>) {
         let mut buf = [0u8; MAX_INLINE_LOG_SIZE];
         let len = data.len().min(buf.len());
         let _ = data.read_range(0, &mut buf[..len]);
         send_frame(self.stream_id, &buf[..len]);
 
         LOG_STATE.with(|s| {
-            let time = get_packed_time();
-            s.ring.push(
-                self.ring_id,
-                self.level,
-                self.task_index as u16,
-                &buf[..len],
-                self.idx,
-                time,
-            );
-            self.idx += 1;
+            s.ring.push(self.metadata.log_id, self.idx, &buf[..len]);
+            self.idx = self.idx.saturating_add(1);
         });
     }
 
     fn consume_since(
         meta: Meta,
-        since_id: u32,
+        since_id: u64,
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> Result<u32, LogError> {
         let caller = meta.sender.task_index();
@@ -218,56 +182,49 @@ impl sysmodule_log_api::Log for LogResource {
             return Err(LogError::Unauthorized);
         }
 
-        const HEADER_SIZE: usize = 19;
+        const HEADER_SIZE: usize = 10;
         let buf_len = buf.len();
 
-        let offset = LOG_STATE.with(|s| {
-            let mut offset = 0usize;
+        let offset = LOG_STATE
+            .with(|s| {
+                let mut offset = 0usize;
 
-            for chunk in s.ring.iter_since(since_id) {
-                let data_len = chunk.data.0.len() + chunk.data.1.len();
-                let entry_size = HEADER_SIZE + data_len;
-                if offset + entry_size > buf_len {
-                    break;
+                for chunk in s.ring.iter_since(since_id) {
+                    let data_len = chunk.data.0.len() + chunk.data.1.len();
+                    let entry_size = HEADER_SIZE + data_len;
+                    if offset + entry_size > buf_len {
+                        break;
+                    }
+
+                    let id_bytes = chunk.id.to_le_bytes();
+                    let header = [
+                        id_bytes[0],
+                        id_bytes[1],
+                        id_bytes[2],
+                        id_bytes[3],
+                        id_bytes[4],
+                        id_bytes[5],
+                        id_bytes[6],
+                        id_bytes[7],
+                        data_len as u8,
+                        chunk.idx,
+                    ];
+                    let _ = buf.write_range(offset, &header);
+                    offset += HEADER_SIZE;
+
+                    if !chunk.data.0.is_empty() {
+                        let _ = buf.write_range(offset, chunk.data.0);
+                        offset += chunk.data.0.len();
+                    }
+                    if !chunk.data.1.is_empty() {
+                        let _ = buf.write_range(offset, chunk.data.1);
+                        offset += chunk.data.1.len();
+                    }
                 }
 
-                let time_bytes = chunk.time.to_le_bytes();
-                let header = [
-                    (chunk.id & 0xFF) as u8,
-                    ((chunk.id >> 8) & 0xFF) as u8,
-                    ((chunk.id >> 16) & 0xFF) as u8,
-                    ((chunk.id >> 24) & 0xFF) as u8,
-                    chunk.level as u8,
-                    (chunk.task & 0xFF) as u8,
-                    ((chunk.task >> 8) & 0xFF) as u8,
-                    (chunk.idx & 0xFF) as u8,
-                    ((chunk.idx >> 8) & 0xFF) as u8,
-                    time_bytes[0],
-                    time_bytes[1],
-                    time_bytes[2],
-                    time_bytes[3],
-                    time_bytes[4],
-                    time_bytes[5],
-                    time_bytes[6],
-                    time_bytes[7],
-                    (data_len & 0xFF) as u8,
-                    ((data_len >> 8) & 0xFF) as u8,
-                ];
-                let _ = buf.write_range(offset, &header);
-                offset += HEADER_SIZE;
-
-                if !chunk.data.0.is_empty() {
-                    let _ = buf.write_range(offset, chunk.data.0);
-                    offset += chunk.data.0.len();
-                }
-                if !chunk.data.1.is_empty() {
-                    let _ = buf.write_range(offset, chunk.data.1);
-                    offset += chunk.data.1.len();
-                }
-            }
-
-            offset
-        });
+                offset
+            })
+            .unwrap();
 
         Ok(offset as u32)
     }

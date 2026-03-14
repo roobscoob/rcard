@@ -68,7 +68,7 @@ task "idle" {
     features "insomniac"
 }
 
-task "super" {
+task "supervisor" {
     supervisor
     workspace-crate "supervisor"
     priority (workgroup)"kernel"
@@ -98,7 +98,6 @@ task "sysmodule_log" {
     stack-size (KiB)4
     priority (workgroup)"core-sysmodule"
     uses-sysmodule "usart" { with-priority 0; }
-    uses-sysmodule "time" { with-priority 0; }
     uses-sysmodule "reactor" { with-priority 0; }
     pushes-notification "logs"
 }
@@ -145,7 +144,7 @@ task "sysmodule_storage" {
 
 task "sysmodule_log_sink_storage" {
     workspace-crate "sysmodule_log_sink_storage"
-    stack-size (KiB)4
+    stack-size (KiB)8
     priority (workgroup)"sysmodule"
     uses-sysmodule "log" { with-priority 0; }
     uses-partition "logs"

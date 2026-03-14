@@ -96,11 +96,11 @@ checksum = "46afbd2983a5d5a7bd740ccb198caf5b82f45c40c09c0eed36052d91cb92e719"
 
 [[package]]
 name = "bitflags"
-version = "2.11.0"
+version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+checksum = "5c8214115b7bf84099f1309324e63141d4c5d7cc26862f97a0a857dbefe165bd"
 dependencies = [
- "serde_core",
+ "serde",
 ]
 
 [[package]]
@@ -292,27 +292,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hubpack"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61a0b84aeae519f65e0ba3aa998327080993426024edbd5cc38dbaf5ec524303"
-dependencies = [
- "hubpack_derive",
- "serde",
-]
-
-[[package]]
-name = "hubpack_derive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f928320aff16ee8818ef7309180f8b5897057fd79d9dcb8de3ed1ba6dcc125a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
 name = "hubris-task-slots"
 version = "0.1.0"
 source = "git+https://github.com/cbiffle/exhubris?rev=69d2f5ca8017fc3aaf692eae9455ac9fcd883173#69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
@@ -362,10 +341,9 @@ dependencies = [
 name = "ipc"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc-macros",
- "serde",
+ "rcard-log",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -601,9 +579,9 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 name = "rcard-log"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "rcard-log-macros",
- "serde",
+ "userlib",
+ "zerocopy 0.8.40",
 ]
 
 [[package]]
@@ -673,6 +651,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
 name = "semver"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -689,28 +673,18 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "serde"
-version = "1.0.228"
+version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
-dependencies = [
- "serde_core",
- "serde_derive",
-]
-
-[[package]]
-name = "serde_core"
-version = "1.0.228"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.228"
+version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+checksum = "5b0276cf7f2c73365f7157c8123c21cd9a50fbbd844757af28ca1f5925fc2a00"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -719,15 +693,14 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.140"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "20068b6e96dc6c9bd23e01df8827e6c7e1f2fddd43c21810382803c136b99373"
 dependencies = [
  "itoa",
  "memchr",
+ "ryu",
  "serde",
- "serde_core",
- "zmij",
 ]
 
 [[package]]
@@ -775,10 +748,8 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "storage_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -817,11 +788,12 @@ dependencies = [
 name = "sysmodule_compositor"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "hubris-task-slots",
  "idyll_runtime",
  "ipc",
  "ipc-macros",
+ "rcard-log",
+ "rcard-log-macros",
  "sysmodule_compositor_api",
  "sysmodule_display_api",
  "sysmodule_log_api",
@@ -832,10 +804,8 @@ dependencies = [
 name = "sysmodule_compositor_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -844,10 +814,11 @@ dependencies = [
 name = "sysmodule_display"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "hubris-task-slots",
  "idyll_runtime",
  "ipc",
+ "rcard-log",
+ "rcard-log-macros",
  "sysmodule_display_api",
  "sysmodule_log_api",
  "userlib",
@@ -857,10 +828,10 @@ dependencies = [
 name = "sysmodule_display_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
+ "rcard-log",
+ "rcard-log-macros",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -869,12 +840,13 @@ dependencies = [
 name = "sysmodule_fs"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "hubris-task-slots",
  "idyll_runtime",
  "ipc",
  "littlefs2-sys",
  "once-cell",
+ "rcard-log",
+ "rcard-log-macros",
  "serde_json",
  "storage_api",
  "sysmodule_fs_api",
@@ -887,10 +859,8 @@ dependencies = [
 name = "sysmodule_fs_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
  "storage_api",
  "userlib",
  "zerocopy 0.8.40",
@@ -900,7 +870,6 @@ dependencies = [
 name = "sysmodule_log"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "hubris-task-slots",
  "idyll_runtime",
  "ipc",
@@ -909,20 +878,19 @@ dependencies = [
  "serde_json",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
- "sysmodule_time_api",
  "sysmodule_usart_api",
  "userlib",
+ "zerocopy 0.8.40",
 ]
 
 [[package]]
 name = "sysmodule_log_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
  "rcard-log",
- "serde",
+ "rcard-log-macros",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -935,6 +903,8 @@ dependencies = [
  "idyll_runtime",
  "ipc",
  "once-cell",
+ "rcard-log",
+ "rcard-log-macros",
  "serde_json",
  "storage_api",
  "sysmodule_log_api",
@@ -948,7 +918,6 @@ name = "sysmodule_reactor"
 version = "0.1.0"
 dependencies = [
  "heapless",
- "hubpack",
  "idyll_runtime",
  "ipc",
  "serde_json",
@@ -960,10 +929,8 @@ dependencies = [
 name = "sysmodule_reactor_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -972,10 +939,11 @@ dependencies = [
 name = "sysmodule_sdmmc"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "hubris-task-slots",
  "idyll_runtime",
  "ipc",
+ "rcard-log",
+ "rcard-log-macros",
  "sf32lb52-pac",
  "sysmodule_log_api",
  "sysmodule_sdmmc_api",
@@ -986,10 +954,9 @@ dependencies = [
 name = "sysmodule_sdmmc_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
+ "rcard-log",
  "storage_api",
  "userlib",
  "zerocopy 0.8.40",
@@ -999,11 +966,12 @@ dependencies = [
 name = "sysmodule_storage"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "hubris-task-slots",
  "idyll_runtime",
  "ipc",
  "once-cell",
+ "rcard-log",
+ "rcard-log-macros",
  "serde_json",
  "storage_api",
  "sysmodule_log_api",
@@ -1016,10 +984,9 @@ dependencies = [
 name = "sysmodule_storage_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
+ "rcard-log",
  "serde_json",
  "storage_api",
  "userlib",
@@ -1030,7 +997,6 @@ dependencies = [
 name = "sysmodule_time"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
  "sysmodule_time_api",
@@ -1041,10 +1007,8 @@ dependencies = [
 name = "sysmodule_time_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -1053,7 +1017,6 @@ dependencies = [
 name = "sysmodule_usart"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
  "sf32lb52-pac",
@@ -1065,10 +1028,8 @@ dependencies = [
 name = "sysmodule_usart_api"
 version = "0.1.0"
 dependencies = [
- "hubpack",
  "idyll_runtime",
  "ipc",
- "serde",
  "userlib",
  "zerocopy 0.8.40",
 ]
@@ -1214,9 +1175,3 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
-
-[[package]]
-name = "zmij"
-version = "1.0.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"

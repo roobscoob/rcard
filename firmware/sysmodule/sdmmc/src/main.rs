@@ -10,6 +10,7 @@ use hubris_task_slots::SLOTS;
 use sysmodule_sdmmc_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
+rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 
 static SDMMC_OPEN: AtomicBool = AtomicBool::new(false);
@@ -87,6 +88,7 @@ struct CardInfo {
     block_count: u32,
 }
 
+#[cold]
 fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     let r = regs();
 
@@ -110,8 +112,7 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     let _ = send_cmd(0, 0, false, false);
 
     // CMD8: SEND_IF_COND — voltage check (pattern 0xAA)
-    let (_idx, r1) = send_cmd(8, 0x1AA, true, false)
-        .map_err(|_| SdmmcOpenError::InitFailed)?;
+    let (_idx, r1) = send_cmd(8, 0x1AA, true, false).map_err(|_| SdmmcOpenError::InitFailed)?;
     if (r1 & 0xFFF) != 0x1AA {
         return Err(SdmmcOpenError::InitFailed);
     }
@@ -121,8 +122,8 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     // Current implementation polls without delay, which may fail on slow cards.
     let mut tries = 0u32;
     loop {
-        let (_idx, ocr) = send_acmd(0, 41, 0x40FF_8000, true)
-            .map_err(|_| SdmmcOpenError::InitFailed)?;
+        let (_idx, ocr) =
+            send_acmd(0, 41, 0x40FF_8000, true).map_err(|_| SdmmcOpenError::InitFailed)?;
         if ocr & (1 << 31) != 0 {
             break;
         }
@@ -133,29 +134,24 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     }
 
     // CMD2: ALL_SEND_CID (long response)
-    send_cmd(2, 0, true, true)
-        .map_err(|_| SdmmcOpenError::InitFailed)?;
+    send_cmd(2, 0, true, true).map_err(|_| SdmmcOpenError::InitFailed)?;
 
     // CMD3: SEND_RELATIVE_ADDR — get RCA
-    let (_idx, r6) = send_cmd(3, 0, true, false)
-        .map_err(|_| SdmmcOpenError::InitFailed)?;
+    let (_idx, r6) = send_cmd(3, 0, true, false).map_err(|_| SdmmcOpenError::InitFailed)?;
     let rca = (r6 >> 16) as u16;
 
     // CMD9: SEND_CSD — read card capacity (long response)
-    send_cmd(9, (rca as u32) << 16, true, true)
-        .map_err(|_| SdmmcOpenError::InitFailed)?;
+    send_cmd(9, (rca as u32) << 16, true, true).map_err(|_| SdmmcOpenError::InitFailed)?;
     let rar2 = regs().rar2().read().bits();
     // SDHC CSD v2: C_SIZE in RAR2[29:8] (22 bits)
     let c_size = (rar2 >> 8) & 0x3F_FFFF;
     let block_count = (c_size + 1) * 1024;
 
     // CMD7: SELECT_CARD
-    send_cmd(7, (rca as u32) << 16, true, false)
-        .map_err(|_| SdmmcOpenError::InitFailed)?;
+    send_cmd(7, (rca as u32) << 16, true, false).map_err(|_| SdmmcOpenError::InitFailed)?;
 
     // ACMD6: SET_BUS_WIDTH to 4-bit
-    send_acmd(rca, 6, 2, true)
-        .map_err(|_| SdmmcOpenError::InitFailed)?;
+    send_acmd(rca, 6, 2, true).map_err(|_| SdmmcOpenError::InitFailed)?;
 
     // Switch DCR to 4-wire mode
     r.dcr().modify(|_, w| unsafe { w.wire_mode().bits(1) });
@@ -232,10 +228,10 @@ fn write_block_hw(block_addr: u32, buf: &[u8; 512]) -> Result<(), SdmmcError> {
 
     // Write 128 words to FIFO
     for i in (0..512).step_by(4) {
-        let word = buf[i] as u32
-            | (buf[i + 1] as u32) << 8
-            | (buf[i + 2] as u32) << 16
-            | (buf[i + 3] as u32) << 24;
+        let word = (buf[i] as u32)
+            | ((buf[i + 1] as u32) << 8)
+            | ((buf[i + 2] as u32) << 16)
+            | ((buf[i + 3] as u32) << 24);
         r.fifo().write(|w| unsafe { w.bits(word) });
     }
 
@@ -275,23 +271,21 @@ impl Sdmmc for SdmmcResource {
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> Result<(), BlockError> {
         if block >= self.block_count {
-            return Err(BlockError::OutOfRange);
+            return Err(BlockError::out_of_range());
         }
 
         // Caller must provide a full block buffer.
         if buf.len() < 512 {
-            return Err(BlockError::Device(0xFFFF));
+            return Err(BlockError::device(0xFFFF));
         }
 
         let mut tmp = [0u8; 512];
         match read_block_hw(block, &mut tmp) {
             Ok(()) => {
-                for i in 0..512 {
-                    let _ = buf.write(i, tmp[i]);
-                }
+                buf.write_range(0, &tmp);
                 Ok(())
             }
-            Err(e) => Err(BlockError::Device(e as u16)),
+            Err(e) => Err(BlockError::device(e as u16)),
         }
     }
 
@@ -302,21 +296,19 @@ impl Sdmmc for SdmmcResource {
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<(), BlockError> {
         if block >= self.block_count {
-            return Err(BlockError::OutOfRange);
+            return Err(BlockError::out_of_range());
         }
 
         // Caller must provide a full block buffer.
         if buf.len() < 512 {
-            return Err(BlockError::Device(0xFFFF));
+            return Err(BlockError::device(0xFFFF));
         }
 
         let mut tmp = [0u8; 512];
-        for i in 0..512 {
-            tmp[i] = buf.read(i).unwrap_or(0);
-        }
+        buf.read_range(0, &mut tmp);
         match write_block_hw(block, &tmp) {
             Ok(()) => Ok(()),
-            Err(e) => Err(BlockError::Device(e as u16)),
+            Err(e) => Err(BlockError::device(e as u16)),
         }
     }
 
@@ -333,6 +325,7 @@ impl Drop for SdmmcResource {
 
 #[export_name = "main"]
 fn main() -> ! {
+    rcard_log::info!("Awake");
     ipc::server! {
         Sdmmc: SdmmcResource,
     }

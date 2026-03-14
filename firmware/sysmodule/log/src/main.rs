@@ -1,16 +1,15 @@
 #![no_std]
 #![no_main]
+#![allow(clippy::unwrap_used)]
 
 use hubris_task_slots::SLOTS;
 use once_cell::OnceCell;
 use sysmodule_log_api::*;
 
-mod fmt;
 mod ringbuf;
 mod server;
 
 sysmodule_usart_api::bind_usart!(Usart = SLOTS.sysmodule_usart);
-sysmodule_time_api::bind_time!(Time = SLOTS.sysmodule_time);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
 #[allow(dead_code)]
@@ -38,12 +37,11 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
                 Ok(())
             }
         }
-        usart_write(b"\r\n\r\n");
-        fmt::write_prefix_to(LogLevel::Panic, "sysmodule_log", |d| usart_write(d));
+        usart_write(b"\r\n\r\n[PANIC sysmodule_log] ");
         let _ = write!(PanicWriter, "{}", info);
         usart_write(b"\r\n");
     }
-    ipc::notify_dead!(Time, Reactor);
+    ipc::notify_dead!(Reactor);
     userlib::sys_panic(b"log panic")
 }
 

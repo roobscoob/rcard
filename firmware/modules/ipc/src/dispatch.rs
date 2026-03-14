@@ -58,7 +58,7 @@ pub struct LeaseBorrow<'msg, A: Access> {
     _life: PhantomData<&'msg ()>,
 }
 
-impl<'msg, A: Access> LeaseBorrow<'msg, A> {
+impl<A: Access> LeaseBorrow<'_, A> {
     /// Number of bytes in this lease.
     #[inline]
     pub fn len(&self) -> usize {
@@ -72,17 +72,13 @@ impl<'msg, A: Access> LeaseBorrow<'msg, A> {
     }
 }
 
-impl<'msg> LeaseBorrow<'msg, Read> {
+impl LeaseBorrow<'_, Read> {
     /// Read a single byte at `index`.
     #[inline]
     pub fn read(&self, index: usize) -> Option<u8> {
         let mut buf = [0u8; 1];
         let n = kern::sys_borrow_read(self.sender, self.index, index, &mut buf)?;
-        if n >= 1 {
-            Some(buf[0])
-        } else {
-            None
-        }
+        if n >= 1 { Some(buf[0]) } else { None }
     }
 
     /// Read a contiguous range starting at `offset` into `dest`.
@@ -92,17 +88,13 @@ impl<'msg> LeaseBorrow<'msg, Read> {
     }
 }
 
-impl<'msg> LeaseBorrow<'msg, Write> {
+impl LeaseBorrow<'_, Write> {
     /// Read a single byte at `index` (write leases may also be readable).
     #[inline]
     pub fn read(&self, index: usize) -> Option<u8> {
         let mut buf = [0u8; 1];
         let n = kern::sys_borrow_read(self.sender, self.index, index, &mut buf)?;
-        if n >= 1 {
-            Some(buf[0])
-        } else {
-            None
-        }
+        if n >= 1 { Some(buf[0]) } else { None }
     }
 
     /// Read a contiguous range (write leases may also be readable).
@@ -155,16 +147,11 @@ impl PendingReply {
         self.replied = true;
     }
 
-    /// Serialize `value` with hubpack and reply with SUCCESS.
+    /// Reply with a zerocopy-serializable value and SUCCESS.
     #[inline]
-    pub fn reply_serialize<T: hubpack::SerializedSize + serde::Serialize>(
-        mut self,
-        value: &T,
-    ) {
-        let mut buf = [0u8; crate::HUBRIS_MESSAGE_SIZE_LIMIT];
-        let n = hubpack::serialize(&mut buf, value)
-            .expect("ipc: reply serialization failed");
-        kern::sys_reply(self.sender, kern::ResponseCode::SUCCESS, &buf[..n]);
+    pub fn reply_val<T: zerocopy::IntoBytes + zerocopy::Immutable>(mut self, value: &T) {
+        let bytes = zerocopy::IntoBytes::as_bytes(value);
+        kern::sys_reply(self.sender, kern::ResponseCode::SUCCESS, bytes);
         self.replied = true;
     }
 
@@ -196,27 +183,32 @@ pub struct MessageData<'buf> {
     lease_count: usize,
 }
 
-impl<'buf> MessageData<'buf> {
-    /// Deserialize arguments from the message payload.
-    #[inline]
-    pub fn decode_args<T: serde::de::DeserializeOwned + hubpack::SerializedSize>(
+impl MessageData<'_> {
+    /// Deserialize arguments from the message payload via zerocopy.
+    ///
+    /// Reads a `T` from the front of the payload, returning it and the
+    /// remaining bytes (for sequential multi-arg decoding in codegen).
+    pub fn read_arg<T: zerocopy::TryFromBytes + zerocopy::KnownLayout + zerocopy::Immutable>(
         &self,
     ) -> Result<T, kern::ReplyFaultReason> {
-        hubpack::deserialize::<T>(self.data)
+        crate::wire::read::<T>(self.data)
             .map(|(val, _)| val)
-            .map_err(|_| kern::ReplyFaultReason::BadMessageContents)
+            .ok_or(kern::ReplyFaultReason::BadMessageContents)
     }
 
     /// Extract a lease with the given access mode.
     ///
     /// Returns `Err(BadLeases)` if the index is out of bounds or the
     /// lease doesn't have the required permissions.
-    pub fn lease<A: Access>(&self, index: usize) -> Result<LeaseBorrow<'_, A>, kern::ReplyFaultReason> {
+    pub fn lease<A: Access>(
+        &self,
+        index: usize,
+    ) -> Result<LeaseBorrow<'_, A>, kern::ReplyFaultReason> {
         if index >= self.lease_count {
             return Err(kern::ReplyFaultReason::BadLeases);
         }
-        let info = kern::sys_borrow_info(self.sender, index)
-            .ok_or(kern::ReplyFaultReason::BadLeases)?;
+        let info =
+            kern::sys_borrow_info(self.sender, index).ok_or(kern::ReplyFaultReason::BadLeases)?;
         if !A::check(info.atts) {
             return Err(kern::ReplyFaultReason::BadLeases);
         }
@@ -275,7 +267,9 @@ impl<'buf> MessageData<'buf> {
 ///
 /// This is `pub(crate)` — only the server dispatch loop calls it.
 /// Codegen and user code cannot construct these directly.
-pub(crate) fn split_message<'buf>(msg: &kern::Message<'buf>) -> Result<(MessageData<'buf>, PendingReply), kern::ReplyFaultReason> {
+pub(crate) fn split_message<'buf>(
+    msg: &kern::Message<'buf>,
+) -> Result<(MessageData<'buf>, PendingReply), kern::ReplyFaultReason> {
     let data = match &msg.data {
         Ok(d) => *d,
         Err(_) => return Err(kern::ReplyFaultReason::BadMessageSize),

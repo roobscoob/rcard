@@ -1,5 +1,6 @@
 //! FileSystem resource implementation.
 
+use rcard_log::OptionExt;
 use sysmodule_fs_api::{FileSystem, FileSystemError, FileSystemStats};
 
 use crate::state;
@@ -15,11 +16,7 @@ impl FileSystem for FileSystemResource {
         Ok(FileSystemResource { fs_id })
     }
 
-    fn lookup(
-        _meta: ipc::Meta,
-        _registry: ipc::RawHandle,
-        _name: [u8; 16],
-    ) -> Option<Self> {
+    fn lookup(_meta: ipc::Meta, _registry: ipc::RawHandle, _name: [u8; 16]) -> Option<Self> {
         // TODO: look up a previously-mounted filesystem by name via the registry.
         None
     }
@@ -32,7 +29,10 @@ impl FileSystem for FileSystemResource {
 
     fn stat(&mut self, _meta: ipc::Meta) -> FileSystemStats {
         state::with_state(|s| {
-            let fs = s.fs_table.get(self.fs_id).expect("fs: stat on invalid fs_id");
+            let fs = s
+                .fs_table
+                .get(self.fs_id)
+                .log_expect("fs: stat on invalid fs_id");
             let used = unsafe { littlefs2_sys::lfs_fs_size(fs.lfs_ptr()) };
             let used_blocks = if used >= 0 { used as u32 } else { 0 };
             FileSystemStats {
@@ -56,8 +56,8 @@ pub fn lease_to_cstr(
     buf: &mut [u8; 64],
 ) -> usize {
     let len = lease.len().min(63);
-    for i in 0..len {
-        buf[i] = lease.read(i).unwrap_or(0);
+    for (i, byte) in buf.iter_mut().enumerate().take(len) {
+        *byte = lease.read(i).unwrap_or(0);
     }
     buf[len] = 0;
     len

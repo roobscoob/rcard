@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 
-use hubpack::SerializedSize;
 use rcard_log::decoder::{Decoder, FeedResult};
 use rcard_log::{LogMetadata, OwnedValue};
+use zerocopy::TryFromBytes;
 
 use super::log::{LogStream, UsartLog, UsartLogKind};
 use super::UsartSink;
 
-const METADATA_SIZE: usize = LogMetadata::MAX_SIZE;
+const METADATA_SIZE: usize = core::mem::size_of::<LogMetadata>();
 
 pub struct StructuredSink {
     channel: u8,
@@ -51,7 +51,7 @@ impl StreamState {
             self.meta_pos += 1;
 
             if self.meta_pos == METADATA_SIZE {
-                let (metadata, _) = hubpack::deserialize::<LogMetadata>(&self.meta_buf)
+                let metadata = LogMetadata::try_read_from_bytes(&self.meta_buf)
                     .expect("failed to deserialize LogMetadata");
                 let (tx, rx) = mpsc::channel();
                 self.tx = Some(tx);

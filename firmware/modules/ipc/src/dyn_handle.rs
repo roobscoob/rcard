@@ -6,7 +6,12 @@ use crate::RawHandle;
 ///
 /// Used on the wire when passing `impl Trait` handle parameters. The recipient
 /// uses `server_id` + `kind` to route IPC calls to the correct server.
-#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Debug,
+    zerocopy::FromBytes, zerocopy::IntoBytes,
+    zerocopy::KnownLayout, zerocopy::Immutable,
+)]
+#[repr(C, packed)]
 pub struct DynHandle {
     /// Raw `TaskId` value (encodes both task index and generation).
     pub server_id: u16,
@@ -24,9 +29,4 @@ impl DynHandle {
     pub fn task_id(&self) -> crate::kern::TaskId {
         crate::kern::TaskId::from(self.server_id)
     }
-}
-
-impl hubpack::SerializedSize for DynHandle {
-    // 2 (server_id) + 1 (kind) + 8 (RawHandle) = 11 bytes
-    const MAX_SIZE: usize = 2 + 1 + RawHandle::MAX_SIZE;
 }

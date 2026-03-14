@@ -1,10 +1,19 @@
 #![no_std]
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum UsartOpenError {
-    ReservedUsart,
-    InvalidIndex,
-    AlreadyOpen,
+    ReservedUsart = 0,
+    InvalidIndex = 1,
+    AlreadyOpen = 2,
 }
 
 #[ipc::resource(arena_size = 3, kind = 0x01)]

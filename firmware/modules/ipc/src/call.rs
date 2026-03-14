@@ -40,11 +40,10 @@ impl<'a> IpcCall<'a> {
         }
     }
 
-    /// Serialize arguments into the call's payload buffer.
+    /// Write a zerocopy value into the argument buffer at the current offset.
     #[inline]
-    pub fn set_args<T: hubpack::SerializedSize + serde::Serialize>(&mut self, args: &T) {
-        self.arglen = hubpack::serialize(&mut self.argbuf, args)
-            .expect("ipc: argument serialization failed");
+    pub fn push_arg<T: zerocopy::IntoBytes + zerocopy::Immutable>(&mut self, val: &T) {
+        self.arglen += crate::wire::write(&mut self.argbuf[self.arglen..], val);
     }
 
     /// Set the payload from a pre-serialized byte slice.
@@ -78,43 +77,20 @@ impl<'a> IpcCall<'a> {
         self.lease_count += 1;
     }
 
-    /// Execute the IPC call and deserialize the response.
-    ///
-    /// Returns `Ok((response_code, deserialized_value))` on success,
-    /// or `Err(TaskDeath)` if the server died.
-    #[inline]
-    pub fn send<R: serde::de::DeserializeOwned + hubpack::SerializedSize>(
-        self,
-    ) -> Result<(kern::ResponseCode, R), kern::TaskDeath> {
-        let mut retbuf = [0u8; crate::HUBRIS_MESSAGE_SIZE_LIMIT];
-        let target = self.target;
-        let opcode = self.opcode;
-        let arglen = self.arglen;
-        let lease_count = self.lease_count;
-        let argbuf = self.argbuf;
-        let mut lease_arr = into_lease_array(self.leases);
-        let (rc, len) = kern::sys_send(
-            target,
-            opcode,
-            &argbuf[..arglen],
-            &mut retbuf,
-            &mut lease_arr[..lease_count],
-        )?;
-        let (value, _) = hubpack::deserialize::<R>(&retbuf[..len])
-            .unwrap_or_else(|_| panic!(
-                "ipc: server {:?} sent malformed reply ({} bytes)",
-                target, len,
-            ));
-        Ok((rc, value))
-    }
-
     /// Execute the IPC call, returning raw response bytes.
     ///
-    /// Used when the caller needs custom deserialization.
+    /// Codegen deserializes the response inline using zerocopy.
     #[inline]
     pub fn send_raw(
         self,
-    ) -> Result<(kern::ResponseCode, usize, [u8; crate::HUBRIS_MESSAGE_SIZE_LIMIT]), kern::TaskDeath> {
+    ) -> Result<
+        (
+            kern::ResponseCode,
+            usize,
+            [u8; crate::HUBRIS_MESSAGE_SIZE_LIMIT],
+        ),
+        kern::TaskDeath,
+    > {
         let mut retbuf = [0u8; crate::HUBRIS_MESSAGE_SIZE_LIMIT];
         let target = self.target;
         let opcode = self.opcode;
@@ -155,7 +131,7 @@ impl<'a> IpcCall<'a> {
     }
 }
 
-fn into_lease_array<'a>(leases: [Option<kern::Lease<'a>>; MAX_LEASES]) -> [kern::Lease<'a>; MAX_LEASES] {
+fn into_lease_array(leases: [Option<kern::Lease>; MAX_LEASES]) -> [kern::Lease; MAX_LEASES] {
     static EMPTY: &[u8] = &[];
     let [l0, l1, l2, l3] = leases;
     [

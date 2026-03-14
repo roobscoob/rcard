@@ -6,6 +6,7 @@ pub const HUBRIS_MESSAGE_SIZE_LIMIT: usize = 256;
 pub mod kern;
 pub mod dispatch;
 pub mod call;
+pub mod wire;
 
 /// IPC-layer error returned to all callers.
 ///
@@ -24,22 +25,23 @@ pub mod call;
 ///
 /// `E` is the reconstruction domain-error type (the constructor's `E`). Defaults
 /// to `()` for resources whose constructor is infallible.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Copy, Clone,
+    zerocopy::TryFromBytes, zerocopy::IntoBytes,
+    zerocopy::KnownLayout, zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum Error {
     /// The server task died.
-    ServerDied,
+    ServerDied = 0,
     /// The server's resource arena is full; could not allocate.
-    ArenaFull,
+    ArenaFull = 1,
     /// The handle was evicted by a higher-priority client, or is otherwise
     /// stale (freed, wrong owner, etc.).
-    HandleLost,
+    HandleLost = 2,
     /// A 2PC handle transfer failed (handle was evicted or released while
     /// pending, or the acquire was rejected).
-    TransferFailed,
-}
-
-impl hubpack::SerializedSize for Error {
-    const MAX_SIZE: usize = 1;
+    TransferFailed = 3,
 }
 
 /// `ResponseCode` sent by the server when a client message is malformed
@@ -64,7 +66,7 @@ mod task_count {
 }
 pub use task_count::TASK_COUNT;
 
-pub use arena::{Arena, CloneError, SharedArena};
+pub use arena::{AllocError, Arena, CloneError, SharedArena};
 pub use dyn_handle::DynHandle;
 pub use handle::{
     ACQUIRE_METHOD, CANCEL_TRANSFER_METHOD, CLONE_METHOD, IMPLICIT_DESTROY_METHOD,
@@ -141,6 +143,28 @@ impl StaticTaskId {
             *self.0.get() = id;
         }
     }
+}
+
+#[doc(hidden)]
+pub use rcard_log as __rcard_log;
+
+/// Panic macro used by generated IPC client/server code.
+/// By default uses `rcard_log::panic!` for structured logging visibility.
+/// Enable the `bare-panics` feature on the **consumer crate** to use plain
+/// `core::panic!` instead (needed for core sysmodules that can't use rcard_log).
+///
+/// The `cfg` check is evaluated at the macro expansion site, so each binary
+/// crate's own `bare-panics` feature controls which path is taken — unaffected
+/// by Cargo's workspace-wide feature unification.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __ipc_panic {
+    ($($tt:tt)*) => {{
+        #[cfg(feature = "bare-panics")]
+        { panic!($($tt)*) }
+        #[cfg(not(feature = "bare-panics"))]
+        { $crate::__rcard_log::panic!($($tt)*) }
+    }}
 }
 
 /// Notify servers that this task is about to die (e.g. from a panic handler).

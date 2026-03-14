@@ -13,7 +13,12 @@ use crate::filesystem::{lease_to_cstr, FileSystemResource};
 use crate::state;
 
 /// Find an already-open file with the same fs_id and path, bump refcount.
-fn find_existing(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], _lfs_flags: i32) -> Option<usize> {
+fn find_existing(
+    s: &mut state::FsState,
+    fs_id: u8,
+    path: &[u8; 64],
+    _lfs_flags: i32,
+) -> Option<usize> {
     let idx = s
         .open_files
         .iter()
@@ -23,7 +28,12 @@ fn find_existing(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], _lfs_flags:
 }
 
 /// Open a new file in the static table. Returns the slot index.
-fn open_new(s: &mut state::FsState, fs_id: u8, path: &[u8; 64], lfs_flags: i32) -> Result<usize, OpenError> {
+fn open_new(
+    s: &mut state::FsState,
+    fs_id: u8,
+    path: &[u8; 64],
+    lfs_flags: i32,
+) -> Result<usize, OpenError> {
     let idx = s
         .open_files
         .iter()
@@ -113,11 +123,11 @@ fn parse_scheme_path(
     buf: &mut [u8; 64],
 ) -> Result<(u8, usize), OpenError> {
     let len = lease.len().min(buf.len());
-    for i in 0..len {
-        buf[i] = lease.read(i).unwrap_or(0);
+    for (i, byte) in buf.iter_mut().enumerate().take(len) {
+        *byte = lease.read(i).unwrap_or(0);
     }
-    for i in len..buf.len() {
-        buf[i] = 0;
+    for byte in buf.iter_mut().skip(len) {
+        *byte = 0;
     }
 
     let colon = buf[..len]
@@ -137,8 +147,8 @@ fn parse_scheme_path(
     let path_len = len - path_start;
     buf.copy_within(path_start..path_start + path_len, 0);
     buf[path_len] = 0; // null-terminate
-    for i in (path_len + 1)..buf.len() {
-        buf[i] = 0;
+    for byte in buf.iter_mut().skip(path_len + 1) {
+        *byte = 0;
     }
 
     Ok((fs_id, path_len))
@@ -211,8 +221,8 @@ impl File<FileSystemResource> for FileResource {
                 if n <= 0 {
                     break;
                 }
-                for i in 0..n as usize {
-                    let _ = buf.write(total as usize + i, tmp[i]);
+                for (i, &byte) in tmp.iter().enumerate().take(n as usize) {
+                    let _ = buf.write(total as usize + i, byte);
                 }
                 total += n as u32;
             }
@@ -241,8 +251,8 @@ impl File<FileSystemResource> for FileResource {
             let to_write = buf.len();
             while (total as usize) < to_write {
                 let chunk = tmp.len().min(to_write - total as usize);
-                for i in 0..chunk {
-                    tmp[i] = buf.read(total as usize + i).unwrap_or(0);
+                for (i, byte) in tmp.iter_mut().enumerate().take(chunk) {
+                    *byte = buf.read(total as usize + i).unwrap_or(0);
                 }
                 let n = unsafe {
                     lfs_file_write(
@@ -269,7 +279,11 @@ impl File<FileSystemResource> for FileResource {
                 return 0;
             };
             let sz = unsafe { lfs_file_size(fs.lfs_ptr(), &mut entry.file) };
-            if sz >= 0 { sz as u32 } else { 0 }
+            if sz >= 0 {
+                sz as u32
+            } else {
+                0
+            }
         })
     }
 

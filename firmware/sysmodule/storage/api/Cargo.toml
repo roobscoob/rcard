@@ -3,13 +3,15 @@ name = "sysmodule_storage_api"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+bare-panics = []
+
 [dependencies]
-hubpack = "0.1.2"
 ipc = { path = "../../../modules/ipc" }
 idyll_runtime.workspace = true
+rcard-log = { path = "../../../../shared/log" }
 userlib.workspace = true
 zerocopy = "0.8"
-serde = { version = "1.0.228", default-features = false }
 storage_api = { path = "../../../modules/storage_api" }
 
 [build-dependencies]

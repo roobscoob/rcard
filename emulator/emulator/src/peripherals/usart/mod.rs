@@ -1,5 +1,5 @@
-pub mod log;
 mod hex_dump_sink;
+pub mod log;
 mod null_sink;
 mod string_sink;
 mod structured_sink;

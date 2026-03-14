@@ -4,9 +4,18 @@ pub mod config;
 
 pub use config::{DisplayConfiguration, DisplayConfigurationBuilder};
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum DisplayOpenError {
-    AlreadyOpen,
+    AlreadyOpen = 0,
 }
 
 #[ipc::resource(arena_size = 1, kind = 0x02)]

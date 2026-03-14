@@ -8,7 +8,16 @@ pub const NOTIFICATION_BIT: u32 = 1 << 31;
 ///
 /// The reactor preserves the original sender's identity so the target
 /// can distinguish who sent the notification.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(C, packed)]
 pub struct Notification {
     /// Task index of the original sender (preserved from IPC metadata).
     pub sender_index: u16,
@@ -21,27 +30,44 @@ pub struct Notification {
 }
 
 /// What to do when the queue is full.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
 #[repr(u8)]
 pub enum OverflowStrategy {
     /// Reject the new notification if there's no space.
-    Reject,
+    Reject = 0,
     /// Drop the oldest entry with priority <= the new notification's priority.
-    DropOldest,
+    DropOldest = 1,
     /// Drop the newest entry with priority <= the new notification's priority.
-    DropNewest,
+    DropNewest = 2,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum ReactorError {
     /// The sender is not allowed to push to this notification group.
-    NotAuthorized,
+    NotAuthorized = 0,
     /// The priority is outside the group's allowed range.
-    PriorityOutOfRange,
+    PriorityOutOfRange = 1,
     /// The notification group does not exist.
-    InvalidGroup,
+    InvalidGroup = 2,
     /// The queue is full and no entry could be evicted.
-    QueueFull,
+    QueueFull = 3,
 }
 
 #[ipc::resource(arena_size = 0, kind = 0x05)]

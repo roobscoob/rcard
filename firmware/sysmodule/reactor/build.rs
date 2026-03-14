@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -17,13 +19,29 @@ fn main() {
         // No notification config — generate stubs for cargo check
         writeln!(out, "pub struct NotificationGroup {{").unwrap();
         writeln!(out, "    pub name: &'static str,").unwrap();
-        writeln!(out, "    pub priority_range: core::ops::RangeInclusive<u8>,").unwrap();
+        writeln!(
+            out,
+            "    pub priority_range: core::ops::RangeInclusive<u8>,"
+        )
+        .unwrap();
         writeln!(out, "}}").unwrap();
         writeln!(out, "pub const GROUP_COUNT: usize = 0;").unwrap();
         writeln!(out, "pub const GROUPS: &[NotificationGroup; 0] = &[];").unwrap();
-        writeln!(out, "pub fn is_sender_allowed(_group_id: u16, _sender: u16) -> bool {{ false }}").unwrap();
-        writeln!(out, "pub fn group_subscribers(_group_id: u16) -> &'static [u16] {{ &[] }}").unwrap();
-        writeln!(out, "pub fn is_subscriber(_group_id: u16, _task: u16) -> bool {{ false }}").unwrap();
+        writeln!(
+            out,
+            "pub fn is_sender_allowed(_group_id: u16, _sender: u16) -> bool {{ false }}"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub fn group_subscribers(_group_id: u16) -> &'static [u16] {{ &[] }}"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub fn is_subscriber(_group_id: u16, _task: u16) -> bool {{ false }}"
+        )
+        .unwrap();
         writeln!(out, "pub const SUBSCRIBER_TASKS: &[u16] = &[];").unwrap();
         return;
     }
@@ -38,9 +56,7 @@ fn main() {
         .map(|s| s.to_string())
         .collect();
 
-    let task_index = |name: &str| -> Option<usize> {
-        task_names.iter().position(|t| t == name)
-    };
+    let task_index = |name: &str| -> Option<usize> { task_names.iter().position(|t| t == name) };
 
     // Parse groups in stable alphabetical order
     let groups_obj = data["groups"].as_object().unwrap();
@@ -53,7 +69,11 @@ fn main() {
     writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "pub struct NotificationGroup {{").unwrap();
     writeln!(out, "    pub name: &'static str,").unwrap();
-    writeln!(out, "    pub priority_range: core::ops::RangeInclusive<u8>,").unwrap();
+    writeln!(
+        out,
+        "    pub priority_range: core::ops::RangeInclusive<u8>,"
+    )
+    .unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -61,7 +81,11 @@ fn main() {
     writeln!(out, "pub const GROUP_COUNT: usize = {group_count};").unwrap();
     writeln!(out).unwrap();
 
-    writeln!(out, "pub const GROUPS: &[NotificationGroup; {group_count}] = &[").unwrap();
+    writeln!(
+        out,
+        "pub const GROUPS: &[NotificationGroup; {group_count}] = &["
+    )
+    .unwrap();
     for name in &group_names {
         let group = &groups_obj[name.as_str()];
         let min_p = group["min_priority"].as_u64().unwrap();
@@ -69,7 +93,8 @@ fn main() {
         writeln!(
             out,
             "    NotificationGroup {{ name: \"{name}\", priority_range: {min_p}..={max_p} }},"
-        ).unwrap();
+        )
+        .unwrap();
     }
     writeln!(out, "];").unwrap();
     writeln!(out).unwrap();
@@ -107,7 +132,11 @@ fn main() {
         }
     }
     let sender_param = if any_sender_used { "sender" } else { "_sender" };
-    writeln!(out, "pub fn is_sender_allowed(group_id: u16, {sender_param}: u16) -> bool {{").unwrap();
+    writeln!(
+        out,
+        "pub fn is_sender_allowed(group_id: u16, {sender_param}: u16) -> bool {{"
+    )
+    .unwrap();
     writeln!(out, "    match group_id {{").unwrap();
     for arm in &sender_arms {
         writeln!(out, "{arm}").unwrap();
@@ -144,7 +173,11 @@ fn main() {
         per_group_subscribers.push(indices);
     }
 
-    writeln!(out, "pub fn group_subscribers(group_id: u16) -> &'static [u16] {{").unwrap();
+    writeln!(
+        out,
+        "pub fn group_subscribers(group_id: u16) -> &'static [u16] {{"
+    )
+    .unwrap();
     writeln!(out, "    match group_id {{").unwrap();
     for (gid, indices) in per_group_subscribers.iter().enumerate() {
         let vals: Vec<String> = indices.iter().map(|i| format!("{i}")).collect();
@@ -159,16 +192,17 @@ fn main() {
     // --- is_subscriber(group_id, task_index) ---
     let any_subscribers = per_group_subscribers.iter().any(|s| !s.is_empty());
     let task_param = if any_subscribers { "task" } else { "_task" };
-    writeln!(out, "pub fn is_subscriber(group_id: u16, {task_param}: u16) -> bool {{").unwrap();
+    writeln!(
+        out,
+        "pub fn is_subscriber(group_id: u16, {task_param}: u16) -> bool {{"
+    )
+    .unwrap();
     writeln!(out, "    match group_id {{").unwrap();
     for (gid, indices) in per_group_subscribers.iter().enumerate() {
         if indices.is_empty() {
             writeln!(out, "        {gid} => false,").unwrap();
         } else {
-            let checks: Vec<String> = indices
-                .iter()
-                .map(|idx| format!("task == {idx}"))
-                .collect();
+            let checks: Vec<String> = indices.iter().map(|idx| format!("task == {idx}")).collect();
             let expr = checks.join(" || ");
             writeln!(out, "        {gid} => {expr},").unwrap();
         }
@@ -179,7 +213,10 @@ fn main() {
     writeln!(out).unwrap();
 
     // --- SUBSCRIBER_TASKS: all unique task indices that subscribe to any group ---
-    let sub_vals: Vec<String> = all_subscriber_indices.iter().map(|i| format!("{i}")).collect();
+    let sub_vals: Vec<String> = all_subscriber_indices
+        .iter()
+        .map(|i| format!("{i}"))
+        .collect();
     let sub_list = sub_vals.join(", ");
     writeln!(out, "pub const SUBSCRIBER_TASKS: &[u16] = &[{sub_list}];").unwrap();
     writeln!(out).unwrap();

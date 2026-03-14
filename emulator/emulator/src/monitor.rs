@@ -27,7 +27,7 @@ impl Monitor {
         };
 
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_millis(500)))
             .ok();
 
         let writer = stream.try_clone().map_err(EmulatorError::MonitorConnect)?;
@@ -36,76 +36,88 @@ impl Monitor {
             writer,
         };
 
-        // Consume the initial banner/prompt
-        mon.read_until_prompt()?;
+        // Drain the initial banner/prompt
+        mon.drain()?;
         Ok(mon)
     }
 
-    /// Send a command and wait for the prompt to return.
-    pub fn send(&mut self, cmd: &str) -> Result<String, EmulatorError> {
+    /// Send a command, don't wait for a response.
+    pub fn send(&mut self, cmd: &str) -> Result<(), EmulatorError> {
+        self.write_cmd(cmd)?;
+        self.drain()?;
+        Ok(())
+    }
+
+    /// Send a command and return the response line (echo skipped).
+    /// Expects the renode call-response pattern:
+    ///   "command\n"        ← echo
+    ///   "\rresponse\r\r\n" ← actual response
+    pub fn query(&mut self, cmd: &str) -> Result<String, EmulatorError> {
+        self.write_cmd(cmd)?;
+
+        let mut response = String::new();
+        loop {
+            let line = match self.read_line() {
+                Some(line) => line,
+                None => break,
+            };
+            let clean = strip_control_str(&line);
+            let trimmed = clean.trim();
+            if trimmed.is_empty() || trimmed == cmd {
+                continue;
+            }
+            response = trimmed.to_string();
+        }
+        Ok(response)
+    }
+
+    fn write_cmd(&mut self, cmd: &str) -> Result<(), EmulatorError> {
         self.writer
             .write_all(cmd.as_bytes())
             .map_err(EmulatorError::MonitorSend)?;
         self.writer
             .write_all(b"\n")
             .map_err(EmulatorError::MonitorSend)?;
-        self.writer.flush().map_err(EmulatorError::MonitorSend)?;
-        self.read_until_prompt()
+        self.writer.flush().map_err(EmulatorError::MonitorSend)
     }
 
-    /// Read bytes until we see a Renode prompt line (ending with `> `).
-    fn read_until_prompt(&mut self) -> Result<String, EmulatorError> {
-        let mut output = String::new();
-        loop {
-            let mut raw = Vec::new();
-            match self.reader.read_until(b'\n', &mut raw) {
-                Ok(0) => {
-                    return Err(EmulatorError::MonitorDisconnected);
-                }
-                Ok(_) => {
-                    // Strip telnet IAC sequences and ANSI escapes from raw bytes
-                    let clean = strip_control(&raw);
-                    if clean.trim().ends_with('>') || clean.contains("(monitor)") {
-                        break;
-                    }
-                    output.push_str(&clean);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock =>
-                {
-                    // Prompt might already be on a partial line; check what we have
-                    break;
-                }
-                Err(e) => {
-                    return Err(EmulatorError::MonitorSend(e));
-                }
-            }
+    /// Read one line, returning None on timeout/EOF.
+    fn read_line(&mut self) -> Option<String> {
+        let mut raw = Vec::new();
+        match self.reader.read_until(b'\n', &mut raw) {
+            Ok(0) => None,
+            Ok(_) => Some(String::from_utf8_lossy(&raw).into_owned()),
+            Err(_) => None,
         }
-        Ok(output)
+    }
+
+    /// Read and discard all available data until timeout.
+    fn drain(&mut self) -> Result<(), EmulatorError> {
+        while self.read_line().is_some() {}
+        Ok(())
     }
 }
 
-/// Strip ANSI escape sequences and telnet IAC bytes from raw bytes.
-fn strip_control(bytes: &[u8]) -> String {
+/// Strip ANSI escapes, telnet IAC sequences, and control characters from a string.
+fn strip_control_str(s: &str) -> String {
+    let bytes = s.as_bytes();
     let mut out = String::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b == 0xFF {
-            // Telnet IAC: skip 3 bytes
-            i += 3;
+            i += 3; // Telnet IAC: skip 3 bytes
             continue;
         }
         if b == 0x1B {
-            // ANSI escape: skip until letter
-            i += 1;
+            i += 1; // ANSI escape: skip until letter
             while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
                 i += 1;
             }
-            i += 1; // skip the final letter
+            i += 1;
             continue;
         }
-        if b >= 0x20 || b == b'\n' || b == b'\r' || b == b'\t' {
+        if b >= 0x20 {
             out.push(b as char);
         }
         i += 1;

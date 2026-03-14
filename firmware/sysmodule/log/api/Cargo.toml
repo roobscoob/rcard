@@ -3,14 +3,16 @@ name = "sysmodule_log_api"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+bare-panics = []
+
 [dependencies]
-hubpack = "0.1.2"
 ipc = { path = "../../../modules/ipc" }
 idyll_runtime.workspace = true
-rcard-log = { path = "../../../../shared/log" }
+rcard-log = { path = "../../../../shared/log", features = ["writer"] }
+rcard-log-macros = { path = "../../../../shared/log/macros" }
 userlib.workspace = true
 zerocopy = "0.8"
-serde = { version = "1.0.228", default-features = false }
 
 [lib]
 test = false

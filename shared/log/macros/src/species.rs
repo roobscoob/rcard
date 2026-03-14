@@ -1,10 +1,16 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{Expr, LitStr, Token};
+use syn::{Expr, LitStr, Path, Token};
 
-/// Input: `Level, "format string", arg1, arg2, ...`
+/// Input: `crate_path, Level, "format string", arg1, arg2, ...`
+///
+/// `crate_path` is the path to the `rcard_log` crate root (typically `$crate`
+/// from the calling macro). The proc macro uses this to emit fully-qualified
+/// paths that work even when `rcard_log` is accessed through a re-export chain
+/// (e.g. `ipc::__rcard_log`).
 pub struct SpeciesInput {
+    pub krate: Path,
     pub level: Expr,
     pub format_str: LitStr,
     pub args: Vec<Expr>,
@@ -12,6 +18,8 @@ pub struct SpeciesInput {
 
 impl Parse for SpeciesInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        let krate: Path = input.parse()?;
+        let _: Token![,] = input.parse()?;
         let level: Expr = input.parse()?;
         let _: Token![,] = input.parse()?;
         let format_str: LitStr = input.parse()?;
@@ -24,6 +32,7 @@ impl Parse for SpeciesInput {
             args.push(input.parse()?);
         }
         Ok(SpeciesInput {
+            krate,
             level,
             format_str,
             args,
@@ -36,18 +45,9 @@ pub fn expand_species(input: SpeciesInput) -> TokenStream {
     let arg_count = input.args.len();
     let args = &input.args;
     let level = &input.level;
+    let krate = &input.krate;
 
-    // Build species JSON metadata
-    let species_json = serde_json::json!({
-        "kind": "species",
-        "format": format_string,
-        "arg_count": arg_count,
-    });
-    let json_str = format!("{}\0", species_json);
-    let json_bytes: Vec<_> = json_str.as_bytes().iter().map(|b| quote! { #b }).collect();
-    let json_len = json_str.len();
-
-    // Generate a unique static name using a content hash
+    // Generate a unique hash to use as the species ID.
     let hash = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -56,23 +56,40 @@ pub fn expand_species(input: SpeciesInput) -> TokenStream {
         format!("{:?}", input.format_str.span()).hash(&mut hasher);
         hasher.finish()
     };
-    let static_name = quote::format_ident!("__RCARD_LOG_SPECIES_{:016x}", hash);
+
+    // Write metadata to a sidecar JSON file (no-op if .work/ doesn't exist).
+    // proc_macro2 span locations (line/column) are available with the
+    // "span-locations" feature but source_file requires nightly, so we omit
+    // the file path and let the user correlate via format string + line.
+    let start = input.format_str.span().start();
+
+    let species_json = serde_json::json!({
+        "kind": "species",
+        "format": format_string,
+        "arg_count": arg_count,
+        "line": start.line,
+        "column": start.column,
+    });
+    let hash_hex = format!("0x{:016x}", hash);
+    crate::sidecar::emit(
+        &format!("species.{:016x}.json", hash),
+        &serde_json::json!({
+            "id": hash_hex,
+            "entry": species_json,
+        }),
+    );
+
+    let hash_lit = hash;
 
     quote! {
         {
-            #[allow(non_upper_case_globals)]
-            #[unsafe(link_section = ".rcard_log")]
-            #[used]
-            static #static_name: [u8; #json_len] = [#(#json_bytes),*];
-
-            let __species_id: u64 = &#static_name as *const _ as u64;
-            let mut __writer = rcard_log::LogWriter::new(#level, __species_id);
-            let mut __f = rcard_log::formatter::Formatter::new(&mut __writer);
+            let __species_id: u64 = #hash_lit;
+            let mut __writer = #krate::LogWriter::new(#level, __species_id);
+            let mut __f = #krate::formatter::Formatter::new(&mut __writer);
             #(
-                rcard_log::formatter::Format::format(&(#args), &mut __f);
+                #krate::formatter::Format::format(&(#args), &mut __f);
             )*
             __f.write_end_of_stream();
-            drop(__f);
             drop(__writer);
         }
     }

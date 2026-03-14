@@ -1,3 +1,6 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -17,7 +20,11 @@ fn main() {
         writeln!(out, "pub const PARTITIONS: &[PartitionConfig] = &[];").unwrap();
         writeln!(out, "pub const MANAGED_PARTITIONS: &[&str] = &[];").unwrap();
         writeln!(out, "pub const FILESYSTEMS: &[FilesystemMap] = &[];").unwrap();
-        writeln!(out, "pub fn is_partition_allowed(_name: &str, _caller: u16) -> bool {{ true }}").unwrap();
+        writeln!(
+            out,
+            "pub fn is_partition_allowed(_name: &str, _caller: u16) -> bool {{ true }}"
+        )
+        .unwrap();
         return;
     }
 
@@ -109,20 +116,32 @@ fn main() {
     // The ACL maps partition names to the set of tasks allowed to acquire them.
     // Task identity is checked via SLOTS (hubris_task_slots).
     // Build a reverse map: partition_name -> [task_names]
-    let mut acl_map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut acl_map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     if let Some(acl) = data["partition_acl"].as_object() {
         for (task_name, partitions) in acl {
             if let Some(partitions) = partitions.as_array() {
                 for p in partitions {
                     let part_name = p.as_str().unwrap().to_string();
-                    acl_map.entry(part_name).or_default().push(task_name.clone());
+                    acl_map
+                        .entry(part_name)
+                        .or_default()
+                        .push(task_name.clone());
                 }
             }
         }
     }
 
-    let caller_param = if acl_map.is_empty() { "_caller" } else { "caller" };
-    writeln!(out, "pub fn is_partition_allowed(name: &str, {caller_param}: u16) -> bool {{").unwrap();
+    let caller_param = if acl_map.is_empty() {
+        "_caller"
+    } else {
+        "caller"
+    };
+    writeln!(
+        out,
+        "pub fn is_partition_allowed(name: &str, {caller_param}: u16) -> bool {{"
+    )
+    .unwrap();
     if !acl_map.is_empty() {
         writeln!(out, "    use hubris_task_slots::SLOTS;").unwrap();
     }

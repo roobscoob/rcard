@@ -60,11 +60,7 @@ fn drop_notification_for(notif: &Notification, dropped_for: u16) {
     let _ = userlib::sys_send(sup, OP_DROP_REPORT, &msg, &mut [], &mut []);
 }
 
-fn validate(
-    sender_index: u16,
-    group_id: u16,
-    priority: u8,
-) -> Result<(), ReactorError> {
+fn validate(sender_index: u16, group_id: u16, priority: u8) -> Result<(), ReactorError> {
     let group = generated::GROUPS
         .get(group_id as usize)
         .ok_or(ReactorError::InvalidGroup)?;
@@ -89,11 +85,7 @@ fn report_eviction(state: &State, notif: &Notification, index: usize) {
 }
 
 /// Try to evict one entry to make room for a notification with the given priority.
-fn evict(
-    state: &mut State,
-    priority: u8,
-    strategy: OverflowStrategy,
-) -> bool {
+fn evict(state: &mut State, priority: u8, strategy: OverflowStrategy) -> bool {
     match strategy {
         OverflowStrategy::Reject => false,
         OverflowStrategy::DropOldest => {
@@ -174,7 +166,9 @@ fn notify_subscribers(group_id: u16) {
 /// Check if the calling task has more notifications past its cursor.
 fn has_more_for(state: &State, task_index: u16) -> bool {
     let cursor = state.cursors[task_index as usize] as usize;
-    state.queue[cursor..].iter().any(|n| generated::is_subscriber(n.group_id, task_index))
+    state.queue[cursor..]
+        .iter()
+        .any(|n| generated::is_subscriber(n.group_id, task_index))
 }
 
 struct ReactorImpl;
@@ -201,6 +195,7 @@ impl Reactor for ReactorImpl {
             if state.queue.is_full() {
                 gc(state);
             }
+
             if state.queue.is_full() && !evict(state, priority, strategy) {
                 for &t in generated::group_subscribers(group_id) {
                     drop_notification_for(&notif, t);
@@ -208,6 +203,7 @@ impl Reactor for ReactorImpl {
                 return Err(ReactorError::QueueFull);
             }
 
+            #[allow(clippy::unwrap_used)]
             state.queue.push(notif).unwrap();
             notify_subscribers(group_id);
             Ok(())
@@ -228,9 +224,7 @@ impl Reactor for ReactorImpl {
             // Remove existing match if found, keeping the max priority.
             let mut effective_priority = priority;
             if let Some(i) = state.queue.iter().position(|n| {
-                n.sender_index == sender_index
-                    && n.group_id == group_id
-                    && n.code == code
+                n.sender_index == sender_index && n.group_id == group_id && n.code == code
             }) {
                 effective_priority = effective_priority.max(state.queue[i].priority);
                 remove_and_adjust_cursors(state, i);
@@ -253,6 +247,7 @@ impl Reactor for ReactorImpl {
                 return Err(ReactorError::QueueFull);
             }
 
+            #[allow(clippy::unwrap_used)]
             state.queue.push(notif).unwrap();
             notify_subscribers(group_id);
             Ok(())

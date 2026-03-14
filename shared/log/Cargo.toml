@@ -6,11 +6,12 @@ edition = "2021"
 [features]
 alloc = []
 writer = []
+userlib = ["dep:userlib"]
 
 [dependencies]
-serde = { version = "1", default-features = false, features = ["derive"] }
-hubpack = "0.1"
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
 rcard-log-macros = { path = "macros" }
+userlib = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173", optional = true }
 
 [dev-dependencies]
 rcard-log = { path = ".", features = ["writer"] }

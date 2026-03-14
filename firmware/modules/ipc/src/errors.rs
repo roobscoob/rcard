@@ -5,6 +5,7 @@
 //! `(method_kind, has_move_params, has_clone_params)`.
 
 use crate::arena::CloneError;
+use rcard_log::Format;
 
 /// A handle was lost (evicted, freed, wrong owner, stale, or server died).
 #[derive(Debug)]
@@ -13,7 +14,7 @@ pub struct HandleLostError;
 // ── Constructor family (4) ─────────────────────────────
 
 /// Constructor failed: server died or arena full.
-#[derive(Debug)]
+#[derive(Debug, Format)]
 pub enum ConstructorError {
     ServerDied,
     ArenaFull,
@@ -104,7 +105,9 @@ pub enum StaticMessageTransferCloneError {
 // conversion is always visible at the call site.
 
 impl HandleLostError {
-    pub fn from_wire(_: crate::Error) -> Self { HandleLostError }
+    pub fn from_wire(_: crate::Error) -> Self {
+        HandleLostError
+    }
 }
 
 impl ConstructorError {
@@ -144,29 +147,43 @@ impl ConstructorTransferCloneError {
 }
 
 impl StaticMessageError {
-    pub fn from_wire(_: crate::Error) -> Self { Self::ServerDied }
+    pub fn from_wire(_: crate::Error) -> Self {
+        Self::ServerDied
+    }
 }
 
 impl StaticMessageTransferError {
-    pub fn from_wire(_: crate::Error) -> Self { Self::ServerDied }
+    pub fn from_wire(_: crate::Error) -> Self {
+        Self::ServerDied
+    }
 }
 
 impl StaticMessageCloneError {
-    pub fn from_wire(_: crate::Error) -> Self { Self::ServerDied }
+    pub fn from_wire(_: crate::Error) -> Self {
+        Self::ServerDied
+    }
 }
 
 impl StaticMessageTransferCloneError {
-    pub fn from_wire(_: crate::Error) -> Self { Self::ServerDied }
+    pub fn from_wire(_: crate::Error) -> Self {
+        Self::ServerDied
+    }
 }
 
 impl MessageTransferError {
-    pub fn from_wire(_: crate::Error) -> Self { Self::HandleLost }
+    pub fn from_wire(_: crate::Error) -> Self {
+        Self::HandleLost
+    }
 }
 
 impl MessageCloneError {
-    pub fn from_wire(_: crate::Error) -> Self { Self::HandleLost }
+    pub fn from_wire(_: crate::Error) -> Self {
+        Self::HandleLost
+    }
 }
 
 impl MessageTransferCloneError {
-    pub fn from_wire(_: crate::Error) -> Self { Self::HandleLost }
+    pub fn from_wire(_: crate::Error) -> Self {
+        Self::HandleLost
+    }
 }

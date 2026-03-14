@@ -3,6 +3,9 @@ name = "fob"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+bare-panics = []
+
 [dependencies]
 hubris-task-slots.workspace = true
 ipc = { path = "../../modules/ipc" }

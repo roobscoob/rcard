@@ -1,7 +1,6 @@
 use std::io::Read;
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -12,7 +11,6 @@ pub mod peripherals;
 pub use builder::DeviceBuilder;
 
 use monitor::Monitor;
-use peripherals::usart::log::UsartLog;
 use peripherals::usart::UsartSink;
 
 #[derive(Debug)]
@@ -54,11 +52,8 @@ impl Device {
         std::fs::write(&bin_path, data).map_err(EmulatorError::TempFile)?;
         let path_str = bin_path.to_string_lossy().replace('\\', "/");
 
-        println!("Loading binary to emulator: {path_str} at 0x{addr:X}");
-
         self.monitor
-            .send(&format!("sysbus LoadBinary @{path_str} 0x{addr:X}"))?;
-        Ok(())
+            .send(&format!("sysbus LoadBinary @{path_str} 0x{addr:X}"))
     }
 
     pub fn run(&mut self, vtor: u64, _until: u64) -> Result<(), EmulatorError> {
@@ -66,14 +61,13 @@ impl Device {
             .send(&format!("cpu VectorTableOffset 0x{vtor:X}"))?;
         self.monitor.send("start")?;
 
-        // Poll until halted or timeout
-        let timeout = Duration::from_secs(30);
-        let start = std::time::Instant::now();
         loop {
             std::thread::sleep(Duration::from_millis(500));
-            let resp = self.monitor.send("cpu IsHalted")?;
-            if resp.contains("True") {
-                break;
+            let resp = self.monitor.query("cpu IsHalted")?;
+            match resp.as_str() {
+                "True" => break,
+                "" | "False" => continue,
+                other => panic!("unexpected response to 'cpu IsHalted': {:?}", other),
             }
         }
         Ok(())

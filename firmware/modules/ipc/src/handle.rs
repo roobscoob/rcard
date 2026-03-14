@@ -6,8 +6,6 @@
     Debug,
     PartialEq,
     Eq,
-    serde::Serialize,
-    serde::Deserialize,
     zerocopy::IntoBytes,
     zerocopy::FromBytes,
     zerocopy::Immutable,
@@ -20,14 +18,10 @@ impl RawHandle {
     pub const SIZE: usize = 8;
 }
 
-impl hubpack::SerializedSize for RawHandle {
-    const MAX_SIZE: usize = <u64 as hubpack::SerializedSize>::MAX_SIZE;
-}
-
 /// Combines a resource kind and method id into a u16 opcode.
 #[inline]
 pub const fn opcode(kind: u8, method: u8) -> u16 {
-    (kind as u16) << 8 | method as u16
+    ((kind as u16) << 8) | method as u16
 }
 
 /// Splits a u16 opcode into (kind, method).

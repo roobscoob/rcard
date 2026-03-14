@@ -11,8 +11,17 @@ sysmodule_log_api::panic_handler!(to Log);
 fn main() -> ! {
     rcard_log::info!("hello from fob!");
     rcard_log::info!("the answer is {}", 42u32);
+    rcard_log::info!("Testing\nNewlines!");
 
-    loop {
-        core::hint::spin_loop();
-    }
+    // test the range of log levels
+    rcard_log::trace!("trace message");
+    rcard_log::debug!("debug message");
+    rcard_log::info!("info message");
+    rcard_log::warn!("warn message");
+    rcard_log::error!("error message");
+    rcard_log::panic!("panic message");
+
+    // loop {
+    //     core::hint::spin_loop();
+    // }
 }

@@ -11,6 +11,7 @@ pub struct UsartLog {
 pub enum UsartLogKind {
     Line(String),
     Stream(LogStream),
+    Renode(String),
 }
 
 pub struct LogStream {
@@ -26,6 +27,7 @@ impl core::fmt::Debug for UsartLogKind {
                 .debug_struct("Stream")
                 .field("metadata", &s.metadata)
                 .finish_non_exhaustive(),
+            UsartLogKind::Renode(s) => f.debug_tuple("Renode").field(s).finish(),
         }
     }
 }

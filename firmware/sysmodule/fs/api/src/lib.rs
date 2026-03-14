@@ -4,41 +4,77 @@
 // Error types
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum RegistryError {
-    AlreadyExists,
-    NotFound,
-    RegistryFull,
+    AlreadyExists = 0,
+    NotFound = 1,
+    RegistryFull = 2,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum FileSystemError {
-    CorruptFilesystem,
-    TooManyFilesystems,
-    StorageError,
-    InvalidFs,
+    CorruptFilesystem = 0,
+    TooManyFilesystems = 1,
+    StorageError = 2,
+    InvalidFs = 3,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum FsError {
-    NotFound,
-    InvalidFs,
-    NoSpace,
-    IsDirectory,
-    NotDirectory,
-    NotEmpty,
-    NameTooLong,
-    Io,
+    NotFound = 0,
+    InvalidFs = 1,
+    NoSpace = 2,
+    IsDirectory = 3,
+    NotDirectory = 4,
+    NotEmpty = 5,
+    NameTooLong = 6,
+    Io = 7,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum OpenError {
-    NotFound,
-    InvalidFs,
-    NoSpace,
-    IsDirectory,
-    TooManyOpenFiles,
-    Io,
+    NotFound = 0,
+    InvalidFs = 1,
+    NoSpace = 2,
+    IsDirectory = 3,
+    TooManyOpenFiles = 4,
+    Io = 5,
 }
 
 // ---------------------------------------------------------------------------
@@ -46,8 +82,17 @@ pub enum OpenError {
 // ---------------------------------------------------------------------------
 
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, hubpack::SerializedSize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
 )]
+#[repr(C, packed)]
 pub struct FileSystemStats {
     pub total_blocks: u32,
     pub free_blocks: u32,
@@ -55,18 +100,36 @@ pub struct FileSystemStats {
 }
 
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, hubpack::SerializedSize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
 )]
+#[repr(u8)]
 pub enum EntryType {
-    File,
-    Directory,
+    File = 0,
+    Directory = 1,
 }
 
 /// A directory entry returned by `Folder::next`.
 ///
 /// `name` is a null-padded UTF-8 filename (up to 31 bytes + null).
 /// When `name_len == 0`, the directory listing is exhausted.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(C, packed)]
 pub struct DirEntry {
     pub name: [u8; 32],
     pub name_len: u8,
@@ -96,8 +159,15 @@ impl DirEntry {
 // ---------------------------------------------------------------------------
 
 #[derive(
-    Clone, Copy, Debug, serde::Serialize, serde::Deserialize, hubpack::SerializedSize,
+    Clone,
+    Copy,
+    Debug,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
 )]
+#[repr(transparent)]
 pub struct FileOffset(u32);
 
 impl FileOffset {

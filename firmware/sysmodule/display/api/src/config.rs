@@ -2,7 +2,15 @@ use crate::DisplayOpenError;
 
 use ipc::errors::ConstructorError;
 
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
+#[derive(
+    Clone,
+    Copy,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(C, packed)]
 pub struct DisplayConfiguration {
     /// Display width in pixels. Fixed by the display model (e.g. 128 for
     /// SSD1312).

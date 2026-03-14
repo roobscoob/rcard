@@ -41,7 +41,7 @@ impl FolderIterator<FolderResource> for FolderIteratorResource {
 
             let mut entry = DirEntry::EMPTY;
 
-            let name_ptr = info.name.as_ptr() as *const u8;
+            let name_ptr = info.name.as_ptr();
             let mut i = 0;
             while i < 31 {
                 let byte = unsafe { *name_ptr.add(i) };

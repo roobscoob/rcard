@@ -3,10 +3,10 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use crate::parse::{
-    collect_peer_traits, parse_slice_ref, ConstructorReturn, HandleMode, MethodKind, ParsedMethod,
-    ParsedParam, ResourceAttr,
+    ConstructorReturn, HandleMode, MethodKind, ParsedMethod, ParsedParam, ResourceAttr,
+    collect_peer_traits, interface_op_path, parse_slice_ref,
 };
-use crate::util::{replace_ident_in_type, to_pascal_case, to_screaming_snake_case, to_snake_case};
+use crate::util::{panic_path, replace_ident_in_type, to_pascal_case, to_screaming_snake_case, to_snake_case};
 
 /// Build a map from impl_trait_name -> PeerGenericName for resolvable peers.
 fn peer_generic_name(trait_name: &Ident) -> Ident {
@@ -135,10 +135,7 @@ pub fn gen_operation_enum(
     let method_count = methods.len() as u8;
     let method_count_lit = proc_macro2::Literal::u8_suffixed(method_count);
 
-    let iface_op = attrs
-        .implements
-        .as_ref()
-        .map(|p| crate::parse::interface_op_path(p));
+    let iface_op = attrs.implements.as_ref().map(interface_op_path);
 
     let mut non_message_offset: u8 = 0;
 
@@ -208,6 +205,7 @@ pub fn gen_dispatcher(
     methods: &[ParsedMethod],
     attrs: &ResourceAttr,
 ) -> TokenStream2 {
+    let _p = panic_path();
     let arena_size = attrs.arena_size.unwrap_or(0);
     let dispatcher_name = format_ident!("{}Dispatcher", trait_name);
     let enum_name = format_ident!("{}Op", trait_name);
@@ -308,98 +306,18 @@ pub fn gen_dispatcher(
                 reply: ipc::dispatch::PendingReply,
             ) {
                 let sender_index = msg.sender_index();
+
+                // Handle implicit protocol methods (destroy, clone, 2PC).
+                let reply = match self.arena.dispatch_implicit(method_id, &msg, reply, sender_index, self.priority_fn) {
+                    Some(reply) => reply,
+                    None => return,
+                };
+
                 let __priority = (self.priority_fn)(sender_index);
-
-                // Handle implicit destroy (Drop on client handle).
-                if method_id == ipc::IMPLICIT_DESTROY_METHOD {
-                    let handle = match msg.decode_args::<ipc::RawHandle>() {
-                        Ok(v) => v,
-                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                    };
-                    let _ = self.arena.remove_owned(handle, sender_index);
-                    reply.reply_ok(&[]);
-                    return;
-                }
-
-                // Handle clone (refcounted resources).
-                if method_id == ipc::CLONE_METHOD {
-                    let (handle, new_owner) = match msg.decode_args::<(ipc::RawHandle, u16)>() {
-                        Ok(v) => v,
-                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                    };
-                    let new_owner_priority = (self.priority_fn)(new_owner);
-                    let result: core::result::Result<ipc::RawHandle, ipc::Error> =
-                        match self.arena.clone_handle(handle, sender_index, new_owner, new_owner_priority) {
-                            Ok(new_handle) => Ok(new_handle),
-                            Err(ipc::CloneError::InvalidHandle) => Err(ipc::Error::HandleLost),
-                            Err(ipc::CloneError::ArenaFull) => Err(ipc::Error::ArenaFull),
-                            Err(ipc::CloneError::ServerDied) => unreachable!(),
-                        };
-                    reply.reply_serialize(&result);
-                    return;
-                }
-
-                // 2PC: prepare_transfer — freeze handle for transfer to target.
-                if method_id == ipc::PREPARE_TRANSFER_METHOD {
-                    let (handle, target) = match msg.decode_args::<(ipc::RawHandle, u16)>() {
-                        Ok(v) => v,
-                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                    };
-                    let result: core::result::Result<(), ipc::Error> =
-                        if self.arena.prepare_transfer(handle, sender_index, target) {
-                            Ok(())
-                        } else {
-                            Err(ipc::Error::HandleLost)
-                        };
-                    reply.reply_serialize(&result);
-                    return;
-                }
-
-                // 2PC: cancel_transfer — unfreeze a pending handle.
-                if method_id == ipc::CANCEL_TRANSFER_METHOD {
-                    let (handle,) = match msg.decode_args::<(ipc::RawHandle,)>() {
-                        Ok(v) => v,
-                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                    };
-                    let _ = self.arena.cancel_transfer(handle, sender_index);
-                    reply.reply_ok(&[]);
-                    return;
-                }
-
-                // 2PC: acquire — complete transfer, acquirer takes ownership.
-                if method_id == ipc::ACQUIRE_METHOD {
-                    let (handle,) = match msg.decode_args::<(ipc::RawHandle,)>() {
-                        Ok(v) => v,
-                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                    };
-                    let result: core::result::Result<(), ipc::Error> =
-                        if self.arena.acquire(handle, sender_index, __priority) {
-                            Ok(())
-                        } else {
-                            Err(ipc::Error::TransferFailed)
-                        };
-                    reply.reply_serialize(&result);
-                    return;
-                }
-
-                // 2PC: try_drop — cleanup after failed transfer.
-                if method_id == ipc::TRY_DROP_METHOD {
-                    let (handle,) = match msg.decode_args::<(ipc::RawHandle,)>() {
-                        Ok(v) => v,
-                        Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                    };
-                    let _ = self.arena.try_drop(handle, sender_index);
-                    reply.reply_ok(&[]);
-                    return;
-                }
 
                 let op = match #enum_name::try_from(method_id) {
                     Ok(op) => op,
-                    Err(bad) => panic!(
-                        "ipc: unknown method_id {} for {}",
-                        bad,
-                        stringify!(#enum_name),
-                    ),
+                    Err(_) => #_p!("ipc: unknown method_id"),
                 };
 
                 let meta = msg.meta();
@@ -431,10 +349,7 @@ pub fn gen_constants(trait_name: &Ident, attrs: &ResourceAttr) -> TokenStream2 {
     }
 }
 
-pub fn gen_wiring_macro(
-    trait_name: &Ident,
-    methods: &[ParsedMethod],
-) -> TokenStream2 {
+pub fn gen_wiring_macro(trait_name: &Ident, methods: &[ParsedMethod]) -> TokenStream2 {
     let peers = collect_peer_traits(methods);
     let dispatcher_name = format_ident!("{}Dispatcher", trait_name);
     let macro_name = format_ident!("__new_{}Dispatcher", trait_name);
@@ -505,9 +420,10 @@ fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
                     let mut __acq_call = ipc::call::IpcCall::new(
                         #pname.task_id(), #pname.kind, ipc::ACQUIRE_METHOD,
                     );
-                    __acq_call.set_args(&(#pname.handle,));
-                    match __acq_call.send::<core::result::Result<(), ipc::Error>>() {
-                        Ok((_, Ok(()))) => true,
+                    let __h = #pname.handle;
+                    __acq_call.push_arg(&__h);
+                    match __acq_call.send_raw() {
+                        Ok((rc, _len, _retbuf)) => rc == ipc::kern::ResponseCode::SUCCESS,
                         _ => false,
                     }
                 };
@@ -534,25 +450,26 @@ fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
             // Build rollback stmts for all handles acquired *before* this one
             let rollback_stmts: Vec<TokenStream2> = acquired_names[..check_idx]
                 .iter()
-                .filter_map(|(prev_name, prev_flag, _)| {
+                .map(|(prev_name, prev_flag, _)| {
                     let prev_p = move_params.iter().find(|p| &p.name == prev_name).unwrap();
                     if prev_p.impl_trait_name.is_some() {
                         // Cross-server: we acquired ownership, so destroy it on the source
-                        Some(quote! {
+                        quote! {
                             if #prev_flag {
                                 let mut __destroy_call = ipc::call::IpcCall::new(
                                     #prev_name.task_id(), #prev_name.kind, ipc::IMPLICIT_DESTROY_METHOD,
                                 );
-                                __destroy_call.set_args(&(#prev_name.handle,));
+                                let __h = #prev_name.handle;
+                                __destroy_call.push_arg(&__h);
                                 let _ = __destroy_call.send_void();
                             }
-                        })
+                        }
                     } else {
-                        Some(quote! {
+                        quote! {
                             if #prev_flag {
                                 let _ = self.arena.remove_owned(#prev_name, self.self_task_index);
                             }
-                        })
+                        }
                     }
                 })
                 .collect();
@@ -560,9 +477,7 @@ fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
                 if !#flag {
                     // Release all previously acquired handles
                     #(#rollback_stmts)*
-                    reply.reply_serialize(
-                        &core::result::Result::<(), ipc::Error>::Err(ipc::Error::TransferFailed),
-                    );
+                    reply.reply_ok(&[1u8, ipc::Error::TransferFailed as u8]);
                     return;
                 }
             }
@@ -608,9 +523,7 @@ fn gen_peer_resolution(m: &ParsedMethod) -> Vec<TokenStream2> {
             let field = peer_field_name(trait_name);
             Some(quote! {
                 let Some(#name) = self.#field.get(#name.handle) else {
-                    reply.reply_serialize(
-                        &core::result::Result::<(), ipc::Error>::Err(ipc::Error::HandleLost),
-                    );
+                    reply.reply_ok(&[1u8, ipc::Error::HandleLost as u8]);
                     return;
                 };
             })
@@ -618,17 +531,11 @@ fn gen_peer_resolution(m: &ParsedMethod) -> Vec<TokenStream2> {
         .collect()
 }
 
-fn gen_dispatch_arm(
-    _trait_name: &Ident,
-    enum_name: &Ident,
-    m: &ParsedMethod,
-) -> TokenStream2 {
+fn gen_dispatch_arm(_trait_name: &Ident, enum_name: &Ident, m: &ParsedMethod) -> TokenStream2 {
     let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));
 
-    let non_lease_params: Vec<&ParsedParam> =
-        m.params.iter().filter(|p| !p.is_lease).collect();
-    let lease_params: Vec<&ParsedParam> =
-        m.params.iter().filter(|p| p.is_lease).collect();
+    let non_lease_params: Vec<&ParsedParam> = m.params.iter().filter(|p| !p.is_lease).collect();
+    let lease_params: Vec<&ParsedParam> = m.params.iter().filter(|p| p.is_lease).collect();
 
     let lease_bindings = gen_lease_bindings(&lease_params);
     let peer_resolution = gen_peer_resolution(m);
@@ -641,49 +548,80 @@ fn gen_dispatch_arm(
         MethodKind::Constructor => {
             let (deserialize, destructure) = gen_deserialize_args(&non_lease_params, false);
 
-            let ctor_return = m.ctor_return.as_ref().expect("constructor must have ctor_return");
+            let ctor_return = m
+                .ctor_return
+                .as_ref()
+                .expect("constructor must have ctor_return");
             let ctor_body = match ctor_return {
                 ConstructorReturn::Bare => {
                     quote! {
                         let value = T::#method_name(meta, #(#call_args),*);
-                        let result: core::result::Result<ipc::RawHandle, ipc::Error> =
-                            match self.arena.alloc(value, sender_index, __priority) {
-                                Some(handle) => Ok(handle),
-                                None => Err(ipc::Error::ArenaFull),
-                            };
-                        reply.reply_serialize(&result);
+                        match self.arena.alloc(value, sender_index, __priority) {
+                            Ok(handle) => {
+                                let mut __buf: [core::mem::MaybeUninit<u8>; 1 + ipc::RawHandle::SIZE] =
+                                    unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+                                ipc::wire::set_uninit(&mut __buf, 0, 0); // Ok
+                                ipc::wire::write_uninit(&mut __buf[1..], &handle);
+                                reply.reply_ok(unsafe {
+                                    ipc::wire::assume_init_slice(&__buf, 1 + ipc::RawHandle::SIZE)
+                                });
+                            }
+                            Err(_) => {
+                                reply.reply_ok(&[1u8, ipc::Error::ArenaFull as u8]); // Err
+                            }
+                        }
                     }
                 }
                 ConstructorReturn::Result(error_type) => {
+                    let _ = error_type;
                     quote! {
                         let ctor_result = T::#method_name(meta, #(#call_args),*);
-                        let result: core::result::Result<
-                            core::result::Result<ipc::RawHandle, #error_type>,
-                            ipc::Error,
-                        > = match ctor_result {
+                        let mut __buf: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+                            unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+                        match ctor_result {
                             Ok(value) => match self.arena.alloc(value, sender_index, __priority) {
-                                Some(handle) => Ok(Ok(handle)),
-                                None => Err(ipc::Error::ArenaFull),
+                                Ok(handle) => {
+                                    ipc::wire::set_uninit(&mut __buf, 0, 0); // outer Ok
+                                    ipc::wire::set_uninit(&mut __buf, 1, 0); // inner Ok
+                                    let __n = ipc::wire::write_uninit(&mut __buf[2..], &handle);
+                                    reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__buf, 2 + __n) });
+                                }
+                                Err(_) => {
+                                    reply.reply_ok(&[1u8, ipc::Error::ArenaFull as u8]); // outer Err
+                                }
                             },
-                            Err(e) => Ok(Err(e)),
-                        };
-                        reply.reply_serialize(&result);
+                            Err(e) => {
+                                ipc::wire::set_uninit(&mut __buf, 0, 0); // outer Ok
+                                ipc::wire::set_uninit(&mut __buf, 1, 1); // inner Err
+                                let __n = ipc::wire::write_uninit(&mut __buf[2..], &e);
+                                reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__buf, 2 + __n) });
+                            }
+                        }
                     }
                 }
                 ConstructorReturn::OptionSelf => {
                     quote! {
                         let ctor_result = T::#method_name(meta, #(#call_args),*);
-                        let result: core::result::Result<
-                            core::option::Option<ipc::RawHandle>,
-                            ipc::Error,
-                        > = match ctor_result {
+                        match ctor_result {
                             Some(value) => match self.arena.alloc(value, sender_index, __priority) {
-                                Some(handle) => Ok(Some(handle)),
-                                None => Err(ipc::Error::ArenaFull),
+                                Ok(handle) => {
+                                    let mut __buf: [core::mem::MaybeUninit<u8>; 2 + ipc::RawHandle::SIZE] =
+                                        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+                                    ipc::wire::set_uninit(&mut __buf, 0, 0); // outer Ok
+                                    ipc::wire::set_uninit(&mut __buf, 1, 1); // Some
+                                    ipc::wire::write_uninit(&mut __buf[2..], &handle);
+                                    reply.reply_ok(unsafe {
+                                        ipc::wire::assume_init_slice(&__buf, 2 + ipc::RawHandle::SIZE)
+                                    });
+                                }
+                                Err(_) => {
+                                    reply.reply_ok(&[1u8, ipc::Error::ArenaFull as u8]); // outer Err
+                                }
                             },
-                            None => Ok(None),
-                        };
-                        reply.reply_serialize(&result);
+                            None => {
+                                reply.reply_ok(&[0u8, 0u8]); // Ok(None)
+                            }
+                        }
                     }
                 }
             };
@@ -765,69 +703,44 @@ fn wire_type(p: &ParsedParam) -> TokenStream2 {
     }
 }
 
+/// Generate sequential zerocopy reads for message arguments.
+///
+/// Emits a series of `ipc::wire::read::<T>(__buf)` calls, threading the
+/// remaining buffer through each read.  No tuples, no serde, no hubpack.
 fn gen_deserialize_args(
     non_lease_params: &[&ParsedParam],
     include_handle: bool,
 ) -> (TokenStream2, TokenStream2) {
-    let arg_types: Vec<TokenStream2> = non_lease_params.iter().map(|p| wire_type(p)).collect();
-    let arg_names: Vec<_> = non_lease_params.iter().map(|p| &p.name).collect();
+    let mut reads = Vec::new();
+
+    // Start from raw message bytes
+    reads.push(quote! { let mut __buf = msg.raw_data(); });
 
     if include_handle {
-        let deserialize = if arg_types.is_empty() {
-            quote! {
-                let handle = match msg.decode_args::<ipc::RawHandle>() {
-                    Ok(v) => v,
-                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                };
-            }
-        } else {
-            quote! {
-                let args = match msg.decode_args::<(ipc::RawHandle, #(#arg_types,)*)>() {
-                    Ok(v) => v,
-                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                };
-            }
-        };
-
-        let destructure = if arg_types.is_empty() {
-            quote! {}
-        } else if arg_names.len() == 1 {
-            let n = &arg_names[0];
-            quote! { let (handle, #n) = args; }
-        } else {
-            quote! { let (handle, #(#arg_names,)*) = args; }
-        };
-
-        (deserialize, destructure)
-    } else {
-        let deserialize = if arg_types.is_empty() {
-            quote! {}
-        } else if arg_names.len() == 1 {
-            let ty = &arg_types[0];
-            let n = &arg_names[0];
-            quote! {
-                let #n = match msg.decode_args::<#ty>() {
-                    Ok(v) => v,
-                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                };
-            }
-        } else {
-            quote! {
-                let args = match msg.decode_args::<(#(#arg_types,)*)>() {
-                    Ok(v) => v,
-                    Err(_) => { reply.reply_error(ipc::MALFORMED_MESSAGE, &[]); return; }
-                };
-            }
-        };
-
-        let destructure = if arg_names.len() > 1 {
-            quote! { let (#(#arg_names,)*) = args; }
-        } else {
-            quote! {}
-        };
-
-        (deserialize, destructure)
+        reads.push(quote! {
+            let Some((handle, __rest)) = ipc::wire::read::<ipc::RawHandle>(__buf) else {
+                reply.reply_error(ipc::MALFORMED_MESSAGE, &[]);
+                return;
+            };
+            __buf = __rest;
+        });
     }
+
+    for p in non_lease_params {
+        let pname = &p.name;
+        let ty = wire_type(p);
+        reads.push(quote! {
+            let Some((#pname, __rest)) = ipc::wire::read::<#ty>(__buf) else {
+                reply.reply_error(ipc::MALFORMED_MESSAGE, &[]);
+                return;
+            };
+            __buf = __rest;
+        });
+    }
+
+    let deserialize = quote! { #(#reads)* };
+    // No destructure step needed — variables are already bound individually
+    (deserialize, quote! {})
 }
 
 fn gen_lease_bindings(lease_params: &[&ParsedParam]) -> Vec<TokenStream2> {
@@ -871,24 +784,30 @@ fn gen_static_reply(
     return_type: Option<&syn::Type>,
 ) -> TokenStream2 {
     if let Some(rt) = return_type {
+        let encode = crate::util::gen_encode_return_value(rt, quote! { result_value });
         quote! {
-            const _: () = assert!(
-                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE
-                    <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
-                "return type exceeds Hubris message size limit (256 bytes)",
-            );
             let result_value = T::#method_name(meta, #(#call_args),*);
-            reply.reply_serialize(
-                &core::result::Result::<#rt, ipc::Error>::Ok(result_value),
-            );
+            let mut __reply_buf: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+            let mut __off = 0usize;
+            ipc::wire::set_uninit(&mut __reply_buf, __off, 0); // Result::Ok tag
+            __off += 1;
+            #encode
+            reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__reply_buf, __off) });
         }
     } else {
         quote! {
             T::#method_name(meta, #(#call_args),*);
-            reply.reply_serialize(
-                &core::result::Result::<(), ipc::Error>::Ok(()),
-            );
+            reply.reply_ok(&[0u8]); // Result::Ok(())
         }
+    }
+}
+
+/// Helper: generate code to reply with `Err(ipc::Error::HandleLost)`.
+fn gen_reply_handle_lost() -> TokenStream2 {
+    quote! {
+        reply.reply_ok(&[1u8, ipc::Error::HandleLost as u8]); // Result::Err(HandleLost)
+        return;
     }
 }
 
@@ -904,36 +823,30 @@ fn gen_reply(
         quote! { self.arena.get_mut_owned(handle, sender_index) }
     };
 
+    let handle_lost = gen_reply_handle_lost();
+
     if let Some(rt) = return_type {
+        let encode = crate::util::gen_encode_return_value(rt, quote! { result_value });
         quote! {
-            const _: () = assert!(
-                <core::result::Result<#rt, ipc::Error> as hubpack::SerializedSize>::MAX_SIZE
-                    <= ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
-                "return type exceeds Hubris message size limit (256 bytes)",
-            );
             let Some(resource) = #arena_op else {
-                reply.reply_serialize(
-                    &core::result::Result::<#rt, ipc::Error>::Err(ipc::Error::HandleLost),
-                );
-                return;
+                #handle_lost
             };
             let result_value = resource.#method_name(meta, #(#call_args),*);
-            reply.reply_serialize(
-                &core::result::Result::<#rt, ipc::Error>::Ok(result_value),
-            );
+            let mut __reply_buf: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
+                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+            let mut __off = 0usize;
+            ipc::wire::set_uninit(&mut __reply_buf, __off, 0); // Result::Ok tag
+            __off += 1;
+            #encode
+            reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__reply_buf, __off) });
         }
     } else {
         quote! {
             let Some(resource) = #arena_op else {
-                reply.reply_serialize(
-                    &core::result::Result::<(), ipc::Error>::Err(ipc::Error::HandleLost),
-                );
-                return;
+                #handle_lost
             };
             resource.#method_name(meta, #(#call_args),*);
-            reply.reply_serialize(
-                &core::result::Result::<(), ipc::Error>::Ok(()),
-            );
+            reply.reply_ok(&[0u8]); // Result::Ok(())
         }
     }
 }

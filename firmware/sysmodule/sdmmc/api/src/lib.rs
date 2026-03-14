@@ -2,10 +2,20 @@
 
 pub use storage_api::{BlockError, Storage};
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    rcard_log::Format,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum SdmmcOpenError {
-    ReservedSlot,
-    InitFailed,
+    ReservedSlot = 0,
+    InitFailed = 1,
 }
 
 /// Concrete SDMMC resource. arena_size = 1 because there's one SD card slot.

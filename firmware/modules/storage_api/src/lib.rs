@@ -1,9 +1,48 @@
 #![no_std]
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, hubpack::SerializedSize)]
-pub enum BlockError {
-    OutOfRange,
-    Device(u16),
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
+pub enum BlockErrorKind {
+    OutOfRange = 0,
+    Device = 1,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(C, packed)]
+pub struct BlockError {
+    pub kind: BlockErrorKind,
+    pub device_code: u16,
+}
+
+impl BlockError {
+    pub fn out_of_range() -> Self {
+        Self {
+            kind: BlockErrorKind::OutOfRange,
+            device_code: 0,
+        }
+    }
+    pub fn device(code: u16) -> Self {
+        Self {
+            kind: BlockErrorKind::Device,
+            device_code: code,
+        }
+    }
 }
 
 /// Interface-only trait: any block storage device.

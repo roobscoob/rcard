@@ -14,6 +14,12 @@ pub struct OnceCell<T> {
 // where no concurrent access occurs.
 unsafe impl<T> Sync for OnceCell<T> {}
 
+impl Default for OnceCell<()> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> OnceCell<T> {
     pub const fn new() -> Self {
         Self {
@@ -94,12 +100,12 @@ impl<T> GlobalState<T> {
     /// Access the state exclusively through a closure.
     ///
     /// Panics if called while another `with` is still on the stack.
-    pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+    pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         if self.borrowed.swap(true, Ordering::Acquire) {
-            panic!();
+            return None;
         }
         let result = f(unsafe { &mut *self.inner.get() });
         self.borrowed.store(false, Ordering::Release);
-        result
+        Some(result)
     }
 }

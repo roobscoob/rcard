@@ -1,8 +1,17 @@
 #![no_std]
 
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, hubpack::SerializedSize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
 )]
+#[repr(C, packed)]
 pub struct SystemDateTime {
     pub year: u16,
     pub month: u8,

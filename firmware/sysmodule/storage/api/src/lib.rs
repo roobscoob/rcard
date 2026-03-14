@@ -5,16 +5,26 @@ pub use storage_api::{BlockError, Storage};
 
 include!(concat!(env!("OUT_DIR"), "/partition_names.rs"));
 
-#[derive(serde::Serialize, serde::Deserialize, hubpack::SerializedSize, Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    rcard_log::Format,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(u8)]
 pub enum AcquireError {
     /// The partition is already acquired by another task.
-    InUse,
+    InUse = 0,
     /// No partition with this name exists.
-    NotFound,
+    NotFound = 1,
     /// The partition belongs to a filesystem and cannot be acquired directly.
-    ManagedByFilesystem,
+    ManagedByFilesystem = 2,
     /// The calling task does not have permission to access this partition.
-    NotAllowed,
+    NotAllowed = 3,
 }
 
 /// A partition on a block device, presenting a subrange of blocks

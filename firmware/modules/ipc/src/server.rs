@@ -142,11 +142,11 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
                 return;
             }
         }
-        panic!(
-            "ipc::Server: TASK_COUNT ({}) exceeded — task index {} has no tracking slot",
-            crate::TASK_COUNT,
-            task_index,
-        );
+
+        #[allow(clippy::panic)]
+        {
+            panic!("ipc::Server: TASK_COUNT exceeded");
+        }
     }
 
     /// Run the server loop forever, dispatching incoming messages.
@@ -203,7 +203,8 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
             let _ = write!(
                 debug_uart::Uart3,
                 "[ipc k=0x{kind:02x} m=0x{method:02x} from={:?} leases={}]\n",
-                msg.sender, msg.lease_count,
+                msg.sender,
+                msg.lease_count,
             );
         }
 
@@ -239,11 +240,17 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
             Some(d) => {
                 d.dispatch(method, msg_data, reply);
                 #[cfg(feature = "dangerously_enable_uart3_debugging")]
-                { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc ok]\n"); }
+                {
+                    use core::fmt::Write;
+                    let _ = write!(debug_uart::Uart3, "[ipc ok]\n");
+                }
             }
             None => {
                 #[cfg(feature = "dangerously_enable_uart3_debugging")]
-                { use core::fmt::Write; let _ = write!(debug_uart::Uart3, "[ipc NO DISPATCHER k=0x{kind:02x}]\n"); }
+                {
+                    use core::fmt::Write;
+                    let _ = write!(debug_uart::Uart3, "[ipc NO DISPATCHER k=0x{kind:02x}]\n");
+                }
                 reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
             }
         }

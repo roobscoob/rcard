@@ -3,11 +3,14 @@ name = "sysmodule_time"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["bare-panics"]
+bare-panics = []
+
 [dependencies]
-hubpack = "0.1.2"
 idyll_runtime.workspace = true
 ipc = { path = "../../modules/ipc" }
-sysmodule_time_api = { path = "api" }
+sysmodule_time_api = { path = "api", features = ["bare-panics"] }
 userlib.workspace = true
 
 [[bin]]

@@ -26,6 +26,20 @@ impl_format!(f64, write_f64);
 impl_format!(char, write_char);
 impl_format!(bool, write_bool);
 
+impl Format for usize {
+    #[inline]
+    fn format<W: Writer>(&self, f: &mut Formatter<W>) {
+        f.write_u64(*self as u64);
+    }
+}
+
+impl Format for isize {
+    #[inline]
+    fn format<W: Writer>(&self, f: &mut Formatter<W>) {
+        f.write_i64(*self as i64);
+    }
+}
+
 impl Format for &str {
     #[inline]
     fn format<W: Writer>(&self, f: &mut Formatter<W>) {
@@ -51,5 +65,13 @@ impl<T: Format> Format for [T] {
     #[inline]
     fn format<W: Writer>(&self, f: &mut Formatter<W>) {
         f.write_slice(self);
+    }
+}
+
+#[cfg(feature = "userlib")]
+impl Format for userlib::TaskId {
+    #[inline]
+    fn format<W: Writer>(&self, f: &mut Formatter<W>) {
+        f.write_u16(u16::from(*self));
     }
 }

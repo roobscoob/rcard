@@ -4,10 +4,12 @@ use crate::LogLevel;
     Clone,
     Copy,
     Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    hubpack::SerializedSize,
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
 )]
+#[repr(C, packed)]
 pub struct LogMetadata {
     pub level: LogLevel,
     /// Monotonic kernel ticks since boot (from GET_TIMER syscall).

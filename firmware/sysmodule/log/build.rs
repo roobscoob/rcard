@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -51,7 +53,7 @@ fn main() {
         for (task_name, groups) in subs {
             if groups
                 .as_array()
-                .map_or(false, |g| g.iter().any(|v| v.as_str() == Some("logs")))
+                .is_some_and(|g| g.iter().any(|v| v.as_str() == Some("logs")))
             {
                 if let Some(idx) = tasks.iter().position(|t| t == task_name) {
                     subscriber_indices.push(idx as u16);

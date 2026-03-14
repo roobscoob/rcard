@@ -14,9 +14,8 @@ dangerously_enable_uart3_debugging = []
 userlib.workspace = true
 zerocopy = { version = "0.8.40", features = ["derive"] }
 idyll_runtime.workspace = true
-hubpack = "0.1.2"
-serde = { version = "1", default-features = false, features = ["derive"] }
 ipc-macros = { path = "macros" }
+rcard-log = { path = "../../../shared/log", features = ["userlib"] }
 
 [lints]
 workspace = true

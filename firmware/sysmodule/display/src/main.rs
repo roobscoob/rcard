@@ -17,6 +17,7 @@ const LCD_WR: u32 = 0x94;
 const SPI_IF_CONF: u32 = 0x9C;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
+rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 
 fn lcdc_write(offset: u32, value: u32) {
@@ -161,8 +162,9 @@ impl Display for DisplayResource {
             ssd1312_cmd(0x10);
             let row_start = (page as usize) * width;
             let _ = framebuffer.read_range(row_start, &mut row_buf[..width]);
-            for col in 0..width {
-                ssd1312_data(row_buf[col]);
+            let row_buf = &row_buf[..width];
+            for col in row_buf {
+                ssd1312_data(*col);
             }
         }
     }
@@ -177,6 +179,7 @@ impl Drop for DisplayResource {
 
 #[export_name = "main"]
 fn main() -> ! {
+    rcard_log::info!("Awake");
     ipc::server! {
         Display: DisplayResource,
     }
