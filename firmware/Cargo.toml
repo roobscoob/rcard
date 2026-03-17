@@ -47,6 +47,7 @@ idyll_runtime = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca80
 hubris-build = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
 hubris-task-slots = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
 kipc = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
+rcard_log = { path = "../shared/log", package = "rcard-log" }
 
 [patch."https://github.com/cbiffle/exhubris"]
 userlib = { path = "patches/userlib" }

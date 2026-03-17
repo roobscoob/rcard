@@ -3,6 +3,8 @@
 
 use core::mem::MaybeUninit;
 
+// use kipc::{SchedState, TaskState};
+
 include!(concat!(env!("OUT_DIR"), "/task_names.rs"));
 
 const FAULT_NOTIFICATION: u32 = 1;
@@ -104,12 +106,116 @@ fn handle_drop_report(sender: userlib::TaskId, data: &[u8]) {
     userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
 }
 
+// fn usart_write_sched_state(state: SchedState) {
+//     match state {
+//         SchedState::Stopped => usart_write_bytes(b"Stopped"),
+//         SchedState::Runnable => usart_write_bytes(b"Runnable"),
+//         SchedState::InSend(task_id) => {
+//             usart_write_bytes(b"InSend(");
+//             usart_write_u32(task_id as u32);
+//             usart_write_bytes(b")");
+//         }
+//         SchedState::InReply(task_id) => {
+//             usart_write_bytes(b"InReply(");
+//             usart_write_u32(task_id as u32);
+//             usart_write_bytes(b")");
+//         }
+//         SchedState::InRecv(Some(task_id)) => {
+//             usart_write_bytes(b"InRecv(Some(");
+//             usart_write_u32(task_id as u32);
+//             usart_write_bytes(b"))");
+//         }
+//         SchedState::InRecv(None) => usart_write_bytes(b"InRecv(None)"),
+//     }
+// }
+
+// fn usart_write_fault_source(source: FaultSource) {
+//     match source {
+//         FaultSource::User => usart_write_bytes(b"User"),
+//         FaultSource::Kernel => usart_write_bytes(b"Kernel"),
+//     }
+// }
+
+// fn usart_write_opt_addr(address: Option<u32>) {
+//     match address {
+//         Some(addr) => {
+//             usart_write_bytes(b"Some(0x");
+//             usart_write_u32(addr);
+//             usart_write_bytes(b")");
+//         }
+//         None => usart_write_bytes(b"None"),
+//     }
+// }
+
+// fn usart_write_fault_info(fault: FaultInfo) {
+//     match fault {
+//         FaultInfo::MemoryAccess { address, source } => {
+//             usart_write_bytes(b"MemoryAccess { address: ");
+//             usart_write_opt_addr(address);
+//             usart_write_bytes(b", source: ");
+//             usart_write_fault_source(source);
+//             usart_write_bytes(b" }");
+//         }
+//         FaultInfo::StackOverflow { address } => {
+//             usart_write_bytes(b"StackOverflow { address: 0x");
+//             usart_write_u32(address);
+//             usart_write_bytes(b" }");
+//         }
+//         FaultInfo::BusError { address, source } => {
+//             usart_write_bytes(b"BusError { address: ");
+//             usart_write_opt_addr(address);
+//             usart_write_bytes(b", source: ");
+//             usart_write_fault_source(source);
+//             usart_write_bytes(b" }");
+//         }
+//         FaultInfo::DivideByZero => usart_write_bytes(b"DivideByZero"),
+//         FaultInfo::IllegalText => usart_write_bytes(b"IllegalText"),
+//         FaultInfo::IllegalInstruction => usart_write_bytes(b"IllegalInstruction"),
+//         FaultInfo::InvalidOperation(code) => {
+//             usart_write_bytes(b"InvalidOperation(0x");
+//             usart_write_u32(code);
+//             usart_write_bytes(b")");
+//         }
+//         FaultInfo::SyscallUsage(err) => {
+//             usart_write_bytes(b"SyscallUsage(");
+//             usart_write_u32(err as u32);
+//             usart_write_bytes(b")");
+//         }
+//         FaultInfo::Panic => usart_write_bytes(b"Panic"),
+//         FaultInfo::Injected(task_id) => {
+//             usart_write_bytes(b"Injected(");
+//             usart_write_u32(task_id.task_index() as u32);
+//             usart_write_bytes(b")");
+//         }
+//         FaultInfo::FromServer(task_id, reason) => {
+//             usart_write_bytes(b"FromServer(");
+//             usart_write_u32(task_id.task_index() as u32);
+//             usart_write_bytes(b", ");
+//             usart_write_u32(reason as u32);
+//             usart_write_bytes(b")");
+//         }
+//     }
+// }
+
+// fn usart_write_state(state: TaskState) {
+//     match state {
+//         TaskState::Healthy(sched) => {
+//             usart_write_bytes(b"Healthy(");
+//             usart_write_sched_state(sched);
+//             usart_write_bytes(b")");
+//         }
+
+//         TaskState::Faulted { fault, original_state }
+//     }
+// }
+
 fn handle_faults() {
     let mut next_task = 1;
     while let Some(fault_index) = kipc::find_faulted_task(next_task) {
         let fault_index = usize::from(fault_index);
 
         let name = TASK_NAMES.get(fault_index).copied().unwrap_or("?");
+        // let state = kipc::read_task_status(fault_index);
 
         usart_write_bytes(b"supervisor: task ");
         usart_write_u32(fault_index as u32);

@@ -8,7 +8,7 @@ use crate::arena::CloneError;
 use rcard_log::Format;
 
 /// A handle was lost (evicted, freed, wrong owner, stale, or server died).
-#[derive(Debug)]
+#[derive(Debug, Format)]
 pub struct HandleLostError;
 
 // ── Constructor family (4) ─────────────────────────────

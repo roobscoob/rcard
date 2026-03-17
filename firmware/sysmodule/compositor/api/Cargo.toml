@@ -9,8 +9,9 @@ bare-panics = []
 [dependencies]
 ipc = { path = "../../../modules/ipc" }
 idyll_runtime.workspace = true
+rcard_log.workspace = true
 userlib.workspace = true
-zerocopy = "0.8"
+zerocopy = { version = "0.8", features = ["derive"] }
 
 [lib]
 test = false

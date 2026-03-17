@@ -6,7 +6,7 @@
 use littlefs2_sys::*;
 use sysmodule_fs_api::{Folder, OpenError};
 
-use crate::filesystem::{lease_to_cstr, FileSystemResource};
+use crate::filesystem::{lease_to_cstr, Anything};
 use crate::state;
 
 fn find_existing(s: &mut state::FsState, fs_id: u8, path: &[u8; 64]) -> Option<usize> {
@@ -61,7 +61,7 @@ pub struct FolderResource {
 
 impl FolderResource {
     fn open_inner(
-        fs: &FileSystemResource,
+        fs: &Anything,
         path: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         let fs_id = fs.fs_id;
@@ -92,10 +92,10 @@ impl FolderResource {
     }
 }
 
-impl Folder<FileSystemResource> for FolderResource {
+impl Folder<Anything> for FolderResource {
     fn get(
         _meta: ipc::Meta,
-        fs: &FileSystemResource,
+        fs: &Anything,
         path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         Self::open_inner(fs, &path)
@@ -103,7 +103,7 @@ impl Folder<FileSystemResource> for FolderResource {
 
     fn get_or_create(
         _meta: ipc::Meta,
-        fs: &FileSystemResource,
+        fs: &Anything,
         path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         match Self::open_inner(fs, &path) {

@@ -85,7 +85,7 @@ fn main() -> ! {
 
     ipc::server! {
         FileSystemRegistry: registry::RegistryResource,
-        FileSystem: filesystem::FileSystemResource,
+        FileSystem: filesystem::Anything,
         File: file::FileResource,
         Folder: folder::FolderResource,
         FolderIterator: folder_iter::FolderIteratorResource,

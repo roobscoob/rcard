@@ -59,6 +59,10 @@ notifications {
         min-priority 0
         max-priority 10
     }
+    present {
+        min-priority 25
+        max-priority 25
+    }
 }
 
 task "idle" {
@@ -123,6 +127,7 @@ task "sysmodule_compositor" {
     uses-sysmodule "display" { with-priority 0; }
     uses-sysmodule "log" { with-priority 0; }
     uses-allocation "frame_buffers" { read; write; }
+    uses-notification "present"
 }
 
 task "sysmodule_sdmmc" {
@@ -165,4 +170,5 @@ task "fob" {
     stack-size (KiB)8
     priority (workgroup)"app"
     uses-sysmodule "log" { with-priority 0; }
+    pushes-notification "present"
 }

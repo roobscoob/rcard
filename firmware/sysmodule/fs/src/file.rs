@@ -9,7 +9,7 @@ use core::ffi::c_void;
 use littlefs2_sys::*;
 use sysmodule_fs_api::{File, FileOffset, OpenError};
 
-use crate::filesystem::{lease_to_cstr, FileSystemResource};
+use crate::filesystem::{lease_to_cstr, Anything};
 use crate::state;
 
 /// Find an already-open file with the same fs_id and path, bump refcount.
@@ -81,7 +81,7 @@ pub struct FileResource {
 
 impl FileResource {
     fn open_inner(
-        fs: &FileSystemResource,
+        fs: &Anything,
         path: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
         lfs_flags: i32,
     ) -> Result<Self, OpenError> {
@@ -154,10 +154,10 @@ fn parse_scheme_path(
     Ok((fs_id, path_len))
 }
 
-impl File<FileSystemResource> for FileResource {
+impl File<Anything> for FileResource {
     fn get_in(
         _meta: ipc::Meta,
-        fs: &FileSystemResource,
+        fs: &Anything,
         path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         Self::open_inner(fs, &path, 3)
@@ -174,7 +174,7 @@ impl File<FileSystemResource> for FileResource {
 
     fn get_or_create_in(
         _meta: ipc::Meta,
-        fs: &FileSystemResource,
+        fs: &Anything,
         path: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, OpenError> {
         Self::open_inner(fs, &path, 3 | 0x0100)

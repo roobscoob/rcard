@@ -8,6 +8,7 @@ pub use config::{DisplayConfiguration, DisplayConfigurationBuilder};
     Debug,
     Clone,
     Copy,
+    rcard_log::Format,
     zerocopy::TryFromBytes,
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
