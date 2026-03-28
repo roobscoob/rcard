@@ -3,3 +3,4 @@ build/
 *build.zip
 .work/
 .state
+__pycache__/
