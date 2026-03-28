@@ -38,41 +38,47 @@ fn auto_mount_filesystems() {
         let part_name = name_to_buf(entry.partition);
         let storage = match StoragePartition::acquire(part_name) {
             Ok(Ok(handle)) => storage_api::StorageDyn::from_dyn_handle(handle.into()),
-            Ok(Err(_e)) => {
+            Ok(Err(e)) => {
+                rcard_log::error!(
+                    "Automount Failed to acquire partition '{}': {}",
+                    entry.partition,
+                    e
+                );
+
                 continue;
             }
-            Err(_e) => {
+            Err(e) => {
+                rcard_log::error!(
+                    "Automount Failed to acquire partition '{}': {}",
+                    entry.partition,
+                    e
+                );
+
                 continue;
             }
         };
 
         let fs_id = match state::with_state(|s| s.fs_table.mount(storage)) {
             Ok(id) => id,
-            Err(FileSystemError::CorruptFilesystem) => {
-                let part_name = name_to_buf(entry.partition);
-                let storage = match StoragePartition::acquire(part_name) {
-                    Ok(Ok(handle)) => storage_api::StorageDyn::from_dyn_handle(handle.into()),
-                    Ok(Err(_e)) => {
-                        continue;
-                    }
-                    Err(_e) => {
-                        continue;
-                    }
-                };
-                match state::with_state(|s| s.fs_table.format(storage)) {
-                    Ok(id) => id,
-                    Err(_e) => {
-                        continue;
-                    }
-                }
-            }
-            Err(_e) => {
+            Err(e) => {
+                rcard_log::error!(
+                    "Automount Failed to mount filesystem on partition '{}': {}",
+                    entry.partition,
+                    e
+                );
+
                 continue;
             }
         };
 
         let reg_name = name_to_buf(entry.name);
-        if let Err(_e) = registry::register_entry(reg_name, fs_id) {
+        if let Err(e) = registry::register_entry(reg_name, fs_id) {
+            rcard_log::error!(
+                "Automount Failed to register filesystem '{}': {}",
+                entry.name,
+                e
+            );
+
             continue;
         }
     }

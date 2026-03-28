@@ -53,6 +53,20 @@ impl Monitor {
     ///   "command\n"        ← echo
     ///   "\rresponse\r\r\n" ← actual response
     pub fn query(&mut self, cmd: &str) -> Result<String, EmulatorError> {
+        self.query_with_timeout(cmd, Duration::from_millis(500))
+    }
+
+    /// Like `query`, but with a custom read timeout for slow operations.
+    pub fn query_with_timeout(
+        &mut self,
+        cmd: &str,
+        timeout: Duration,
+    ) -> Result<String, EmulatorError> {
+        // Temporarily override the stream read timeout
+        let stream = self.reader.get_ref();
+        let old_timeout = stream.read_timeout().ok().flatten();
+        stream.set_read_timeout(Some(timeout)).ok();
+
         self.write_cmd(cmd)?;
 
         let mut response = String::new();
@@ -68,6 +82,11 @@ impl Monitor {
             }
             response = trimmed.to_string();
         }
+
+        // Restore original timeout
+        let stream = self.reader.get_ref();
+        stream.set_read_timeout(old_timeout).ok();
+
         Ok(response)
     }
 

@@ -3,7 +3,7 @@
 
 use core::mem::MaybeUninit;
 
-// use kipc::{SchedState, TaskState};
+use hubris_abi::{FaultInfo, FaultSource, SchedState, TaskState};
 
 include!(concat!(env!("OUT_DIR"), "/task_names.rs"));
 
@@ -12,21 +12,26 @@ const FAULT_NOTIFICATION: u32 = 1;
 /// Well-known operation code for drop reports from the reactor.
 const OP_DROP_REPORT: u16 = 0xDEAD;
 
+fn usart() -> sifli_pac::usart::Usart {
+    sifli_pac::USART1
+}
+
 fn usart_init() {
-    unsafe {
-        let base = 0x5008_4000u32 as *mut u32;
-        base.byte_add(0x0C).write_volatile(0x1A1); // BRR = 48MHz / 115200
-        base.byte_add(0x00).write_volatile(0b1001); // CR1: UE | TE
-    }
+    let u = usart();
+    // BRR = 48MHz / 115200 = 417 (0x1A1)
+    u.brr().write(|w| w.0 = 0x1A1);
+    // CR1: UE | TE
+    u.cr1().write(|w| {
+        w.set_ue(true);
+        w.set_te(true);
+    });
 }
 
 fn usart_write_bytes(msg: &[u8]) {
-    unsafe {
-        let base = 0x5008_4000u32 as *mut u32;
-        for &b in msg {
-            while base.byte_add(0x1C).read_volatile() & (1 << 7) == 0 {}
-            base.byte_add(0x28).write_volatile(b as u32);
-        }
+    let u = usart();
+    for &b in msg {
+        while !u.isr().read().txe() {}
+        u.tdr().write(|w| w.0 = b as u32);
     }
 }
 
@@ -106,122 +111,161 @@ fn handle_drop_report(sender: userlib::TaskId, data: &[u8]) {
     userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
 }
 
-// fn usart_write_sched_state(state: SchedState) {
-//     match state {
-//         SchedState::Stopped => usart_write_bytes(b"Stopped"),
-//         SchedState::Runnable => usart_write_bytes(b"Runnable"),
-//         SchedState::InSend(task_id) => {
-//             usart_write_bytes(b"InSend(");
-//             usart_write_u32(task_id as u32);
-//             usart_write_bytes(b")");
-//         }
-//         SchedState::InReply(task_id) => {
-//             usart_write_bytes(b"InReply(");
-//             usart_write_u32(task_id as u32);
-//             usart_write_bytes(b")");
-//         }
-//         SchedState::InRecv(Some(task_id)) => {
-//             usart_write_bytes(b"InRecv(Some(");
-//             usart_write_u32(task_id as u32);
-//             usart_write_bytes(b"))");
-//         }
-//         SchedState::InRecv(None) => usart_write_bytes(b"InRecv(None)"),
-//     }
-// }
+// NOTE: print_task_state / print_all_task_states call kipc::read_task_status
+// which can panic (ssmarshal deserialization). The supervisor's
+// supervisor_must_not_panic linker guard forbids any panic path, so these
+// can only be used if read_task_status is rewritten to avoid panic.
+#[allow(dead_code)]
+fn usart_write_task_id(tid: hubris_abi::TaskId) {
+    let name = TASK_NAMES.get(tid.0 as usize).copied().unwrap_or("?");
+    usart_write_bytes(name.as_bytes());
+}
 
-// fn usart_write_fault_source(source: FaultSource) {
-//     match source {
-//         FaultSource::User => usart_write_bytes(b"User"),
-//         FaultSource::Kernel => usart_write_bytes(b"Kernel"),
-//     }
-// }
+fn usart_write_sched_state(state: &SchedState) {
+    match state {
+        SchedState::Stopped => usart_write_bytes(b"Stopped"),
+        SchedState::Runnable => usart_write_bytes(b"Runnable"),
+        SchedState::InSend(tid) => {
+            usart_write_bytes(b"InSend(");
+            usart_write_task_id(*tid);
+            usart_write_bytes(b")");
+        }
+        SchedState::InReply(tid) => {
+            usart_write_bytes(b"InReply(");
+            usart_write_task_id(*tid);
+            usart_write_bytes(b")");
+        }
+        SchedState::InRecv(Some(tid)) => {
+            usart_write_bytes(b"InRecv(");
+            usart_write_task_id(*tid);
+            usart_write_bytes(b")");
+        }
+        SchedState::InRecv(None) => usart_write_bytes(b"InRecv(*)"),
+    }
+}
 
-// fn usart_write_opt_addr(address: Option<u32>) {
-//     match address {
-//         Some(addr) => {
-//             usart_write_bytes(b"Some(0x");
-//             usart_write_u32(addr);
-//             usart_write_bytes(b")");
-//         }
-//         None => usart_write_bytes(b"None"),
-//     }
-// }
+fn usart_write_fault_info(fault: &FaultInfo) {
+    match fault {
+        FaultInfo::MemoryAccess { address, source } => {
+            usart_write_bytes(b"MemoryAccess(");
+            match address {
+                Some(a) => usart_write_hex(*a),
+                None => usart_write_bytes(b"?"),
+            }
+            usart_write_bytes(match source {
+                FaultSource::User => b", user",
+                FaultSource::Kernel => b", kernel",
+            });
+            usart_write_bytes(b")");
+        }
+        FaultInfo::StackOverflow { address } => {
+            usart_write_bytes(b"StackOverflow(");
+            usart_write_hex(*address);
+            usart_write_bytes(b")");
+        }
+        FaultInfo::BusError { address, source } => {
+            usart_write_bytes(b"BusError(");
+            match address {
+                Some(a) => usart_write_hex(*a),
+                None => usart_write_bytes(b"?"),
+            }
+            usart_write_bytes(match source {
+                FaultSource::User => b", user",
+                FaultSource::Kernel => b", kernel",
+            });
+            usart_write_bytes(b")");
+        }
+        FaultInfo::DivideByZero => usart_write_bytes(b"DivideByZero"),
+        FaultInfo::IllegalText => usart_write_bytes(b"IllegalText"),
+        FaultInfo::IllegalInstruction => usart_write_bytes(b"IllegalInstruction"),
+        FaultInfo::InvalidOperation(code) => {
+            usart_write_bytes(b"InvalidOperation(");
+            usart_write_hex(*code);
+            usart_write_bytes(b")");
+        }
+        FaultInfo::SyscallUsage(err) => {
+            usart_write_bytes(b"SyscallUsage(");
+            usart_write_u32(*err as u32);
+            usart_write_bytes(b")");
+        }
+        FaultInfo::Panic => usart_write_bytes(b"Panic"),
+        FaultInfo::Injected(tid) => {
+            usart_write_bytes(b"Injected(");
+            usart_write_task_id(*tid);
+            usart_write_bytes(b")");
+        }
+        FaultInfo::FromServer(tid, reason) => {
+            usart_write_bytes(b"FromServer(");
+            usart_write_task_id(*tid);
+            usart_write_bytes(b", ");
+            usart_write_u32(*reason as u32);
+            usart_write_bytes(b")");
+        }
+    }
+}
 
-// fn usart_write_fault_info(fault: FaultInfo) {
-//     match fault {
-//         FaultInfo::MemoryAccess { address, source } => {
-//             usart_write_bytes(b"MemoryAccess { address: ");
-//             usart_write_opt_addr(address);
-//             usart_write_bytes(b", source: ");
-//             usart_write_fault_source(source);
-//             usart_write_bytes(b" }");
-//         }
-//         FaultInfo::StackOverflow { address } => {
-//             usart_write_bytes(b"StackOverflow { address: 0x");
-//             usart_write_u32(address);
-//             usart_write_bytes(b" }");
-//         }
-//         FaultInfo::BusError { address, source } => {
-//             usart_write_bytes(b"BusError { address: ");
-//             usart_write_opt_addr(address);
-//             usart_write_bytes(b", source: ");
-//             usart_write_fault_source(source);
-//             usart_write_bytes(b" }");
-//         }
-//         FaultInfo::DivideByZero => usart_write_bytes(b"DivideByZero"),
-//         FaultInfo::IllegalText => usart_write_bytes(b"IllegalText"),
-//         FaultInfo::IllegalInstruction => usart_write_bytes(b"IllegalInstruction"),
-//         FaultInfo::InvalidOperation(code) => {
-//             usart_write_bytes(b"InvalidOperation(0x");
-//             usart_write_u32(code);
-//             usart_write_bytes(b")");
-//         }
-//         FaultInfo::SyscallUsage(err) => {
-//             usart_write_bytes(b"SyscallUsage(");
-//             usart_write_u32(err as u32);
-//             usart_write_bytes(b")");
-//         }
-//         FaultInfo::Panic => usart_write_bytes(b"Panic"),
-//         FaultInfo::Injected(task_id) => {
-//             usart_write_bytes(b"Injected(");
-//             usart_write_u32(task_id.task_index() as u32);
-//             usart_write_bytes(b")");
-//         }
-//         FaultInfo::FromServer(task_id, reason) => {
-//             usart_write_bytes(b"FromServer(");
-//             usart_write_u32(task_id.task_index() as u32);
-//             usart_write_bytes(b", ");
-//             usart_write_u32(reason as u32);
-//             usart_write_bytes(b")");
-//         }
-//     }
-// }
+fn usart_write_task_state(state: &TaskState) {
+    match state {
+        TaskState::Healthy(sched) => usart_write_sched_state(sched),
+        TaskState::Faulted {
+            fault,
+            original_state,
+        } => {
+            usart_write_bytes(b"Faulted(");
+            usart_write_fault_info(fault);
+            usart_write_bytes(b", was ");
+            usart_write_sched_state(original_state);
+            usart_write_bytes(b")");
+        }
+    }
+}
 
-// fn usart_write_state(state: TaskState) {
-//     match state {
-//         TaskState::Healthy(sched) => {
-//             usart_write_bytes(b"Healthy(");
-//             usart_write_sched_state(sched);
-//             usart_write_bytes(b")");
-//         }
+fn print_task_state(task_index: usize) {
+    let name = TASK_NAMES.get(task_index).copied().unwrap_or("?");
+    let state = kipc::read_task_status(task_index);
 
-//         TaskState::Faulted { fault, original_state }
-//     }
-// }
+    usart_write_u32(task_index as u32);
+    usart_write_bytes(b" ");
+    usart_write_bytes(name.as_bytes());
+    usart_write_bytes(b": ");
+    usart_write_task_state(&state);
+    usart_write_bytes(b"\r\n");
+}
+
+#[allow(dead_code)]
+fn print_all_task_states() {
+    usart_write_bytes(b"supervisor: task states:\r\n");
+    for i in 0..TASK_NAMES.len() {
+        print_task_state(i);
+    }
+}
 
 fn handle_faults() {
     let mut next_task = 1;
     while let Some(fault_index) = kipc::find_faulted_task(next_task) {
         let fault_index = usize::from(fault_index);
+        let state = {
+            let mut response = [0u8; core::mem::size_of::<TaskState>()];
+            userlib::sys_send_to_kernel(
+                hubris_abi::Kipcnum::ReadTaskStatus as u16,
+                &(fault_index as u32).to_le_bytes(),
+                &mut response,
+                &mut [],
+            );
+            ssmarshal::deserialize::<TaskState>(&response)
+        };
 
         let name = TASK_NAMES.get(fault_index).copied().unwrap_or("?");
-        // let state = kipc::read_task_status(fault_index);
-
         usart_write_bytes(b"supervisor: task ");
         usart_write_u32(fault_index as u32);
         usart_write_bytes(b" (");
         usart_write_bytes(name.as_bytes());
-        usart_write_bytes(b") faulted\r\n");
+        usart_write_bytes(b") ");
+        match state {
+            Ok((ref s, _)) => usart_write_task_state(s),
+            Err(_) => usart_write_bytes(b"faulted (unknown state)"),
+        }
+        usart_write_bytes(b"\r\n");
 
         kipc::reinitialize_task(fault_index, kipc::NewState::Runnable);
         next_task = fault_index.wrapping_add(1);

@@ -139,7 +139,7 @@ fn print_wrapped(msg: &str, location: Option<&str>, term_width: usize, prefix_wi
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let mut bin_path = None;
+    let mut img_path = None;
     let mut log_metadata_path = None;
 
     let mut i = 1;
@@ -150,8 +150,8 @@ fn main() {
                 log_metadata_path =
                     Some(args.get(i).expect("--log-metadata requires a path").clone());
             }
-            _ if bin_path.is_none() => {
-                bin_path = Some(args[i].clone());
+            _ if img_path.is_none() => {
+                img_path = Some(args[i].clone());
             }
             other => {
                 eprintln!("unknown argument: {other}");
@@ -161,8 +161,8 @@ fn main() {
         i += 1;
     }
 
-    let bin_path = bin_path.expect("usage: emulator-cli <binary> [--log-metadata <path>]");
-    let bin = std::fs::read(&bin_path).expect("failed to read binary");
+    let img_path = img_path.expect("usage: emulator-cli <sdmmc.img> [--log-metadata <path>]");
+    let img = std::fs::read(&img_path).expect("failed to read sdmmc image");
 
     let log_metadata = log_metadata_path.map(|path| {
         let data = std::fs::read_to_string(&path).expect("failed to read log metadata");
@@ -171,12 +171,12 @@ fn main() {
         entries
     });
 
-    // Derive renode assets path from binary: <firmware>/build/x.bin → <firmware>/renode/
-    let bin_abs = std::fs::canonicalize(&bin_path).expect("failed to resolve binary path");
-    let firmware_dir = bin_abs
+    // Derive renode assets path from image: <firmware>/build/sdmmc.img → <firmware>/renode/
+    let img_abs = std::fs::canonicalize(&img_path).expect("failed to resolve image path");
+    let firmware_dir = img_abs
         .parent() // build/
         .and_then(|p| p.parent()) // firmware/
-        .expect("binary must be inside firmware/build/");
+        .expect("image must be inside firmware/build/");
     let assets = firmware_dir.join("renode");
 
     let (tx, rx) = mpsc::channel::<UsartLog>();
@@ -194,6 +194,28 @@ fn main() {
                         if let Ok(hash) = u64::from_str_radix(hash_str.trim_start_matches("0x"), 16)
                         {
                             map.insert(hash, species);
+                        }
+                    }
+                }
+                map
+            })
+            .unwrap_or_default();
+
+        // Build lookup: type_id hash → display name (for structs, enums, variants)
+        let type_names: HashMap<u64, String> = log_metadata
+            .as_ref()
+            .map(|entries| {
+                let mut map = HashMap::new();
+                for entry in entries {
+                    for (hash_str, value) in &entry.types {
+                        let Ok(hash) =
+                            u64::from_str_radix(hash_str.trim_start_matches("0x"), 16)
+                        else {
+                            continue;
+                        };
+                        // Use "name" field from the metadata entry
+                        if let Some(name) = value.get("name").and_then(|n| n.as_str()) {
+                            map.insert(hash, name.to_string());
                         }
                     }
                 }
@@ -267,7 +289,7 @@ fn main() {
                         None => (raw_task, CYAN),
                     };
                     if let Some(species) = species_lookup.get(&log_species) {
-                        let msg = format_species(&species.format, &stream.values);
+                        let msg = format_species(&species.format, &stream.values, &type_names);
                         let loc = source_location(species);
                         print!(
                             " {lc}{BOLD}{ll}{RESET} {task_color}{task:>tp$}{RESET} {DIM}│{RESET} ",
@@ -283,13 +305,13 @@ fn main() {
                         let mut first = true;
                         for value in stream.values {
                             if first {
-                                println!("{}", format_value(&value));
+                                println!("{}", format_value(&value, &type_names));
                                 first = false;
                             } else {
                                 println!(
                                     "       {:>tp$}   {CYAN}{}{RESET}",
                                     "",
-                                    format_value(&value),
+                                    format_value(&value, &type_names),
                                     tp = task_pad,
                                 );
                             }
@@ -312,12 +334,11 @@ fn main() {
         .build()
         .expect("failed to start emulator");
 
-    let load_addr = 0x2002_0000u64;
     device
-        .load_binary(load_addr, &bin)
-        .expect("failed to load binary");
+        .map_sdmmc(&img)
+        .expect("failed to load sdmmc image");
 
-    match device.run(load_addr, 0) {
+    match device.run() {
         Ok(()) => println!("emulation finished"),
         Err(e) => eprintln!("emulation error: {:?}", e),
     }
@@ -327,14 +348,18 @@ fn main() {
 }
 
 /// Build the formatted message string from a format string + values receiver.
-fn format_species(fmt: &str, values: &mpsc::Receiver<rcard_log::OwnedValue>) -> String {
+fn format_species(
+    fmt: &str,
+    values: &mpsc::Receiver<rcard_log::OwnedValue>,
+    type_names: &HashMap<u64, String>,
+) -> String {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '{' && chars.peek() == Some(&'}') {
             chars.next();
             match values.recv() {
-                Ok(val) => out.push_str(&format_value(&val)),
+                Ok(val) => out.push_str(&format_value(&val, type_names)),
                 Err(_) => out.push_str("???"),
             }
         } else {
@@ -344,7 +369,7 @@ fn format_species(fmt: &str, values: &mpsc::Receiver<rcard_log::OwnedValue>) -> 
     out
 }
 
-fn format_value(val: &rcard_log::OwnedValue) -> String {
+fn format_value(val: &rcard_log::OwnedValue, type_names: &HashMap<u64, String>) -> String {
     use rcard_log::OwnedValue::*;
     match val {
         U8(v) => format!("{v}"),
@@ -364,16 +389,37 @@ fn format_value(val: &rcard_log::OwnedValue) -> String {
         Str(v) => v.clone(),
         Unit => "()".into(),
         Array(items) | Slice(items) => {
-            let inner: Vec<String> = items.iter().map(format_value).collect();
+            let inner: Vec<String> = items.iter().map(|v| format_value(v, type_names)).collect();
             format!("[{}]", inner.join(", "))
         }
-        Tuple { fields, .. } => {
-            let inner: Vec<String> = fields.iter().map(format_value).collect();
-            format!("({})", inner.join(", "))
+        Tuple { type_id, fields } => {
+            let inner: Vec<String> = fields.iter().map(|v| format_value(v, type_names)).collect();
+            if let Some(name) = type_names.get(type_id) {
+                if inner.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}({})", inner.join(", "))
+                }
+            } else {
+                format!("({})", inner.join(", "))
+            }
         }
-        Struct { fields, .. } => {
-            let inner: Vec<String> = fields.iter().map(|(_, v)| format_value(v)).collect();
-            format!("{{{}}}", inner.join(", "))
+        Struct { type_id, fields } => {
+            let name = type_names.get(type_id);
+            if fields.is_empty() {
+                // Unit variant or empty struct — just show the name
+                name.cloned().unwrap_or_else(|| "{}".into())
+            } else {
+                let inner: Vec<String> = fields
+                    .iter()
+                    .map(|(_, v)| format_value(v, type_names))
+                    .collect();
+                if let Some(name) = name {
+                    format!("{name} {{{}}}", inner.join(", "))
+                } else {
+                    format!("{{{}}}", inner.join(", "))
+                }
+            }
         }
     }
 }

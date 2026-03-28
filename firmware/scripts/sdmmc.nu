@@ -139,7 +139,7 @@ def "sdmmc open" [
             let lines = (python (project-root | path join scripts read_ringbuf.py) $tmp | lines | each { |l| $l | decode base64 })
             rm -f $tmp
             $lines
-        } else if $part.format in [raw boot] {
+        } else if $part.format in [raw boot ftab] {
             open $resolved | bytes at $part.offset_bytes..<($part.offset_bytes + $part.size_bytes)
         } else {
             error make { msg: $"Partition '($target)' has format '($part.format)', expected 'raw', 'boot', or 'ringbuffer'" }

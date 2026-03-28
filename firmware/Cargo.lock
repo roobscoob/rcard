@@ -5,23 +5,10 @@ version = 4
 [[package]]
 name = "abi"
 version = "0.1.0"
-source = "git+https://github.com/cbiffle/hubris-fork.git?branch=cbiffle%2Fexhubris-fixes#061df2fc76433bbc7cc3931a8981fbd509e35c97"
 dependencies = [
  "bitflags",
  "byteorder",
- "phash 0.1.0 (git+https://github.com/cbiffle/hubris-fork.git?branch=cbiffle%2Fexhubris-fixes)",
- "serde",
- "zerocopy 0.6.6",
-]
-
-[[package]]
-name = "abi"
-version = "0.1.0"
-source = "git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97#061df2fc76433bbc7cc3931a8981fbd509e35c97"
-dependencies = [
- "bitflags",
- "byteorder",
- "phash 0.1.0 (git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97)",
+ "phash",
  "serde",
  "zerocopy 0.6.6",
 ]
@@ -378,7 +365,7 @@ name = "kern"
 version = "0.1.0"
 source = "git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97#061df2fc76433bbc7cc3931a8981fbd509e35c97"
 dependencies = [
- "abi 0.1.0 (git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97)",
+ "abi",
  "anyhow",
  "armv8-m-mpu",
  "bitflags",
@@ -390,7 +377,7 @@ dependencies = [
  "cortex-m",
  "indexmap 1.9.3",
  "kerncore",
- "phash 0.1.0 (git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97)",
+ "phash",
  "phash-gen",
  "proc-macro2",
  "quote",
@@ -421,7 +408,7 @@ name = "kipc"
 version = "0.1.0"
 source = "git+https://github.com/cbiffle/exhubris?rev=69d2f5ca8017fc3aaf692eae9455ac9fcd883173#69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
 dependencies = [
- "abi 0.1.0 (git+https://github.com/cbiffle/hubris-fork.git?branch=cbiffle%2Fexhubris-fixes)",
+ "abi",
  "ssmarshal",
  "userlib",
 ]
@@ -505,11 +492,6 @@ dependencies = [
 [[package]]
 name = "phash"
 version = "0.1.0"
-source = "git+https://github.com/cbiffle/hubris-fork.git?branch=cbiffle%2Fexhubris-fixes#061df2fc76433bbc7cc3931a8981fbd509e35c97"
-
-[[package]]
-name = "phash"
-version = "0.1.0"
 source = "git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97#061df2fc76433bbc7cc3931a8981fbd509e35c97"
 
 [[package]]
@@ -518,7 +500,7 @@ version = "0.1.0"
 source = "git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97#061df2fc76433bbc7cc3931a8981fbd509e35c97"
 dependencies = [
  "anyhow",
- "phash 0.1.0 (git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97)",
+ "phash",
  "rand",
  "rand_chacha",
 ]
@@ -713,20 +695,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "sf32lb52-pac"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77d243271f821a4c8a1139582f772a5ebae87834a0825d13a16c36590dabdb80"
-dependencies = [
- "cortex-m",
- "vcell",
-]
-
-[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "sifli-pac"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7e6ed6f3066573e18785819ddaf8a6234a9b5a7490da13df9ab1c5a56d49cd7"
+dependencies = [
+ "cortex-m",
+]
 
 [[package]]
 name = "ssmarshal"
@@ -758,7 +739,10 @@ dependencies = [
 name = "supervisor"
 version = "0.1.0"
 dependencies = [
+ "abi",
  "kipc",
+ "sifli-pac",
+ "ssmarshal",
  "userlib",
 ]
 
@@ -823,6 +807,7 @@ dependencies = [
  "ipc",
  "rcard-log",
  "rcard-log-macros",
+ "sifli-pac",
  "sysmodule_display_api",
  "sysmodule_log_api",
  "userlib",
@@ -865,6 +850,7 @@ version = "0.1.0"
 dependencies = [
  "idyll_runtime",
  "ipc",
+ "rcard-log",
  "storage_api",
  "userlib",
  "zerocopy 0.8.40",
@@ -948,7 +934,7 @@ dependencies = [
  "ipc",
  "rcard-log",
  "rcard-log-macros",
- "sf32lb52-pac",
+ "sifli-pac",
  "sysmodule_log_api",
  "sysmodule_sdmmc_api",
  "userlib",
@@ -1023,7 +1009,7 @@ version = "0.1.0"
 dependencies = [
  "idyll_runtime",
  "ipc",
- "sf32lb52-pac",
+ "sifli-pac",
  "sysmodule_usart_api",
  "userlib",
 ]

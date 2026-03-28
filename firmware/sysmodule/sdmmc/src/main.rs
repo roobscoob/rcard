@@ -3,8 +3,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use sf32lb52_pac::sdmmc1::RegisterBlock;
-use sf32lb52_pac::Sdmmc1;
+use sifli_pac::sdmmc::Sdmmc as SdmmcPeri;
 
 use hubris_task_slots::SLOTS;
 use sysmodule_sdmmc_api::*;
@@ -23,8 +22,8 @@ enum SdmmcError {
     CardNotReady = 3,
 }
 
-fn regs() -> &'static RegisterBlock {
-    unsafe { &*Sdmmc1::PTR }
+fn regs() -> SdmmcPeri {
+    sifli_pac::SDMMC1
 }
 
 // ── Low-level SD command helpers ────────────────────────────────────
@@ -35,44 +34,39 @@ fn send_cmd(cmd: u8, arg: u32, has_rsp: bool, long_rsp: bool) -> Result<(u32, u3
     let r = regs();
 
     // Clear W1C status bits
-    r.sr().write(|w| unsafe {
-        w.bits(
-            (1 << 1)   // cmd_done
-            | (1 << 2) // cmd_rsp_crc
-            | (1 << 3) // cmd_timeout
-            | (1 << 5) // data_done
-            | (1 << 12), // cmd_sent
-        )
+    r.sr().write(|w| {
+        w.set_cmd_done(true);
+        w.set_cmd_rsp_crc(true);
+        w.set_cmd_timeout(true);
+        w.set_data_done(true);
+        w.set_cmd_sent(true);
     });
 
     // Set argument
-    r.car().write(|w| unsafe { w.bits(arg) });
+    r.car().write(|w| w.set_cmd_arg(arg));
 
-    // Build CCR: cmd_index[23:18] | cmd_long_rsp[17] | cmd_has_rsp[16] | cmd_start[0]
-    let mut ccr: u32 = (cmd as u32 & 0x3F) << 18;
-    if has_rsp {
-        ccr |= 1 << 16;
-    }
-    if long_rsp {
-        ccr |= 1 << 17;
-    }
-    ccr |= 1; // cmd_start
-    r.ccr().write(|w| unsafe { w.bits(ccr) });
+    // Build and send command
+    r.ccr().write(|w| {
+        w.set_cmd_index(cmd);
+        w.set_cmd_has_rsp(has_rsp);
+        w.set_cmd_long_rsp(long_rsp);
+        w.set_cmd_start(true);
+    });
 
     // Poll for cmd_done
-    while !r.sr().read().cmd_done().bit_is_set() {}
+    while !r.sr().read().cmd_done() {}
 
     // Check for timeout and CRC errors in the status register
     let sr = r.sr().read();
-    if sr.cmd_timeout().bit_is_set() {
+    if sr.cmd_timeout() {
         return Err(SdmmcError::Timeout);
     }
-    if sr.cmd_rsp_crc().bit_is_set() {
+    if sr.cmd_rsp_crc() {
         return Err(SdmmcError::CrcError);
     }
 
-    let rsp_idx = r.rir().read().bits() & 0x3F;
-    let rar1 = r.rar1().read().bits();
+    let rsp_idx = r.rir().read().rsp_index() as u32;
+    let rar1 = r.rar1().read().rsp_arg1();
     Ok((rsp_idx, rar1))
 }
 
@@ -93,20 +87,28 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     let r = regs();
 
     // Enable card detect
-    r.cdr().write(|w| unsafe { w.bits(0x19) });
+    r.cdr().write(|w| {
+        w.set_sd_data3_cd(true);
+        w.set_en_cd(true);
+        w.set_cd_hvalid(true);
+    });
 
     // Check card presence
-    if !r.sr().read().card_exist().bit_is_set() {
+    if !r.sr().read().card_exist() {
         return Err(SdmmcOpenError::InitFailed);
     }
 
     // Set clock to ~400kHz for identification (240MHz / (599+1) = 400kHz)
-    r.clkcr()
-        .write(|w| unsafe { w.div().bits(599).stop_clk().clear_bit() });
+    r.clkcr().write(|w| {
+        w.set_div(599);
+        w.set_stop_clk(false);
+    });
 
     // Set block size to 512, 1-bit bus initially
-    r.dcr()
-        .write(|w| unsafe { w.block_size().bits(0x1FF).wire_mode().bits(0) });
+    r.dcr().write(|w| {
+        w.set_block_size(0x1FF);
+        w.set_wire_mode(0);
+    });
 
     // CMD0: GO_IDLE_STATE (no response)
     let _ = send_cmd(0, 0, false, false);
@@ -142,7 +144,7 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
 
     // CMD9: SEND_CSD — read card capacity (long response)
     send_cmd(9, (rca as u32) << 16, true, true).map_err(|_| SdmmcOpenError::InitFailed)?;
-    let rar2 = regs().rar2().read().bits();
+    let rar2 = regs().rar2().read().rsp_arg2();
     // SDHC CSD v2: C_SIZE in RAR2[29:8] (22 bits)
     let c_size = (rar2 >> 8) & 0x3F_FFFF;
     let block_count = (c_size + 1) * 1024;
@@ -154,11 +156,13 @@ fn init_card() -> Result<CardInfo, SdmmcOpenError> {
     send_acmd(rca, 6, 2, true).map_err(|_| SdmmcOpenError::InitFailed)?;
 
     // Switch DCR to 4-wire mode
-    r.dcr().modify(|_, w| unsafe { w.wire_mode().bits(1) });
+    r.dcr().modify(|w| w.set_wire_mode(1));
 
     // Switch to fast clock: 240MHz / (4+1) = 48MHz
-    r.clkcr()
-        .write(|w| unsafe { w.div().bits(4).stop_clk().clear_bit() });
+    r.clkcr().write(|w| {
+        w.set_div(4);
+        w.set_stop_clk(false);
+    });
 
     Ok(CardInfo { block_count })
 }
@@ -169,20 +173,15 @@ fn read_block_hw(block_addr: u32, buf: &mut [u8; 512]) -> Result<(), SdmmcError>
     let r = regs();
 
     // Data length = 512 bytes
-    r.dlr().write(|w| unsafe { w.data_len().bits(0x1FF) });
+    r.dlr().write(|w| w.set_data_len(0x1FF));
 
     // Configure read: tran_data_en, r_wn=read, block mode, 4-wire, start
-    r.dcr().write(|w| unsafe {
-        w.block_size()
-            .bits(0x1FF)
-            .wire_mode()
-            .bits(1)
-            .r_wn()
-            .set_bit()
-            .tran_data_en()
-            .set_bit()
-            .data_start()
-            .set_bit()
+    r.dcr().write(|w| {
+        w.set_block_size(0x1FF);
+        w.set_wire_mode(1);
+        w.set_r_wn(true);
+        w.set_tran_data_en(true);
+        w.set_data_start(true);
     });
 
     // CMD17: READ_SINGLE_BLOCK (SDHC uses block addressing)
@@ -190,7 +189,7 @@ fn read_block_hw(block_addr: u32, buf: &mut [u8; 512]) -> Result<(), SdmmcError>
 
     // Read 128 words from FIFO
     for i in (0..512).step_by(4) {
-        let word = r.fifo().read().bits();
+        let word = r.fifo().read().data();
         buf[i] = word as u8;
         buf[i + 1] = (word >> 8) as u8;
         buf[i + 2] = (word >> 16) as u8;
@@ -198,8 +197,8 @@ fn read_block_hw(block_addr: u32, buf: &mut [u8; 512]) -> Result<(), SdmmcError>
     }
 
     // Wait for data_done
-    while !r.sr().read().data_done().bit_is_set() {}
-    r.sr().write(|w| unsafe { w.bits(1 << 5) });
+    while !r.sr().read().data_done() {}
+    r.sr().write(|w| w.set_data_done(true));
     Ok(())
 }
 
@@ -207,20 +206,15 @@ fn write_block_hw(block_addr: u32, buf: &[u8; 512]) -> Result<(), SdmmcError> {
     let r = regs();
 
     // Data length = 512 bytes
-    r.dlr().write(|w| unsafe { w.data_len().bits(0x1FF) });
+    r.dlr().write(|w| w.set_data_len(0x1FF));
 
     // Configure write: tran_data_en, r_wn=write, block mode, 4-wire, start
-    r.dcr().write(|w| unsafe {
-        w.block_size()
-            .bits(0x1FF)
-            .wire_mode()
-            .bits(1)
-            .r_wn()
-            .clear_bit()
-            .tran_data_en()
-            .set_bit()
-            .data_start()
-            .set_bit()
+    r.dcr().write(|w| {
+        w.set_block_size(0x1FF);
+        w.set_wire_mode(1);
+        w.set_r_wn(false);
+        w.set_tran_data_en(true);
+        w.set_data_start(true);
     });
 
     // CMD24: WRITE_BLOCK
@@ -232,12 +226,12 @@ fn write_block_hw(block_addr: u32, buf: &[u8; 512]) -> Result<(), SdmmcError> {
             | ((buf[i + 1] as u32) << 8)
             | ((buf[i + 2] as u32) << 16)
             | ((buf[i + 3] as u32) << 24);
-        r.fifo().write(|w| unsafe { w.bits(word) });
+        r.fifo().write(|w| w.set_data(word));
     }
 
     // Wait for data_done
-    while !r.sr().read().data_done().bit_is_set() {}
-    r.sr().write(|w| unsafe { w.bits(1 << 5) });
+    while !r.sr().read().data_done() {}
+    r.sr().write(|w| w.set_data_done(true));
     Ok(())
 }
 

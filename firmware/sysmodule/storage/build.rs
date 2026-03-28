@@ -76,6 +76,7 @@ fn main() {
         let fmt_variant = match format.as_str() {
             "boot" => "Boot",
             "raw" => "Raw",
+            "ftab" => "Raw",
             "littlefs" => "LittleFs",
             "ringbuffer" => "RingBuffer",
             other => panic!("unknown partition format: {other}"),

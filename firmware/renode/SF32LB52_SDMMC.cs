@@ -100,6 +100,24 @@ namespace Antmicro.Renode.Peripherals.SD
             registers.Write(offset, value);
         }
 
+        /// Load a disk image into the peripheral's backing storage.
+        /// Called via the Renode monitor: sdmmc1 LoadImage @path/to/file
+        public void LoadImage(string path)
+        {
+            using(var fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+            {
+                int toRead = (int)Math.Min(cardSize, fs.Length);
+                int offset = 0;
+                while(offset < toRead)
+                {
+                    int n = fs.Read(storage, offset, toRead - offset);
+                    if(n == 0) break;
+                    offset += n;
+                }
+            }
+            this.Log(LogLevel.Info, "SDMMC: Loaded {0} byte image from {1}", cardSize, path);
+        }
+
         public void Reset()
         {
             registers.Reset();

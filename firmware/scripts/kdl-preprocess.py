@@ -399,7 +399,8 @@ def resolve_defines(node, defines):
 def parse_block_devices(doc):
     """Extract block-device sections and compute partition tables.
 
-    Returns a dict mapping device_name -> list of partition dicts.
+    Returns a dict mapping device_name -> device dict with keys:
+        size, mapping, partitions, ftab (optional).
     """
     devices = {}
     for bd_node in find_children(doc, 'block-device'):
@@ -409,6 +410,12 @@ def parse_block_devices(doc):
         dev_size = parse_size_from_node(
             dev_size_node, f"block-device '{device_name}'",
         ) if dev_size_node is not None else None
+
+        mapping_node = find_child(bd_node, 'mapping')
+        mapping = None
+        if mapping_node is not None:
+            raw = node_arg(mapping_node)
+            mapping = int(float(raw)) if isinstance(raw, str) else int(raw)
 
         partitions = []
         offset = 0
@@ -424,14 +431,32 @@ def parse_block_devices(doc):
             fmt_node = find_child(part_node, 'format')
             fmt = node_arg(fmt_node) if fmt_node else 'raw'
 
-            partitions.append({
+            # Apply alignment (pad offset up to next multiple)
+            align_node = find_child(part_node, 'align')
+            if align_node is not None:
+                align_bytes = parse_size_from_node(align_node, context)
+                if align_bytes & (align_bytes - 1) != 0:
+                    die(f"{context} align must be a power of two")
+                remainder = offset % align_bytes
+                if remainder != 0:
+                    offset += align_bytes - remainder
+
+            part_dict = {
                 'name': part_name,
                 'offset_bytes': offset,
                 'offset_blocks': offset // BLOCK_SIZE,
                 'size_bytes': size_bytes,
                 'size_blocks': size_bytes // BLOCK_SIZE,
                 'format': fmt,
-            })
+            }
+
+            if fmt == 'ftab':
+                bt_node = find_child(part_node, 'boot_target')
+                if bt_node is None:
+                    die(f"{context} has format 'ftab' but no boot_target")
+                part_dict['boot_target'] = node_arg(bt_node)
+
+            partitions.append(part_dict)
             offset += size_bytes
 
         if dev_size is not None and offset > dev_size:
@@ -440,9 +465,51 @@ def parse_block_devices(doc):
                 f"{offset} bytes but device size is {dev_size} bytes"
             )
 
+        # Validate ftab partitions
+        ftab_parts = [p for p in partitions if p['format'] == 'ftab']
+        ftab_info = None
+        if ftab_parts:
+            if len(ftab_parts) > 1:
+                die(
+                    f"block-device '{device_name}': "
+                    f"multiple ftab partitions found; only one is allowed"
+                )
+            ftab_part = ftab_parts[0]
+            if ftab_part['offset_bytes'] != 0:
+                die(
+                    f"block-device '{device_name}': "
+                    f"ftab partition '{ftab_part['name']}' must be the "
+                    f"first partition (offset 0)"
+                )
+            if mapping is None:
+                die(
+                    f"block-device '{device_name}': "
+                    f"ftab partition requires a 'mapping' address on the "
+                    f"block-device"
+                )
+            boot_target_name = ftab_part['boot_target']
+            boot_target = next(
+                (p for p in partitions if p['name'] == boot_target_name),
+                None,
+            )
+            if boot_target is None:
+                die(
+                    f"block-device '{device_name}': ftab boot_target "
+                    f"'{boot_target_name}' references unknown partition"
+                )
+            ftab_info = {
+                'ftab_addr': mapping,
+                'ftab_partition': ftab_part['name'],
+                'boot_target': boot_target_name,
+                'boot_target_addr': mapping + boot_target['offset_bytes'],
+                'boot_target_size': boot_target['size_bytes'],
+            }
+
         devices[device_name] = {
             'size': dev_size,
+            'mapping': mapping,
             'partitions': partitions,
+            'ftab': ftab_info,
         }
     return devices
 
@@ -905,8 +972,14 @@ def parse_chip_memory_regions(chip_path):
     return regions
 
 
-def write_modified_chip(chip_path, resolved_allocations, output_path):
-    """Read the chip KDL, add allocation peripherals, write modified copy.
+def write_modified_chip(chip_path, resolved_allocations, output_path,
+                        ftab_info=None):
+    """Read the chip KDL, apply modifications, write modified copy.
+
+    Modifications:
+    - Add allocation peripherals (if resolved_allocations is non-empty).
+    - Rewrite vectors/flash memory regions to match ftab boot_target
+      (if ftab_info is provided).
 
     Returns the path to the modified chip file.
     """
@@ -930,6 +1003,42 @@ def write_modified_chip(chip_path, resolved_allocations, output_path):
             ],
         )
         chip_doc.nodes.append(periph_node)
+
+    # Rewrite vectors/flash regions to match ftab boot_target
+    if ftab_info is not None:
+        boot_addr = ftab_info['boot_target_addr']
+        boot_size = ftab_info['boot_target_size']
+
+        for mem_node in find_children(chip_doc, 'memory'):
+            for region_node in find_children(mem_node, 'region'):
+                rname = node_name_arg(region_node)
+                if rname == 'vectors':
+                    vec_size_node = find_child(region_node, 'size')
+                    vec_size = int(float(node_arg(vec_size_node)))
+                    base_node = find_child(region_node, 'base')
+                    base_node.args = [
+                        kdl.Decimal(mantissa=boot_addr, exponent=0, tag=None),
+                    ]
+                elif rname == 'flash':
+                    # vectors region must be parsed first — it precedes flash
+                    # in both chip KDL files.
+                    vec_size_node = 0
+                    for r in find_children(mem_node, 'region'):
+                        if node_name_arg(r) == 'vectors':
+                            vec_size_node = find_child(r, 'size')
+                            break
+                    vec_size = int(float(node_arg(vec_size_node)))
+                    flash_base = boot_addr + vec_size
+                    flash_size = boot_size - vec_size
+
+                    base_node = find_child(region_node, 'base')
+                    base_node.args = [
+                        kdl.Decimal(mantissa=flash_base, exponent=0, tag=None),
+                    ]
+                    size_node = find_child(region_node, 'size')
+                    size_node.args = [
+                        kdl.Decimal(mantissa=flash_size, exponent=0, tag=None),
+                    ]
 
     # Write modified chip alongside the output
     content = chip_doc.print(PRINT_CONFIG)
@@ -1309,16 +1418,49 @@ def main():
     # Reorder supervisor task to be first
     ensure_supervisor_first(doc)
 
+    # Collect ftab info from all devices (at most one)
+    ftab_info = None
+    for dev in devices.values():
+        if dev.get('ftab') is not None:
+            ftab_info = dev['ftab']
+            break
+
     # Parse chip memory regions and inject allocation peripherals
     chip_path = get_chip_path(doc, input_path)
     chip_regions = {}
     if chip_path:
         chip_regions = parse_chip_memory_regions(chip_path)
-        if resolved_allocations:
+        if resolved_allocations or ftab_info:
             mod_chip_path = write_modified_chip(
                 chip_path, resolved_allocations, output_path,
+                ftab_info=ftab_info,
             )
             update_board_chip_ref(doc, mod_chip_path, input_path)
+            # Re-parse so chip-regions.json reflects the modified layout
+            chip_regions = parse_chip_memory_regions(mod_chip_path)
+
+    # Generate ftab binary if an ftab partition was declared
+    if ftab_info is not None:
+        out_dir = os.path.dirname(output_path) or '.'
+        ftab_bin = os.path.join(out_dir, 'ftab.bin')
+        scripts_dir = os.path.join(os.path.dirname(__file__))
+        gen_ftab = os.path.join(scripts_dir, 'gen_ftab.py')
+        import subprocess
+        result = subprocess.run(
+            [
+                sys.executable, gen_ftab,
+                '--ftab-addr', str(ftab_info['ftab_addr']),
+                '--target-addr', str(ftab_info['boot_target_addr']),
+                '--target-size', str(ftab_info['boot_target_size']),
+                '--output', ftab_bin,
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            die(f"gen_ftab.py failed:\n{result.stderr}")
+        # Print gen_ftab output for visibility
+        if result.stdout.strip():
+            print(result.stdout.strip(), file=sys.stderr)
 
     # Strip non-hubake sections
     build_hubake_doc(doc)
@@ -1341,11 +1483,17 @@ def main():
                 name: dev['size'] for name, dev in devices.items()
                 if dev['size'] is not None
             },
+            'device_mappings': {
+                name: dev['mapping'] for name, dev in devices.items()
+                if dev['mapping'] is not None
+            },
             'filesystems': {
                 name: maps for name, maps in filesystems.items()
             },
             'partition_acl': partition_acl,
         }
+        if ftab_info is not None:
+            partition_data['ftab'] = ftab_info
         with open(json_path, 'w') as f:
             json.dump(partition_data, f, indent=2)
 

@@ -173,6 +173,7 @@ logLevel 3 nvic
             _usart_threads: usart_threads,
             temp_path,
             _temp_dir: temp_dir,
+            sdmmc_data: None,
         })
     }
 }

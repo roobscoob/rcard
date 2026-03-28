@@ -3,30 +3,32 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use sf32lb52_pac::usart1::RegisterBlock;
-use sf32lb52_pac::{Usart2, Usart3};
+use sifli_pac::usart::Usart as UsartPeri;
 
 use sysmodule_usart_api::*;
 
 static USART_IN_USE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-fn usart_register_block(index: u8) -> Option<&'static RegisterBlock> {
+fn usart_instance(index: u8) -> Option<UsartPeri> {
     match index {
-        2 => Some(unsafe { &*Usart2::PTR }),
-        3 => Some(unsafe { &*Usart3::PTR }),
+        2 => Some(sifli_pac::USART2),
+        3 => Some(sifli_pac::USART3),
         _ => None,
     }
 }
 
-fn init_usart(regs: &RegisterBlock) {
+fn init_usart(regs: UsartPeri) {
     // BRR = 48MHz / 115200 = 417 (0x1A1)
-    regs.brr().write(|w| unsafe { w.bits(0x1A1) });
-    regs.cr1().write(|w| w.ue().set_bit().te().set_bit());
+    regs.brr().write(|w| w.0 = 0x1A1);
+    regs.cr1().write(|w| {
+        w.set_ue(true);
+        w.set_te(true);
+    });
 }
 
 struct UsartResource {
     index: u8,
-    regs: &'static RegisterBlock,
+    regs: UsartPeri,
 }
 
 impl Usart for UsartResource {
@@ -35,7 +37,7 @@ impl Usart for UsartResource {
             return Err(UsartOpenError::ReservedUsart);
         }
 
-        let Some(regs) = usart_register_block(index) else {
+        let Some(regs) = usart_instance(index) else {
             return Err(UsartOpenError::InvalidIndex);
         };
 
@@ -55,8 +57,8 @@ impl Usart for UsartResource {
     ) {
         for i in 0..data.len() {
             let b = data.read(i).unwrap_or(0);
-            while self.regs.isr().read().txe().bit_is_clear() {}
-            self.regs.tdr().write(|w| unsafe { w.bits(b as u32) });
+            while !self.regs.isr().read().txe() {}
+            self.regs.tdr().write(|w| w.0 = b as u32);
         }
     }
 }

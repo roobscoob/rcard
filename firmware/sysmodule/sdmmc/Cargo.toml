@@ -10,7 +10,7 @@ bare-panics = []
 hubris-task-slots.workspace = true
 idyll_runtime.workspace = true
 ipc = { path = "../../modules/ipc" }
-sf32lb52-pac = { version = "0.1", default-features = false }
+sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }

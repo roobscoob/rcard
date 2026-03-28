@@ -9,7 +9,7 @@ define "workgroup" {
 app "rcard"
 
 board "sf32lb52-dev" {
-    chip "proj:chips/sf32lb52-ram.kdl"
+    chip "proj:chips/sf32lb52.kdl"
 
     memory "ext_ram" {
         base 0x6000_0000
@@ -30,12 +30,20 @@ kernel {
 }
 
 block-device "sdmmc" {
+    mapping 0x1000_0000
     size (B)120586240
     block-size (B)512
+
+    partition "sec_config" {
+        size (KiB)20
+        format "ftab"
+        boot_target "firmware"
+    }
 
     partition "firmware" {
         size (KiB)384
         format "boot"
+        align (KiB)64
     }
 
     partition "logs" {
@@ -52,7 +60,6 @@ block-device "sdmmc" {
 filesystem "global" {
     map "main" { source "sdmmc::main"; }
 }
-
 
 notifications {
     logs {
@@ -122,7 +129,7 @@ task "sysmodule_display" {
 
 task "sysmodule_compositor" {
     workspace-crate "sysmodule_compositor"
-    stack-size (KiB)2
+    stack-size (KiB)8
     priority (workgroup)"sysmodule"
     uses-sysmodule "display" { with-priority 0; }
     uses-sysmodule "log" { with-priority 0; }

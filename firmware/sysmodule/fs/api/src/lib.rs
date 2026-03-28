@@ -12,6 +12,7 @@
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    rcard_log::Format,
 )]
 #[repr(u8)]
 pub enum RegistryError {
@@ -28,6 +29,7 @@ pub enum RegistryError {
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    rcard_log::Format,
 )]
 #[repr(u8)]
 pub enum FileSystemError {

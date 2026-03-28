@@ -8,32 +8,12 @@ use sysmodule_display_api::*;
 
 static DISPLAY_IN_USE: AtomicBool = AtomicBool::new(false);
 
-const LCDC_BASE: u32 = 0x5000_8000;
-
-const LCD_CONF: u32 = 0x80;
-const LCD_IF_CONF: u32 = 0x84;
-const LCD_SINGLE: u32 = 0x90;
-const LCD_WR: u32 = 0x94;
-const SPI_IF_CONF: u32 = 0x9C;
-
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 
-fn lcdc_write(offset: u32, value: u32) {
-    unsafe {
-        (LCDC_BASE as *mut u32)
-            .byte_add(offset as usize)
-            .write_volatile(value);
-    }
-}
-
-fn lcdc_read(offset: u32) -> u32 {
-    unsafe {
-        (LCDC_BASE as *mut u32)
-            .byte_add(offset as usize)
-            .read_volatile()
-    }
+fn lcdc() -> sifli_pac::lcdc::Lcdc {
+    sifli_pac::LCDC1
 }
 
 fn busy_wait(cycles: u32) {
@@ -47,13 +27,14 @@ fn busy_wait(cycles: u32) {
 /// `is_data` selects the D/C# pin state: true = data (GDDRAM write),
 /// false = command.
 fn spi_send(is_data: bool, byte: u8) {
+    let l = lcdc();
     // bit 3: LCD_BUSY — poll until the previous transfer completes
-    while lcdc_read(LCD_SINGLE) & (1 << 3) != 0 {}
+    while l.lcd_single().read().0 & (1 << 3) != 0 {}
     // bit 0: TYPE — 0 = command (D/C# low), 1 = data (D/C# high)
-    lcdc_write(LCD_SINGLE, if is_data { 1 } else { 0 });
-    lcdc_write(LCD_WR, byte as u32);
+    l.lcd_single().write(|w| w.0 = if is_data { 1 } else { 0 });
+    l.lcd_wr().write(|w| w.0 = byte as u32);
     // bit 1: WR_TRIG — triggers the SPI write; TYPE must remain set
-    lcdc_write(LCD_SINGLE, if is_data { 1 | (1 << 1) } else { 1 << 1 });
+    l.lcd_single().write(|w| w.0 = if is_data { 1 | (1 << 1) } else { 1 << 1 });
 }
 
 fn ssd1312_cmd(byte: u8) {
@@ -71,16 +52,17 @@ fn ssd1312_cmd_arg(cmd: u8, arg: u8) {
 
 /// Configure the LCDC for 4-wire SPI mode and reset the display.
 fn lcdc_init_spi() {
+    let l = lcdc();
     // LCD_CONF: bits [4:2] LCD_INTF_SEL = 1 (SPI interface)
-    lcdc_write(LCD_CONF, 1 << 2);
+    l.lcd_conf().write(|w| w.0 = 1 << 2);
     // SPI_IF_CONF: bit 27 SPI_CS_AUTO_DIS = 1, bits [13:6] CLK_DIV = 4,
     //              bits [19:17] LINE = 0 (4-wire SPI)
-    lcdc_write(SPI_IF_CONF, (1 << 27) | (4 << 6));
+    l.spi_if_conf().write(|w| w.0 = (1 << 27) | (4 << 6));
     // LCD_IF_CONF: LCD_RSTB = 0 (assert reset),
     //              PWH[17:12] = 1, PWL[11:6] = 1, TAH[5:3] = 1, TAS[2:0] = 1
-    lcdc_write(LCD_IF_CONF, (1 << 12) | (1 << 6) | (1 << 3) | 1);
+    l.lcd_if_conf().write(|w| w.0 = (1 << 12) | (1 << 6) | (1 << 3) | 1);
     // LCD_IF_CONF: bit 23 LCD_RSTB = 1 (release reset), same timing
-    lcdc_write(LCD_IF_CONF, (1 << 23) | (1 << 12) | (1 << 6) | (1 << 3) | 1);
+    l.lcd_if_conf().write(|w| w.0 = (1 << 23) | (1 << 12) | (1 << 6) | (1 << 3) | 1);
     // Wait for SSD1312 to complete internal reset (~3us minimum)
     busy_wait(1_000);
 }

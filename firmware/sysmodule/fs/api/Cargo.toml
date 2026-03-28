@@ -12,6 +12,7 @@ idyll_runtime.workspace = true
 userlib.workspace = true
 zerocopy = "0.8"
 storage_api = { path = "../../../modules/storage_api" }
+rcard_log.workspace = true
 
 [lib]
 test = false
