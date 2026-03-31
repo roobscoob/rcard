@@ -16,6 +16,7 @@ unsafe impl Sync for Vector {}
 
 extern "C" {
     fn DefaultHandler();
+    static __VECTOR_TABLE: u32;
 }
 
 #[repr(C, align(128))]
@@ -23,9 +24,11 @@ pub struct VectorTable([Vector; 99]);
 
 #[link_section = ".vector_table.interrupts"]
 #[no_mangle]
-pub static __INTERRUPTS: VectorTable = VectorTable([Vector {
-    handler: DefaultHandler,
-}; 99]);
+pub static __INTERRUPTS: VectorTable = VectorTable(
+    [Vector {
+        handler: DefaultHandler,
+    }; 99],
+);
 
 fn clock_setup() -> u32 {
     // SF32LB52 boots from internal RC oscillator at ~48 MHz.
@@ -39,7 +42,10 @@ const VECTOR_TABLE_OFFSET_REGISTER: *mut u32 = 0xE000_ED08 as *mut u32;
 fn main() -> ! {
     // Point the CPU at our vector table (VTOR = SCB + 0x08)
     unsafe {
-        core::ptr::write_volatile(VECTOR_TABLE_OFFSET_REGISTER, __INTERRUPTS.0.as_ptr() as u32);
+        core::ptr::write_volatile(
+            VECTOR_TABLE_OFFSET_REGISTER,
+            &__VECTOR_TABLE as *const u32 as u32,
+        );
     }
 
     let cycles_per_ms = clock_setup();
