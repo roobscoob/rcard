@@ -16,7 +16,7 @@ unsafe impl Sync for Vector {}
 
 extern "C" {
     fn DefaultHandler();
-    static __VECTOR_TABLE: u32;
+    static __reset_vector: u32;
 }
 
 #[repr(C, align(128))]
@@ -42,9 +42,10 @@ const VECTOR_TABLE_OFFSET_REGISTER: *mut u32 = 0xE000_ED08 as *mut u32;
 fn main() -> ! {
     // Point the CPU at our vector table (VTOR = SCB + 0x08)
     unsafe {
+        // __reset_vector is at .vector_table + 0x08; subtract 8 to get the base
         core::ptr::write_volatile(
             VECTOR_TABLE_OFFSET_REGISTER,
-            &__VECTOR_TABLE as *const u32 as u32,
+            (&__reset_vector as *const u32 as u32) - 8,
         );
     }
 
