@@ -18,8 +18,9 @@ fn usart() -> sifli_pac::usart::Usart {
 
 fn usart_init() {
     let u = usart();
-    // BRR = 48MHz / 115200 = 417 (0x1A1)
-    u.brr().write(|w| w.0 = 0x1A1);
+    // TODO: fixme (corrupted output?)
+    // BRR = 48MHz / 1000000 = 48 (0x30)
+    u.brr().write(|w| w.0 = 0x30);
     // CR1: UE | TE
     u.cr1().write(|w| {
         w.set_ue(true);

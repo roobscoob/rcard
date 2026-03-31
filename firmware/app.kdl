@@ -12,7 +12,7 @@ board "sf32lb52-dev" {
     chip "proj:chips/sf32lb52.kdl"
 
     memory "ext_ram" {
-        base 0x6000_0000
+        base 0x1000_0000
         size 0x0080_0000
     }
 }
@@ -30,8 +30,9 @@ kernel {
 }
 
 block-device "sdmmc" {
-    mapping 0x1000_0000
-    size (B)120586240
+    mapping 0x1200_0000
+    // should be larger, 4mb for now to make flashing faster
+    size (B)4194304
     block-size (B)512
 
     partition "sec_config" {
@@ -47,12 +48,12 @@ block-device "sdmmc" {
     }
 
     partition "logs" {
-        size (MiB)10
+        size (MiB)1
         format "ringbuffer"
     }
 
     partition "main" {
-        size (MiB)10
+        size (MiB)1
         format "littlefs"
     }
 }
