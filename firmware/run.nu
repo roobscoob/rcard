@@ -2,6 +2,7 @@
 def main [
     --skip-build  # Skip the build step and just run Renode
     --build-only  # Build only, do not launch Renode
+    --flash       # Flash to physical hardware instead of running in Renode
     --with: string  # Path to a pre-built sdmmc.img (skips build, uses this image directly)
     --features: string  # Comma-delimited feature gates to enable
 ] {
@@ -276,6 +277,27 @@ def main [
     # Extract boot.bin from the sdmmc image so the emulator can load it
     rm -rf ($build_dir | path join boot.bin)
     sdmmc open firmware --img $fw | save --raw ($build_dir | path join boot.bin)
+
+    if $flash {
+        let $com_port = powershell .\scripts\Get-UsbComPorts.ps1 -VendorId "1A86" | str trim | lines
+
+        if ($com_port | is-empty) {
+            error make { msg: "No COM port found. Is the board connected?" }
+        }
+
+        print "Available COM ports:"
+        print ($com_port | str join "\n")
+
+        let $selected_com_port = if ($com_port | length) == 1 {
+            $com_port | get 0
+        } else {
+            $com_port | input list
+        }
+
+        let $file_with_location = $fw + "@0x12000000";
+
+        sftool --port $selected_com_port -c SF32LB52 write_flash $file_with_location
+    }
 
     if $build_only { return }
 

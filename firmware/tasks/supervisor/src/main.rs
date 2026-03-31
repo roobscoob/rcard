@@ -4,6 +4,7 @@
 use core::mem::MaybeUninit;
 
 use hubris_abi::{FaultInfo, FaultSource, SchedState, TaskState};
+use sifli_pac::usart::vals::M;
 
 include!(concat!(env!("OUT_DIR"), "/task_names.rs"));
 
@@ -23,6 +24,7 @@ fn usart_init() {
     u.brr().write(|w| w.0 = 0x30);
     // CR1: UE | TE
     u.cr1().write(|w| {
+        w.set_m(M::Bit8);
         w.set_ue(true);
         w.set_te(true);
     });

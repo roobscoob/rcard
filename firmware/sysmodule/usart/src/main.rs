@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use sifli_pac::usart::Usart as UsartPeri;
+use sifli_pac::usart::{vals::M, Usart as UsartPeri};
 
 use sysmodule_usart_api::*;
 
@@ -21,6 +21,7 @@ fn init_usart(regs: UsartPeri) {
     // BRR = 48MHz / 115200 = 417 (0x1A1)
     regs.brr().write(|w| w.0 = 0x1A1);
     regs.cr1().write(|w| {
+        w.set_m(M::Bit8);
         w.set_ue(true);
         w.set_te(true);
     });
