@@ -1,4 +1,4 @@
-//! COBS-framed ring buffer writer for raw block storage.
+//! COBS-framed ring buffer writer for raw byte-addressed storage.
 //!
 //! Message format on disk:
 //!
@@ -13,10 +13,13 @@
 //! - The write head moves left-to-right, wrapping around the partition.
 //! - To find the oldest valid message, locate the counter discontinuity
 //!   (the "head"), then scan forward for the first null-pair boundary.
+//!
+//! Uses `erase()` + `program()` directly for sequential NOR flash writes.
 
 use storage_api::StorageDyn;
 
-const BLOCK_SIZE: u32 = 512;
+/// Maximum program page size we support (compile-time buffer).
+const MAX_PROGRAM_SIZE: usize = 256;
 
 /// A streaming ring buffer writer.
 ///
@@ -24,14 +27,22 @@ const BLOCK_SIZE: u32 = 512;
 /// and [`end`] to finalize. Messages can be arbitrarily large.
 pub struct RingWriter {
     storage: StorageDyn,
+    /// Current write position (byte offset into the partition).
     pos: u32,
+    /// Total partition size in bytes.
     capacity: u32,
+    /// Erase unit size in bytes.
+    erase_size: u32,
+    /// Program unit size in bytes.
+    program_size: u32,
+    /// Monotonic message counter.
     counter: u32,
-    // Block I/O cache (one sector at a time)
-    block_buf: [u8; BLOCK_SIZE as usize],
-    block_num: u32,
-    block_dirty: bool,
-    block_loaded: bool,
+    // Program buffer — accumulates bytes until a full page is ready.
+    prog_buf: [u8; MAX_PROGRAM_SIZE],
+    /// Byte offset where the current prog_buf starts.
+    prog_buf_start: u32,
+    /// Number of valid bytes in prog_buf.
+    prog_buf_len: u16,
     // COBS encoding state
     cobs_buf: [u8; 254],
     cobs_len: u8,
@@ -41,16 +52,23 @@ pub struct RingWriter {
 impl RingWriter {
     /// Create a new ring writer from a storage handle.
     pub fn new(storage: StorageDyn) -> Self {
-        let capacity = storage.block_count().unwrap_or(0) * BLOCK_SIZE;
+        let geom = storage.geometry().unwrap_or(storage_api::Geometry {
+            total_size: 0,
+            erase_size: 4096,
+            program_size: 256,
+            read_size: 1,
+        });
+        assert!(geom.program_size as usize <= MAX_PROGRAM_SIZE);
         Self {
             storage,
             pos: 0,
-            capacity,
+            capacity: geom.total_size,
+            erase_size: geom.erase_size,
+            program_size: geom.program_size,
             counter: 0,
-            block_buf: [0u8; BLOCK_SIZE as usize],
-            block_num: u32::MAX,
-            block_dirty: false,
-            block_loaded: false,
+            prog_buf: [0u8; MAX_PROGRAM_SIZE],
+            prog_buf_start: 0,
+            prog_buf_len: 0,
             cobs_buf: [0u8; 254],
             cobs_len: 0,
             in_message: false,
@@ -92,7 +110,7 @@ impl RingWriter {
         }
         self.cobs_flush();
         self.emit_byte(0x00);
-        self.flush_block();
+        self.flush_prog();
 
         self.counter = self.counter.wrapping_add(1);
         self.in_message = false;
@@ -145,28 +163,40 @@ impl RingWriter {
         self.cobs_len = 0;
     }
 
-    // ── Block-buffered byte output ──────────────────────────────────
+    // ── Program-buffered byte output ───────────────────────────────
 
     fn emit_byte(&mut self, b: u8) {
-        let block = self.pos / BLOCK_SIZE;
-        let offset = (self.pos % BLOCK_SIZE) as usize;
-
-        if !self.block_loaded || self.block_num != block {
-            self.flush_block();
-            let _ = self.storage.read_block(block, &mut self.block_buf);
-            self.block_num = block;
-            self.block_loaded = true;
+        // If entering a new erase sector, erase it first.
+        if self.pos % self.erase_size == 0 && self.prog_buf_len == 0 {
+            let _ = self.storage.erase(self.pos, self.erase_size);
         }
 
-        self.block_buf[offset] = b;
-        self.block_dirty = true;
+        // Start a new prog buffer if empty.
+        if self.prog_buf_len == 0 {
+            self.prog_buf_start = self.pos;
+        }
+
+        self.prog_buf[self.prog_buf_len as usize] = b;
+        self.prog_buf_len += 1;
         self.pos = (self.pos + 1) % self.capacity;
+
+        // Flush when the program buffer is full.
+        if self.prog_buf_len as u32 == self.program_size {
+            self.flush_prog();
+        }
     }
 
-    fn flush_block(&mut self) {
-        if self.block_dirty && self.block_loaded {
-            let _ = self.storage.write_block(self.block_num, &self.block_buf);
-            self.block_dirty = false;
+    fn flush_prog(&mut self) {
+        if self.prog_buf_len == 0 {
+            return;
         }
+        // Pad remaining bytes with 0x00 (null = COBS delimiter, safe).
+        for i in self.prog_buf_len as usize..self.program_size as usize {
+            self.prog_buf[i] = 0x00;
+        }
+        let _ = self
+            .storage
+            .program(self.prog_buf_start, &self.prog_buf[..self.program_size as usize]);
+        self.prog_buf_len = 0;
     }
 }

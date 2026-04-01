@@ -1,0 +1,8 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rcard-log = { path = "../../shared/log", features = ["alloc"] }
+tokio = { version = "1", features = ["sync"] }

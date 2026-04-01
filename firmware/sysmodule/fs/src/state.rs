@@ -8,7 +8,7 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_void};
 
 use littlefs2_sys::*;
-use once_cell::GlobalState;
+use once_cell::{GlobalState, OnceCell};
 use rcard_log::OptionExt;
 use storage_api::StorageDyn;
 
@@ -21,14 +21,9 @@ pub const MAX_OPEN_DIRS: usize = 4;
 /// Maximum number of filesystem registry entries.
 pub const MAX_REGISTRY_ENTRIES: usize = 8;
 
-/// Block size used by littlefs (matches typical SD sector size).
-const BLOCK_SIZE: u32 = 512;
-/// Read granularity.
-const READ_SIZE: u32 = 512;
-/// Write (program) granularity.
-const PROG_SIZE: u32 = 512;
-/// Cache size — must be a multiple of read/prog size and a divisor of block size.
-const CACHE_SIZE: usize = 512;
+/// Cache size — sized to hold one full erase block (4096 bytes).
+/// Must be >= max(read_size, prog_size) and a divisor of block_size.
+pub const CACHE_SIZE: usize = 4096;
 /// Lookahead buffer size in bytes (must be a multiple of 8).
 const LOOKAHEAD_SIZE: usize = 16;
 
@@ -62,7 +57,7 @@ impl MountedFs {
 pub struct OpenFile {
     pub file: lfs_file_t,
     pub file_cfg: lfs_file_config,
-    pub file_cache: [u8; 512],
+    pub file_cache: [u8; CACHE_SIZE],
     pub path: [u8; 64],
     pub fs_id: u8,
     pub refcount: u8,
@@ -119,9 +114,22 @@ impl FsTable {
             .position(|s| s.is_none())
             .ok_or(sysmodule_fs_api::FileSystemError::TooManyFilesystems)?;
 
-        let block_count = storage
-            .block_count()
+        let geom = storage
+            .geometry()
             .map_err(|_| sysmodule_fs_api::FileSystemError::StorageError)?;
+
+        // Copy packed fields to locals to avoid unaligned references.
+        let erase_size = geom.erase_size;
+        let program_size = geom.program_size;
+        let read_size = geom.read_size;
+        let total_size = geom.total_size;
+
+        assert!(
+            erase_size as usize <= CACHE_SIZE,
+            "erase_size exceeds CACHE_SIZE",
+        );
+
+        let block_count = total_size / erase_size;
 
         let mut fs = MountedFs {
             lfs: UnsafeCell::new(unsafe { core::mem::zeroed() }),
@@ -138,12 +146,12 @@ impl FsTable {
         fs.config.prog = Some(lfs_prog_cb);
         fs.config.erase = Some(lfs_erase_cb);
         fs.config.sync = Some(lfs_sync_cb);
-        fs.config.read_size = READ_SIZE;
-        fs.config.prog_size = PROG_SIZE;
-        fs.config.block_size = BLOCK_SIZE;
+        fs.config.read_size = read_size;
+        fs.config.prog_size = program_size;
+        fs.config.block_size = erase_size;
         fs.config.block_count = block_count;
-        fs.config.block_cycles = 500; // wear leveling (eMMC, ~60k P/E cycles)
-        fs.config.cache_size = CACHE_SIZE as u32;
+        fs.config.block_cycles = 100; // NOR flash ~100K P/E cycles
+        fs.config.cache_size = erase_size; // one cache = one full block
         fs.config.lookahead_size = LOOKAHEAD_SIZE as u32;
         fs.config.name_max = 31;
 
@@ -230,7 +238,7 @@ impl FsState {
         const EMPTY_FILE: OpenFile = OpenFile {
             file: unsafe { core::mem::zeroed() },
             file_cfg: unsafe { core::mem::zeroed() },
-            file_cache: [0u8; 512],
+            file_cache: [0u8; CACHE_SIZE],
             path: [0u8; 64],
             fs_id: 0,
             refcount: 0,
@@ -261,13 +269,18 @@ impl FsState {
     }
 }
 
-static FS_STATE: GlobalState<FsState> = GlobalState::new(FsState::new());
+static FS_STATE: OnceCell<GlobalState<FsState>> = OnceCell::new();
+
+/// Initialize the global filesystem state. Must be called once at startup.
+pub fn init() {
+    FS_STATE.set(GlobalState::new(FsState::new())).ok();
+}
 
 /// Access the global filesystem state exclusively through a closure.
 ///
 /// Panics if called reentrantly (e.g. from within a littlefs callback).
 pub fn with_state<R>(f: impl FnOnce(&mut FsState) -> R) -> R {
-    FS_STATE.with(f).log_unwrap()
+    FS_STATE.get().log_unwrap().with(f).log_unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -294,20 +307,10 @@ unsafe extern "C" fn lfs_read_cb(
 ) -> c_int {
     let fs = unsafe { ctx(c) };
     let buf = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, size as usize) };
-
-    let byte_start = block * BLOCK_SIZE + off;
-    let mut offset = 0usize;
-    while offset < size as usize {
-        let phys_block = (byte_start + offset as u32) / 512;
-        let mut sector = [0u8; 512];
-        if fs.storage.read_block(phys_block, &mut sector).is_err() {
-            return -5; // LFS_ERR_IO
-        }
-        let intra = ((byte_start + offset as u32) % 512) as usize;
-        let avail = 512 - intra;
-        let to_copy = avail.min(size as usize - offset);
-        buf[offset..offset + to_copy].copy_from_slice(&sector[intra..intra + to_copy]);
-        offset += to_copy;
+    let erase_size = unsafe { (*c).block_size };
+    let offset = block * erase_size + off;
+    if fs.storage.read(offset, buf).is_err() {
+        return -5; // LFS_ERR_IO
     }
     0
 }
@@ -321,40 +324,21 @@ unsafe extern "C" fn lfs_prog_cb(
 ) -> c_int {
     let fs = unsafe { ctx(c) };
     let data = unsafe { core::slice::from_raw_parts(buffer as *const u8, size as usize) };
-
-    let byte_start = block * BLOCK_SIZE + off;
-    let mut offset = 0usize;
-    while offset < size as usize {
-        let phys_block = (byte_start + offset as u32) / 512;
-        let intra = ((byte_start + offset as u32) % 512) as usize;
-
-        if intra == 0 && (size as usize - offset) >= 512 {
-            if fs
-                .storage
-                .write_block(phys_block, &data[offset..offset + 512])
-                .is_err()
-            {
-                return -5;
-            }
-            offset += 512;
-        } else {
-            let mut sector = [0u8; 512];
-            if fs.storage.read_block(phys_block, &mut sector).is_err() {
-                return -5;
-            }
-            let avail = 512 - intra;
-            let to_copy = avail.min(size as usize - offset);
-            sector[intra..intra + to_copy].copy_from_slice(&data[offset..offset + to_copy]);
-            if fs.storage.write_block(phys_block, &sector).is_err() {
-                return -5;
-            }
-            offset += to_copy;
-        }
+    let erase_size = unsafe { (*c).block_size };
+    let offset = block * erase_size + off;
+    if fs.storage.program(offset, data).is_err() {
+        return -5; // LFS_ERR_IO
     }
     0
 }
 
-unsafe extern "C" fn lfs_erase_cb(_c: *const lfs_config, _block: lfs_block_t) -> c_int {
+unsafe extern "C" fn lfs_erase_cb(c: *const lfs_config, block: lfs_block_t) -> c_int {
+    let fs = unsafe { ctx(c) };
+    let erase_size = unsafe { (*c).block_size };
+    let offset = block * erase_size;
+    if fs.storage.erase(offset, erase_size).is_err() {
+        return -5; // LFS_ERR_IO
+    }
     0
 }
 

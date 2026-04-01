@@ -1,6 +1,7 @@
 target/
 build/
 *build.zip
+*build.tfw
 .work/
 .state
 __pycache__/

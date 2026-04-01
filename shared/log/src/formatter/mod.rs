@@ -166,6 +166,17 @@ impl<W: Writer> Formatter<W> {
         varint::encode_u64(&mut self.w, field_id);
     }
 
+    /// Write a raw stack dump: 68-byte register header + stack bytes.
+    ///
+    /// Header layout (all u32 LE):
+    ///   sp, stack_top, lr, pc, r0..r12, xpsr
+    #[inline]
+    pub fn write_stack_dump(&mut self, header: &[u8; 72], stack: &[u8]) {
+        self.w.write(&[TAG_STACK_DUMP]);
+        self.w.write(header);
+        self.w.write(stack);
+    }
+
     #[inline]
     pub fn write_end_of_stream(&mut self) {
         self.w.write(&[TAG_END_OF_STREAM]);

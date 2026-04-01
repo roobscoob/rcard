@@ -38,7 +38,7 @@ impl FileSystem for FileSystemResource {
             FileSystemStats {
                 total_blocks: fs.block_count,
                 free_blocks: fs.block_count.saturating_sub(used_blocks),
-                block_size: 512,
+                block_size: fs.config.block_size as u16,
             }
         })
     }

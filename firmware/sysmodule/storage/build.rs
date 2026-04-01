@@ -31,20 +31,25 @@ fn main() {
     let data: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
 
-    let block_size = data["block_size"].as_u64().unwrap();
-
     // Collect all partitions across all devices
     let mut partitions = Vec::new();
     if let Some(devices) = data["devices"].as_object() {
         for (device_name, parts) in devices {
+            // Look up per-device block size (erase size)
+            let erase_size = data["device_block_sizes"]
+                .get(device_name)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(512);
+
             if let Some(parts) = parts.as_array() {
                 for p in parts {
                     partitions.push((
                         device_name.clone(),
                         p["name"].as_str().unwrap().to_string(),
-                        p["offset_blocks"].as_u64().unwrap(),
-                        p["size_blocks"].as_u64().unwrap(),
+                        p["offset_bytes"].as_u64().unwrap(),
+                        p["size_bytes"].as_u64().unwrap(),
                         p["format"].as_str().unwrap().to_string(),
+                        erase_size,
                     ));
                 }
             }
@@ -68,11 +73,8 @@ fn main() {
         }
     }
 
-    writeln!(out, "pub const BLOCK_SIZE: u32 = {block_size};").unwrap();
-    writeln!(out).unwrap();
-
     writeln!(out, "pub const PARTITIONS: &[PartitionConfig] = &[").unwrap();
-    for (device, name, offset, size, format) in &partitions {
+    for (device, name, offset_bytes, size_bytes, format, erase_size) in &partitions {
         let fmt_variant = match format.as_str() {
             "boot" => "Boot",
             "raw" => "Raw",
@@ -84,7 +86,8 @@ fn main() {
         writeln!(
             out,
             "    PartitionConfig {{ device: \"{device}\", name: \"{name}\", \
-             offset_blocks: {offset}, size_blocks: {size}, \
+             offset_bytes: {offset_bytes}, size_bytes: {size_bytes}, \
+             erase_size: {erase_size}, \
              format: PartitionFormat::{fmt_variant} }},"
         )
         .unwrap();
@@ -114,9 +117,6 @@ fn main() {
     writeln!(out).unwrap();
 
     // Generate partition ACL function.
-    // The ACL maps partition names to the set of tasks allowed to acquire them.
-    // Task identity is checked via SLOTS (hubris_task_slots).
-    // Build a reverse map: partition_name -> [task_names]
     let mut acl_map: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     if let Some(acl) = data["partition_acl"].as_object() {

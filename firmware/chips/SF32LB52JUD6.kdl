@@ -1,0 +1,695 @@
+chip "SF32LB52"
+target-triple "thumbv8m.main-none-eabihf"
+vector-table-size 0x1CC
+
+compatible {
+    - "SF32LB52"
+    - "SF32LB52x"
+    - "arm-cortex-m33"
+}
+
+memory {
+    region "vectors" {
+        base 0x1200_0000
+        size 0x400
+        read
+    }
+    region "flash" {
+        base 0x1200_0400
+        size 0x01FF_FC00
+        read
+        execute
+    }
+    region "ram" {
+        base 0x2000_0000
+        size 0x0010_0000
+        read
+        write
+    }
+}
+
+peripheral "usart1" {
+    base 0x5008_4000
+    size 0x1000
+    irq "irq" 59
+
+    renode {
+        model "UART.STM32F7_USART" {
+            frequency 48000000
+        }
+    }
+}
+
+peripheral "usart2" {
+    base 0x5008_5000
+    size 0x1000
+    irq "irq" 74
+
+    renode {
+        model "UART.STM32F7_USART" {
+            frequency 48000000
+        }
+    }
+}
+
+peripheral "usart3" {
+    base 0x5008_6000
+    size 0x1000
+    irq "irq" 95
+
+    renode {
+        model "UART.STM32F7_USART" {
+            frequency 48000000
+        }
+    }
+}
+
+peripheral "mpi1" {
+    base 0x5004_1000
+    size 0x1000
+    irq "irq" 65
+
+    renode {
+        model "SPI.SF32LB52_MPI"
+    }
+}
+
+peripheral "mpi2" {
+    base 0x5004_2000
+    size 0x1000
+    irq "irq" 66
+
+    renode {
+        model "SPI.SF32LB52_MPI"
+    }
+}
+
+peripheral "rcc" {
+    base 0x5000_0000
+    size 0x1000
+}
+
+peripheral "gpios" {
+    base 0x500A_0000
+    size 0x1000
+    irq "irq" 84
+}
+
+peripheral "pinctrl" {
+    base 0x5000_3000
+    size 0x1000
+}
+
+peripheral "syscon" {
+    base 0x5000_B000
+    size 0x1000
+}
+
+peripheral "aon_syscon" {
+    base 0x500C_0000
+    size 0x1000
+}
+
+peripheral "pmuc_syscon" {
+    base 0x500C_A000
+    size 0x1000
+}
+
+peripheral "lcdc" {
+    base 0x5000_8000
+    size 0x128
+
+    renode {
+        model "Display.SF32LB52_LCDC"
+    }
+}
+
+peripheral "sdmmc1" {
+    base 0x5004_5000
+    size 0x400
+    irq "irq" 57
+}
+
+peripheral "rtc" {
+    base 0x500C_B000
+    size 0x78
+
+    renode {
+        model "Timers.SF32LB52_RTC"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pin capabilities (PA00–PA44)
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Pin capabilities (PA00–PA44)
+// ---------------------------------------------------------------------------
+
+pin "PA00" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { rstb; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "8080" { rstb; }
+}
+
+pin "PA01" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA02" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { te; }
+    supports "i2s" 1 { mclk; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { b2; }
+    supports "lcdc" "8080" { te; }
+}
+
+pin "PA03" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { cs; }
+    supports "i2s" 1 { sdo; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { b1; }
+    supports "lcdc" "8080" { cs; }
+}
+
+pin "PA04" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { clk; }
+    supports "i2s" 1 { sdi; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { g1; }
+    supports "lcdc" "8080" { wr; }
+}
+
+pin "PA05" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { dio0; }
+    supports "i2s" 1 { bck; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { r1; }
+    supports "lcdc" "8080" { rd; }
+}
+
+pin "PA06" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { dio1; }
+    supports "i2s" 1 { lrck; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { hst; }
+    supports "lcdc" "8080" { dc; }
+}
+
+pin "PA07" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { dio2; }
+    supports "pdm" 1 { clk; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { enb; }
+    supports "lcdc" "8080" { dio0; }
+}
+
+pin "PA08" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "lcdc" "spi" { dio3; }
+    supports "pdm" 1 { data; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { vst; }
+    supports "lcdc" "8080" { dio1; }
+}
+
+pin "PA09" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA10" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA11" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA12" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "mpi" 2 { cs; }
+    supports "sd" 1 { dio2; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA13" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "mpi" 2 { dio1; }
+    supports "sd" 1 { dio3; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA14" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "mpi" 2 { dio2; }
+    supports "sd" 1 { clk; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA15" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "mpi" 2 { dio0; }
+    supports "sd" 1 { cmd; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA16" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "mpi" 2 { clk; }
+    supports "sd" 1 { dio0; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA17" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "mpi" 2 { dio3; }
+    supports "sd" 1 { dio1; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA18" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "swd" { dio; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA19" {
+    default-pull "none"
+    supports "gpio" { any; }
+    supports "swd" { clk; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA20" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA21" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+}
+
+pin "PA22" {
+    default-pull "none"
+    supports "gpio" { any; }
+    supports "pdm" 1 { clk; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "xtal32k" { xi; }
+}
+
+pin "PA23" {
+    default-pull "none"
+    supports "gpio" { any; }
+    supports "pdm" 1 { data; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "xtal32k" { xo; }
+}
+
+pin "PA24" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "spi" 1 { dio; }
+    supports "i2s" 1 { mclk; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "wkup" { pin0; }
+}
+
+pin "PA25" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "spi" 1 { di; }
+    supports "i2s" 1 { sdo; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "xtal32k" { ext; }
+    supports "wkup" { pin1; }
+}
+
+pin "PA26" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "wkup" { pin2; }
+}
+
+pin "PA27" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "wkup" { pin3; }
+}
+
+pin "PA28" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "spi" 1 { clk; }
+    supports "i2s" 1 { sdi; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "gpadc" { ch0; }
+}
+
+pin "PA29" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "spi" 1 { cs; }
+    supports "i2s" 1 { bck; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "gpadc" { ch1; }
+}
+
+pin "PA30" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "efuse" { pwr; }
+    supports "i2s" 1 { lrck; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "gpadc" { ch2; }
+}
+
+pin "PA31" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "gpadc" { ch3; }
+}
+
+pin "PA32" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "gpadc" { ch4; }
+}
+
+pin "PA33" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "gpadc" { ch5; }
+}
+
+pin "PA34" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "gpadc" { ch6; }
+    supports "wkup" { pin10; }
+}
+
+pin "PA35" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usb11" { dp; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "wkup" { pin11; }
+}
+
+pin "PA36" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usb11" { dm; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "wkup" { pin12; }
+}
+
+pin "PA37" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "spi" 2 { dio; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "8080" { dio2; }
+    supports "wkup" { pin13; }
+}
+
+pin "PA38" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "spi" 2 { di; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "wkup" { pin14; }
+}
+
+pin "PA39" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "spi" 2 { clk; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { vck; }
+    supports "lcdc" "8080" { dio3; }
+    supports "wkup" { pin15; }
+}
+
+pin "PA40" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "spi" 2 { cs; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { xrst; }
+    supports "lcdc" "8080" { dio4; }
+    supports "wkup" { pin16; }
+}
+
+pin "PA41" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { hck; }
+    supports "lcdc" "8080" { dio5; }
+    supports "wkup" { pin17; }
+}
+
+pin "PA42" {
+    default-pull "up"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { r2; }
+    supports "lcdc" "8080" { dio6; }
+    supports "wkup" { pin18; }
+}
+
+pin "PA43" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "lcdc" "jdi" { g2; }
+    supports "lcdc" "8080" { dio7; }
+    supports "wkup" { pin19; }
+}
+
+pin "PA44" {
+    default-pull "down"
+    supports "gpio" { any; }
+    supports "usart" { tx; rx; cts; rts; }
+    supports "i2c" { sda; scl; }
+    supports "gptim" { ch1; ch2; ch3; ch4; etr; }
+    supports "lptim" { in; out; etr; }
+    supports "atim" { ch1; ch2; ch3; ch4; ch1n; ch2n; ch3n; bk; bk2; etr; }
+    supports "wkup" { pin20; }
+}

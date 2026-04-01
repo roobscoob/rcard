@@ -7,6 +7,7 @@ edition = "2021"
 alloc = []
 writer = []
 userlib = ["dep:userlib"]
+panics-emit-stack-dump = ["writer"]
 
 [dependencies]
 zerocopy = { version = "0.8", default-features = false, features = ["derive"] }

@@ -8,12 +8,156 @@ define "workgroup" {
 
 app "rcard"
 
-board "sf32lb52-dev" {
-    chip "proj:chips/sf32lb52.kdl"
+board "sf32lb52-devkit-nano" {
+    chip "proj:chips/SF32LB52JUD6.kdl"
+
+    memory "ext_ram" {
+        base 0x1000_0000
+        size 0x0010_0000
+    }
+}
+
+board "sf32lb52-devkit-lcd" {
+    chip "proj:chips/SF32LB525UC6.kdl"
 
     memory "ext_ram" {
         base 0x1000_0000
         size 0x0080_0000
+    }
+}
+
+board "bentoboard" {
+    chip "proj:chips/SF32LB525UC6.kdl"
+
+    memory "ext_ram" {
+        base 0x1000_0000
+        size 0x0080_0000
+    }
+
+    // Kernel/bootloader logging (muxed with SWCLK/SWDIO, available over USB SBU)
+    usart 1 {
+        rx "PA18"
+        tx "PA19"
+    }
+
+    // Userspace logging
+    usart 2 {
+        tx "PA09"
+        rx "PA10"
+    }
+
+    // Emulation side-channel (not exposed over hardware)
+    // usart 3 {}
+
+    // SSD1312 OLED display (https://www.buydisplay.com/download/ic/SSD1312_Datasheet.pdf)
+    // Note: display logic voltage powered by VDD33_VOUT2, must be enabled BEFORE 9V supply
+    lcdc "spi" {
+        rstb "PA00"
+        cs "PA03"
+        clk "PA04"
+        dio0 "PA05"  // DAT
+        dio1 "PA06"  // D/C
+    }
+
+    // 8MB OSPI PSRAM (embedded in chip)
+    // mpi 1 {}
+
+    // 32MB NOR flash (GD25Q256EWIGR), power on VDD33_VOUT1
+    mpi 2 {
+        cs "PA12"
+        dio1 "PA13"
+        dio2 "PA14"
+        dio0 "PA15"
+        clk "PA16"
+        dio3 "PA17"
+    }
+
+    // Always-on I2C bus
+    // LIS3DH accelerometer at 0x19 (https://www.st.com/resource/en/datasheet/lis3dh.pdf)
+    i2c 1 {
+        sda "PA41"
+        scl "PA42"
+    }
+
+    // Top touch controller I2C bus, power on VDD33_VOUT2
+    // CAP1208 capacitive touch at 0x28 (https://ww1.microchip.com/downloads/aemDocuments/documents/OTH/ProductDocuments/DataSheets/00001570C.pdf)
+    i2c 2 {
+        sda "PA32"
+        scl "PA33"
+    }
+
+    // Bottom touch controller I2C bus, power on VDD33_VOUT2
+    // CAP1208 capacitive touch at 0x28 (https://ww1.microchip.com/downloads/aemDocuments/documents/OTH/ProductDocuments/DataSheets/00001570C.pdf)
+    i2c 3 {
+        sda "PA30"
+        scl "PA31"
+    }
+
+    // 125kHz RFID carrier (I2S used for signal generation)
+    i2s 1 {
+        sdo "PA25"
+    }
+
+    // WS2812B LED data
+    spi 1 {
+        dio "PA24"
+    }
+
+    // NFC chip ST25R3916B (https://www.st.com/resource/en/datasheet/st25r3916b.pdf)
+    spi 2 {
+        dio "PA37"
+        di "PA38"
+        clk "PA39"
+        cs "PA40"
+    }
+
+    // Haptic motor PWM
+    atim 1 {
+        ch1 "PA07"
+    }
+
+    gpio "out" {
+        display_en "PA02"   // 9V regulator enable
+        ws2812_en "PA28"
+        haptic_en "PA08"
+    }
+
+    gpio "in" {
+        accel_int "PA43"
+        rfid_wake "PA26"
+        touch_int "PA27"    // shared between top and bottom CAP1208
+        nfc_int "PA44"
+        ovp_fault "PA01"    // TPS25200DRVT (https://www.ti.com/lit/ds/symlink/tps25200.pdf)
+    }
+
+    block-device "ext_flash" {
+        mapping 0x1200_0000
+        size (B)4194304
+        block-size (B)4096
+
+        partition "sec_config" {
+            size (KiB)20
+            format "ftab"
+            boot_target "firmware"
+        }
+
+        partition "firmware" {
+            size (KiB)384
+            format "boot"
+            align (KiB)64
+        }
+
+        partition "logs" {
+            size (MiB)1
+            format "ringbuffer"
+            source "zero:"
+        }
+
+        partition "main" {
+            size (MiB)1
+            format "littlefs"
+            source "proj:/data"
+        }
     }
 }
 
@@ -29,37 +173,8 @@ kernel {
     stack-size (KiB)1
 }
 
-block-device "sdmmc" {
-    mapping 0x1200_0000
-    // should be larger, 4mb for now to make flashing faster
-    size (B)4194304
-    block-size (B)512
-
-    partition "sec_config" {
-        size (KiB)20
-        format "ftab"
-        boot_target "firmware"
-    }
-
-    partition "firmware" {
-        size (KiB)384
-        format "boot"
-        align (KiB)64
-    }
-
-    partition "logs" {
-        size (MiB)1
-        format "ringbuffer"
-    }
-
-    partition "main" {
-        size (MiB)1
-        format "littlefs"
-    }
-}
-
 filesystem "global" {
-    map "main" { source "sdmmc::main"; }
+    map "main" { source "ext_flash::main"; }
 }
 
 notifications {
@@ -138,11 +253,12 @@ task "sysmodule_compositor" {
     uses-notification "present"
 }
 
-task "sysmodule_sdmmc" {
-    workspace-crate "sysmodule_sdmmc"
-    stack-size (KiB)4
+task "sysmodule_mpi" {
+    workspace-crate "sysmodule_mpi"
+    stack-size (KiB)2
     priority (workgroup)"sysmodule"
-    uses-peripheral "sdmmc1"
+    uses-peripheral "mpi1"
+    uses-peripheral "mpi2"
     uses-sysmodule "log" { with-priority 0; }
 }
 
@@ -150,7 +266,7 @@ task "sysmodule_storage" {
     workspace-crate "sysmodule_storage"
     stack-size (KiB)4
     priority (workgroup)"sysmodule"
-    uses-sysmodule "sdmmc" { with-priority 0; }
+    uses-sysmodule "mpi" { with-priority 0; }
     peer-sysmodule "fs"
     uses-sysmodule "log" { with-priority 0; }
 }
@@ -168,7 +284,7 @@ task "sysmodule_fs" {
     workspace-crate "sysmodule_fs"
     stack-size (KiB)32
     priority (workgroup)"sysmodule"
-    uses-sysmodule "sdmmc" { with-priority 0; }
+    uses-sysmodule "mpi" { with-priority 0; }
     uses-sysmodule "storage" { with-priority 0; }
     uses-sysmodule "log" { with-priority 0; }
 }

@@ -36,6 +36,9 @@ pub use noop_writer::NoopWriter;
 #[cfg(feature = "writer")]
 pub use unwrap::{OptionExt, ResultExt};
 
+#[cfg(feature = "writer")]
+pub mod stack_dump;
+
 #[cfg(feature = "alloc")]
 pub mod decoder;
 #[cfg(feature = "alloc")]

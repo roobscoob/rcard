@@ -47,6 +47,15 @@ enum State {
         buf: Vec<u8>,
         remaining: u64,
     },
+    ReadingStackDumpHeader {
+        buf: [u8; 72],
+        pos: u8,
+    },
+    ReadingStackDumpData {
+        header: [u8; 72],
+        buf: Vec<u8>,
+        remaining: u32,
+    },
 }
 
 enum VarintPurpose {
@@ -182,6 +191,49 @@ impl Decoder {
                     }
                 }
             }
+
+            State::ReadingStackDumpHeader { mut buf, pos } => {
+                buf[pos as usize] = byte;
+                let pos = pos + 1;
+                if pos < 72 {
+                    self.state = State::ReadingStackDumpHeader { buf, pos };
+                    FeedResult::Incomplete
+                } else {
+                    // Parse sp and stack_top from the header to compute stack length
+                    let sp = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    let stack_top = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                    let remaining = stack_top.saturating_sub(sp);
+                    if remaining == 0 {
+                        self.complete_value(Self::stack_dump_from_header(buf, Vec::new()))
+                    } else {
+                        self.state = State::ReadingStackDumpData {
+                            header: buf,
+                            buf: Vec::with_capacity(remaining as usize),
+                            remaining,
+                        };
+                        FeedResult::Incomplete
+                    }
+                }
+            }
+
+            State::ReadingStackDumpData {
+                header,
+                mut buf,
+                remaining,
+            } => {
+                buf.push(byte);
+                let remaining = remaining - 1;
+                if remaining > 0 {
+                    self.state = State::ReadingStackDumpData {
+                        header,
+                        buf,
+                        remaining,
+                    };
+                    FeedResult::Incomplete
+                } else {
+                    self.complete_value(Self::stack_dump_from_header(header, buf))
+                }
+            }
         }
     }
 
@@ -273,6 +325,14 @@ impl Decoder {
                     acc: 0,
                     shift: 0,
                     purpose: VarintPurpose::StructTypeId,
+                };
+                FeedResult::Incomplete
+            }
+
+            TAG_STACK_DUMP => {
+                self.state = State::ReadingStackDumpHeader {
+                    buf: [0; 72],
+                    pos: 0,
                 };
                 FeedResult::Incomplete
             }
@@ -434,6 +494,35 @@ impl Decoder {
                 self.state = State::AwaitingTag;
                 FeedResult::Incomplete
             }
+        }
+    }
+
+    fn stack_dump_from_header(header: [u8; 72], stack: Vec<u8>) -> OwnedValue {
+        let u32_at = |off: usize| {
+            u32::from_le_bytes([
+                header[off],
+                header[off + 1],
+                header[off + 2],
+                header[off + 3],
+            ])
+        };
+        let sp = u32_at(0);
+        let stack_top = u32_at(4);
+        let lr = u32_at(8);
+        let pc = u32_at(12);
+        let mut registers = [0u32; 13];
+        for i in 0..13 {
+            registers[i] = u32_at(16 + i * 4);
+        }
+        let xpsr = u32_at(68);
+        OwnedValue::StackDump {
+            sp,
+            stack_top,
+            lr,
+            pc,
+            registers,
+            xpsr,
+            stack,
         }
     }
 

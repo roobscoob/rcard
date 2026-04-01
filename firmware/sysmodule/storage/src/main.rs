@@ -6,12 +6,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use hubris_task_slots::SLOTS;
 use once_cell::OnceCell;
 use rcard_log::{OptionExt, ResultExt};
+use storage_api::{Geometry, StorageError};
+use sysmodule_mpi_api::*;
 use sysmodule_storage_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
-sysmodule_log_api::panic_handler!(to Log; cleanup Sdmmc);
-sysmodule_sdmmc_api::bind_sdmmc!(Sdmmc = SLOTS.sysmodule_sdmmc);
+sysmodule_log_api::panic_handler!(to Log; cleanup Mpi);
+sysmodule_mpi_api::bind_mpi!(Mpi = SLOTS.sysmodule_mpi);
 
 // ── Build-time partition config ─────────────────────────────────────
 
@@ -27,8 +29,9 @@ pub enum PartitionFormat {
 pub struct PartitionConfig {
     pub device: &'static str,
     pub name: &'static str,
-    pub offset_blocks: u64,
-    pub size_blocks: u64,
+    pub offset_bytes: u64,
+    pub size_bytes: u64,
+    pub erase_size: u64,
     pub format: PartitionFormat,
 }
 
@@ -61,20 +64,65 @@ fn is_managed(name: &str) -> bool {
     MANAGED_PARTITIONS.iter().any(|&m| m == name)
 }
 
-// ── Shared SDMMC handle ────────────────────────────────────────────
+// ── Shared MPI handle ──────────────────────────────────────────────
 
-static SDMMC: OnceCell<Sdmmc> = OnceCell::new();
+static MPI: OnceCell<Mpi> = OnceCell::new();
 
-fn sdmmc() -> &'static Sdmmc {
-    SDMMC.get().log_expect("SDMMC not initialized")
+fn mpi() -> &'static Mpi {
+    MPI.get().log_expect("MPI not initialized")
+}
+
+// ── Lease forwarding helpers ───────────────────────────────────────
+
+/// Read from MPI into a caller's write-lease via intermediate buffer.
+fn mpi_read_to_lease(
+    address: u32,
+    lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
+) -> Result<(), StorageError> {
+    let len = lease.len();
+    let mut tmp = [0u8; 256];
+    let mut offset = 0;
+    while offset < len {
+        let chunk = (len - offset).min(256);
+        mpi()
+            .read(address + offset as u32, &mut tmp[..chunk])
+            .unwrap_or(());
+        for (i, &byte) in tmp[..chunk].iter().enumerate() {
+            let _ = lease.write(offset + i, byte);
+        }
+        offset += chunk;
+    }
+    Ok(())
+}
+
+/// Write from a caller's read-lease to MPI via intermediate buffer.
+fn mpi_program_from_lease(
+    address: u32,
+    lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+) -> Result<(), StorageError> {
+    let len = lease.len();
+    let mut tmp = [0u8; 256];
+    let mut offset = 0;
+    while offset < len {
+        let chunk = (len - offset).min(256);
+        for (i, byte) in tmp[..chunk].iter_mut().enumerate() {
+            *byte = lease.read(offset + i).unwrap_or(0);
+        }
+        mpi()
+            .write(address + offset as u32, &tmp[..chunk])
+            .unwrap_or(());
+        offset += chunk;
+    }
+    Ok(())
 }
 
 // ── Partition resource implementation ───────────────────────────────
 
 struct PartitionResource {
     index: usize,
-    offset: u32,
-    count: u32,
+    offset_bytes: u32,
+    size_bytes: u32,
+    erase_size: u32,
 }
 
 impl Partition for PartitionResource {
@@ -86,15 +134,11 @@ impl Partition for PartitionResource {
         let is_fs_task = caller == SLOTS.sysmodule_fs.task_index();
 
         if is_managed(config.name) {
-            // Managed partitions can only be acquired by the fs task
             if !is_fs_task {
                 return Err(AcquireError::ManagedByFilesystem);
             }
-        } else {
-            // Non-managed partitions require an explicit uses-partition ACL entry
-            if !is_partition_allowed(config.name, caller) {
-                return Err(AcquireError::NotAllowed);
-            }
+        } else if !is_partition_allowed(config.name, caller) {
+            return Err(AcquireError::NotAllowed);
         }
 
         if ACQUIRED[idx].swap(true, Ordering::Acquire) {
@@ -103,53 +147,88 @@ impl Partition for PartitionResource {
 
         Ok(PartitionResource {
             index: idx,
-            offset: config.offset_blocks as u32,
-            count: config.size_blocks as u32,
+            offset_bytes: config.offset_bytes as u32,
+            size_bytes: config.size_bytes as u32,
+            erase_size: config.erase_size as u32,
         })
     }
 
-    fn read_block(
+    fn read(
         &mut self,
         _meta: ipc::Meta,
-        block: u32,
+        offset: u32,
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
-    ) -> Result<(), BlockError> {
-        if block >= self.count {
-            return Err(BlockError::out_of_range());
+    ) -> Result<(), StorageError> {
+        let len = buf.len() as u32;
+        if offset.saturating_add(len) > self.size_bytes {
+            return Err(StorageError::out_of_range());
         }
-        let mut tmp = [0u8; 512];
-        sdmmc()
-            .read_block(self.offset + block, &mut tmp)
-            .unwrap_or(Err(BlockError::device(0xFFFF)))?;
-        let len = buf.len().min(512);
-        for (i, &byte) in tmp.iter().enumerate().take(len) {
-            let _ = buf.write(i, byte);
-        }
-        Ok(())
+        mpi_read_to_lease(self.offset_bytes + offset, &buf)
     }
 
-    fn write_block(
+    fn write(
         &mut self,
         _meta: ipc::Meta,
-        block: u32,
+        offset: u32,
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
-    ) -> Result<(), BlockError> {
-        if block >= self.count {
-            return Err(BlockError::out_of_range());
+    ) -> Result<(), StorageError> {
+        let len = buf.len() as u32;
+        if offset.saturating_add(len) > self.size_bytes {
+            return Err(StorageError::out_of_range());
         }
-        let mut tmp = [0u8; 512];
-        let len = buf.len().min(512);
-        for (i, byte) in tmp.iter_mut().enumerate().take(len) {
-            *byte = buf.read(i).unwrap_or(0);
+        // Require erase-aligned offset and length
+        if offset % self.erase_size != 0 || len % self.erase_size != 0 {
+            return Err(StorageError::alignment());
         }
-        sdmmc()
-            .write_block(self.offset + block, &tmp)
-            .unwrap_or(Err(BlockError::device(0xFFFF)))?;
+        // Erase then program
+        let abs = self.offset_bytes + offset;
+        if mpi()
+            .erase(abs, len)
+            .unwrap_or(Err(EraseError::InvalidAddressAlignment))
+            .is_err()
+        {
+            return Err(StorageError::device(0xFFFF));
+        }
+        mpi_program_from_lease(abs, &buf)
+    }
+
+    fn erase(&mut self, _meta: ipc::Meta, offset: u32, len: u32) -> Result<(), StorageError> {
+        if offset.saturating_add(len) > self.size_bytes {
+            return Err(StorageError::out_of_range());
+        }
+        if offset % self.erase_size != 0 || len % self.erase_size != 0 {
+            return Err(StorageError::alignment());
+        }
+        if mpi()
+            .erase(self.offset_bytes + offset, len)
+            .unwrap_or(Err(EraseError::InvalidAddressAlignment))
+            .is_err()
+        {
+            return Err(StorageError::device(0xFFFF));
+        }
         Ok(())
     }
 
-    fn block_count(&mut self, _meta: ipc::Meta) -> u32 {
-        self.count
+    fn program(
+        &mut self,
+        _meta: ipc::Meta,
+        offset: u32,
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+    ) -> Result<(), StorageError> {
+        let len = buf.len() as u32;
+        if offset.saturating_add(len) > self.size_bytes {
+            return Err(StorageError::out_of_range());
+        }
+        mpi_program_from_lease(self.offset_bytes + offset, &buf)
+    }
+
+    fn geometry(&mut self, _meta: ipc::Meta) -> Geometry {
+        Geometry {
+            total_size: self.size_bytes,
+            erase_size: self.erase_size,
+            program_size: 256,
+            read_size: 1,
+        }
     }
 }
 
@@ -164,11 +243,23 @@ impl Drop for PartitionResource {
 #[export_name = "main"]
 fn main() -> ! {
     rcard_log::info!("Awake");
-    // Acquire the raw SDMMC device.
-    let sdmmc = Sdmmc::open()
-        .log_unwrap()
-        .log_expect("storage: failed to acquire SDMMC");
-    SDMMC.set(sdmmc).ok();
+
+    // Open MPI instance 2 (external NOR flash: GD25Q256EWIGR)
+    let flash = Mpi::open(
+        2,
+        MpiConfig {
+            prescaler: 2,
+            addr_size: AddrSize::ThreeBytes,
+            imode: LineMode::Single,
+            admode: LineMode::Single,
+            dmode: LineMode::Single,
+            read_dummy_cycles: 0,
+            clock_polarity: ClockPolarity::Normal,
+        },
+    )
+    .log_unwrap()
+    .log_expect("storage: failed to open MPI");
+    MPI.set(flash).ok();
 
     ipc::server! {
         Partition: PartitionResource,

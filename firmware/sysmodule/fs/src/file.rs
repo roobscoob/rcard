@@ -46,7 +46,7 @@ fn open_new(
     let slot = &mut s.open_files[idx];
     slot.file = unsafe { core::mem::zeroed() };
     slot.file_cfg = unsafe { core::mem::zeroed() };
-    slot.file_cache = [0u8; 512];
+    slot.file_cache = [0u8; crate::state::CACHE_SIZE];
     slot.path = *path;
     slot.fs_id = fs_id;
     slot.lfs_flags = lfs_flags;

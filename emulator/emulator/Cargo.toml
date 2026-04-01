@@ -1,9 +1,0 @@
-[package]
-name = "emulator"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-rcard-log = { path = "../../shared/log", features = ["alloc"] }
-zerocopy = "0.8"
-tempfile = "3"

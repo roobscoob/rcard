@@ -31,4 +31,13 @@ pub enum OwnedValue {
         type_id: u64,
         fields: Vec<(u64, OwnedValue)>,
     },
+    StackDump {
+        sp: u32,
+        stack_top: u32,
+        lr: u32,
+        pc: u32,
+        registers: [u32; 13], // r0..r12
+        xpsr: u32,
+        stack: Vec<u8>,
+    },
 }

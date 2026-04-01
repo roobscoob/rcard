@@ -18,5 +18,8 @@ git = "https://github.com/cbiffle/hubris-fork.git"
 rev = "061df2fc76433bbc7cc3931a8981fbd509e35c97"
 features = ["stack-watermark"]
 
+[build-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true

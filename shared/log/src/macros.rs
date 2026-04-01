@@ -2,7 +2,7 @@
 #[macro_export]
 macro_rules! trace {
     ($($args:tt)*) => {
-        $crate::__species!($crate, $crate::LogLevel::Trace, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Trace, false, $($args)*)
     };
 }
 
@@ -10,7 +10,7 @@ macro_rules! trace {
 #[macro_export]
 macro_rules! debug {
     ($($args:tt)*) => {
-        $crate::__species!($crate, $crate::LogLevel::Debug, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Debug, false, $($args)*)
     };
 }
 
@@ -18,7 +18,7 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! info {
     ($($args:tt)*) => {
-        $crate::__species!($crate, $crate::LogLevel::Info, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Info, false, $($args)*)
     };
 }
 
@@ -26,7 +26,7 @@ macro_rules! info {
 #[macro_export]
 macro_rules! warn {
     ($($args:tt)*) => {
-        $crate::__species!($crate, $crate::LogLevel::Warn, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Warn, false, $($args)*)
     };
 }
 
@@ -34,7 +34,7 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! error {
     ($($args:tt)*) => {
-        $crate::__species!($crate, $crate::LogLevel::Error, $($args)*)
+        $crate::__species!($crate, $crate::LogLevel::Error, false, $($args)*)
     };
 }
 
@@ -44,9 +44,21 @@ macro_rules! error {
 /// `Format`, then triggers a bare `core::panic!("panic")` (no format
 /// arguments, so `core::fmt` is never linked).
 #[macro_export]
+#[cfg(feature = "panics-emit-stack-dump")]
 macro_rules! panic {
     ($($args:tt)*) => {{
-        $crate::__species!($crate, $crate::LogLevel::Panic, $($args)*);
+        $crate::__species!($crate, $crate::LogLevel::Panic, true, $($args)*);
+        $crate::PANIC_LOGGED.store(true, core::sync::atomic::Ordering::Relaxed);
+        #[allow(clippy::panic)]
+        { core::panic!("panic") }
+    }};
+}
+
+#[macro_export]
+#[cfg(not(feature = "panics-emit-stack-dump"))]
+macro_rules! panic {
+    ($($args:tt)*) => {{
+        $crate::__species!($crate, $crate::LogLevel::Panic, false, $($args)*);
         $crate::PANIC_LOGGED.store(true, core::sync::atomic::Ordering::Relaxed);
         #[allow(clippy::panic)]
         { core::panic!("panic") }

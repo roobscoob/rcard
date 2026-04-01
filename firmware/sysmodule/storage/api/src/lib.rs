@@ -1,7 +1,7 @@
 #![no_std]
 
 pub mod ring;
-pub use storage_api::{BlockError, Storage};
+pub use storage_api::{Geometry, Storage, StorageError};
 
 include!(concat!(env!("OUT_DIR"), "/partition_names.rs"));
 
@@ -27,7 +27,7 @@ pub enum AcquireError {
     NotAllowed = 3,
 }
 
-/// A partition on a block device, presenting a subrange of blocks
+/// A partition on a block device, presenting a byte-addressed subrange
 /// as a full Storage interface.
 #[ipc::resource(arena_size = 8, kind = 0x20, implements(storage_api::Storage))]
 pub trait Partition {
@@ -35,11 +35,17 @@ pub trait Partition {
     fn acquire(name: [u8; 16]) -> Result<Self, AcquireError>;
 
     #[message]
-    fn read_block(&self, block: u32, #[lease] buf: &mut [u8]) -> Result<(), BlockError>;
+    fn read(&self, offset: u32, #[lease] buf: &mut [u8]) -> Result<(), StorageError>;
 
     #[message]
-    fn write_block(&self, block: u32, #[lease] buf: &[u8]) -> Result<(), BlockError>;
+    fn write(&self, offset: u32, #[lease] buf: &[u8]) -> Result<(), StorageError>;
 
     #[message]
-    fn block_count(&self) -> u32;
+    fn erase(&self, offset: u32, len: u32) -> Result<(), StorageError>;
+
+    #[message]
+    fn program(&self, offset: u32, #[lease] buf: &[u8]) -> Result<(), StorageError>;
+
+    #[message]
+    fn geometry(&self) -> Geometry;
 }

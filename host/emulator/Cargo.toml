@@ -1,0 +1,12 @@
+[package]
+name = "emulator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+engine = { path = "../engine" }
+rcard-log = { path = "../../shared/log", features = ["alloc"] }
+tokio = { version = "1", features = ["sync"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+zerocopy = "0.8"
+tempfile = "3"

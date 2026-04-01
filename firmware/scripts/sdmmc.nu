@@ -64,8 +64,7 @@ def "sdmmc layout" [] {
         let part_records = ($parts | each { |p|
             {
                 name: $p.name
-                offset: $p.offset_blocks
-                blocks: $p.size_blocks
+                offset: $p.offset_bytes
                 size: ($p.size_bytes | into filesize)
                 format: $p.format
             }

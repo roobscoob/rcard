@@ -401,6 +401,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "kern",
+ "serde_json",
 ]
 
 [[package]]
@@ -904,6 +905,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_mpi"
+version = "0.1.0"
+dependencies = [
+ "hubris-task-slots",
+ "idyll_runtime",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "sifli-pac",
+ "sysmodule_log_api",
+ "sysmodule_mpi_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_mpi_api"
+version = "0.1.0"
+dependencies = [
+ "idyll_runtime",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "userlib",
+ "zerocopy 0.8.40",
+]
+
+[[package]]
 name = "sysmodule_reactor"
 version = "0.1.0"
 dependencies = [
@@ -926,33 +954,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysmodule_sdmmc"
-version = "0.1.0"
-dependencies = [
- "hubris-task-slots",
- "idyll_runtime",
- "ipc",
- "rcard-log",
- "rcard-log-macros",
- "sifli-pac",
- "sysmodule_log_api",
- "sysmodule_sdmmc_api",
- "userlib",
-]
-
-[[package]]
-name = "sysmodule_sdmmc_api"
-version = "0.1.0"
-dependencies = [
- "idyll_runtime",
- "ipc",
- "rcard-log",
- "storage_api",
- "userlib",
- "zerocopy 0.8.40",
-]
-
-[[package]]
 name = "sysmodule_storage"
 version = "0.1.0"
 dependencies = [
@@ -965,7 +966,7 @@ dependencies = [
  "serde_json",
  "storage_api",
  "sysmodule_log_api",
- "sysmodule_sdmmc_api",
+ "sysmodule_mpi_api",
  "sysmodule_storage_api",
  "userlib",
 ]

@@ -18,4 +18,5 @@ pub const TAG_ARRAY: u8 = 0x10;
 pub const TAG_SLICE: u8 = 0x11;
 pub const TAG_TUPLE: u8 = 0x12;
 pub const TAG_STRUCT: u8 = 0x13;
+pub const TAG_STACK_DUMP: u8 = 0x14;
 pub const TAG_END_OF_STREAM: u8 = 0xFF;

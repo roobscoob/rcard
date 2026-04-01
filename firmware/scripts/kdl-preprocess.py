@@ -89,7 +89,7 @@ SIZE_MULTIPLIERS = {
     'Gbit': 1000 * 1000 * 125,
 }
 
-BLOCK_SIZE = 512
+DEFAULT_BLOCK_SIZE = 512
 
 PARSE_CONFIG = kdl.ParseConfig(
     nativeUntaggedValues=False,
@@ -212,6 +212,17 @@ def apply_feature_gates(doc, enabled_features):
         """Remove include-if child directives from a node."""
         node.nodes = [c for c in node.nodes if c.name != 'include-if']
 
+    def gate_block_device_children(node):
+        """Gate partition children within a block-device node."""
+        if node.name == 'block-device':
+            node.nodes = [
+                c for c in node.nodes
+                if c.name != 'partition' or is_included(c)
+            ]
+            for c in node.nodes:
+                if c.name == 'partition':
+                    strip_include_if(c)
+
     # Gate top-level task nodes
     kept_nodes = []
     for node in doc.nodes:
@@ -220,14 +231,11 @@ def apply_feature_gates(doc, enabled_features):
                 continue
             strip_include_if(node)
         elif node.name == 'block-device':
-            # Gate partition children
-            node.nodes = [
-                c for c in node.nodes
-                if c.name != 'partition' or is_included(c)
-            ]
-            for c in node.nodes:
-                if c.name == 'partition':
-                    strip_include_if(c)
+            gate_block_device_children(node)
+        elif node.name == 'board':
+            # Gate block-device partition children inside board
+            for child in node.nodes:
+                gate_block_device_children(child)
         elif node.name == 'filesystem':
             # Gate map children
             node.nodes = [
@@ -315,17 +323,17 @@ def resolve_size_value(val):
     return int(num) * multiplier
 
 
-def parse_size_from_node(node, context):
+def parse_size_from_node(node, context, block_size=None):
     """Extract byte size from a node's first argument (must have a size tag)."""
     if not node.args:
         die(f"{context} has no size")
     result = resolve_size_value(node.args[0])
     if result is None:
         die(f"{context} size must have a unit tag ({', '.join(SIZE_MULTIPLIERS)})")
-    if result % BLOCK_SIZE != 0:
+    if block_size is not None and result % block_size != 0:
         die(
             f"{context} size ({result} bytes) "
-            f"is not a multiple of block size ({BLOCK_SIZE})"
+            f"is not a multiple of block size ({block_size})"
         )
     return result
 
@@ -399,16 +407,27 @@ def resolve_defines(node, defines):
 def parse_block_devices(doc):
     """Extract block-device sections and compute partition tables.
 
+    Block-device nodes are looked up inside the board block first,
+    then at the top level for backwards compatibility.
+
     Returns a dict mapping device_name -> device dict with keys:
         size, mapping, partitions, ftab (optional).
     """
+    board_node = next(find_children(doc, 'board'), None)
+    source = board_node if board_node is not None else doc
     devices = {}
-    for bd_node in find_children(doc, 'block-device'):
+    for bd_node in find_children(source, 'block-device'):
         device_name = node_name_arg(bd_node)
+
+        block_size_node = find_child(bd_node, 'block-size')
+        block_size = parse_size_from_node(
+            block_size_node, f"block-device '{device_name}' block-size",
+        ) if block_size_node is not None else DEFAULT_BLOCK_SIZE
 
         dev_size_node = find_child(bd_node, 'size')
         dev_size = parse_size_from_node(
             dev_size_node, f"block-device '{device_name}'",
+            block_size=block_size,
         ) if dev_size_node is not None else None
 
         mapping_node = find_child(bd_node, 'mapping')
@@ -426,7 +445,7 @@ def parse_block_devices(doc):
             size_node = find_child(part_node, 'size')
             if size_node is None:
                 die(f"{context} has no size")
-            size_bytes = parse_size_from_node(size_node, context)
+            size_bytes = parse_size_from_node(size_node, context, block_size=block_size)
 
             fmt_node = find_child(part_node, 'format')
             fmt = node_arg(fmt_node) if fmt_node else 'raw'
@@ -441,14 +460,23 @@ def parse_block_devices(doc):
                 if remainder != 0:
                     offset += align_bytes - remainder
 
+            # Ensure partition offset is block-aligned
+            if offset % block_size != 0:
+                die(
+                    f"{context} offset ({offset} bytes) "
+                    f"is not a multiple of block size ({block_size})"
+                )
+
             part_dict = {
                 'name': part_name,
                 'offset_bytes': offset,
-                'offset_blocks': offset // BLOCK_SIZE,
                 'size_bytes': size_bytes,
-                'size_blocks': size_bytes // BLOCK_SIZE,
                 'format': fmt,
             }
+
+            source_node = find_child(part_node, 'source')
+            if source_node is not None:
+                part_dict['source'] = node_arg(source_node)
 
             if fmt == 'ftab':
                 bt_node = find_child(part_node, 'boot_target')
@@ -507,6 +535,7 @@ def parse_block_devices(doc):
 
         devices[device_name] = {
             'size': dev_size,
+            'block_size': block_size,
             'mapping': mapping,
             'partitions': partitions,
             'ftab': ftab_info,
@@ -931,6 +960,167 @@ def parse_allocation_acl(doc, allocations):
     return acl
 
 
+# ---------------------------------------------------------------------------
+# Pin configuration
+# ---------------------------------------------------------------------------
+
+
+def parse_chip_pin_capabilities(chip_doc):
+    """Parse pin capability nodes from the chip KDL document.
+
+    Returns a dict mapping pin_name -> list of (kind, instance, signals) tuples.
+    instance is a string or None (None means "any instance").
+    signals is a set of signal names, or None for no-signal peripherals (e.g. gpio).
+    """
+    capabilities = {}
+    for pin_node in find_children(chip_doc, 'pin'):
+        pin_name = node_name_arg(pin_node)
+        if pin_name is None:
+            die("pin node missing name")
+        caps = []
+        for sup in find_children(pin_node, 'supports'):
+            if not sup.args:
+                die(f"pin '{pin_name}': supports node missing peripheral kind")
+            kind = sup.args[0].value
+            instance = None
+            if len(sup.args) > 1:
+                raw = sup.args[1].value
+                if isinstance(raw, str):
+                    instance = raw
+                elif isinstance(raw, float) and raw == int(raw):
+                    instance = str(int(raw))
+                else:
+                    instance = str(raw)
+            signals = {child.name for child in sup.nodes} if sup.nodes else None
+            caps.append((kind, instance, signals))
+        capabilities[pin_name] = caps
+    return capabilities
+
+
+def _pin_supports(caps, kind, instance, signal):
+    """Check if a pin's capabilities support a given (kind, instance, signal).
+
+    Returns True if:
+    - There's an exact (kind, instance) match with signal in signals, or
+    - There's a wildcard (kind, None) match with signal in signals, or
+    - There's a (kind, instance) match with signals=None (no-signal peripheral)
+    """
+    for cap_kind, cap_instance, cap_signals in caps:
+        if cap_kind != kind:
+            continue
+        # Instance must match exactly, or cap must be wildcard (None)
+        if cap_instance is not None and cap_instance != str(instance):
+            continue
+        if cap_instance is None and instance is not None:
+            # Wildcard cap — matches any instance
+            pass
+        # Signal check
+        if signal is None:
+            return True
+        if cap_signals is not None and ('any' in cap_signals or signal in cap_signals):
+            return True
+    return False
+
+
+def _build_known_peripherals(chip_capabilities):
+    """Derive the set of known peripheral kinds from chip pin capabilities."""
+    kinds = set()
+    for caps in chip_capabilities.values():
+        for kind, _instance, _signals in caps:
+            kinds.add(kind)
+    return kinds
+
+
+def parse_pin_config(doc, chip_capabilities):
+    """Parse board-level pin assignments and validate against chip capabilities.
+
+    Reads peripheral blocks (usart, i2c, etc.) from the board node.
+    Each block has the form:  kind [instance] { signal "PA{n}"; ... }
+
+    Returns a list of assignment dicts:
+        [{ pin, kind, instance, signal }, ...]
+    """
+    board_node = next(find_children(doc, 'board'), None)
+    if board_node is None:
+        return []
+
+    known_peripherals = _build_known_peripherals(chip_capabilities)
+    assignments = []
+    pins_used = {}  # pin_name -> description string (for conflict errors)
+
+    for node in board_node.nodes:
+        if node.name not in known_peripherals:
+            continue
+
+        kind = node.name
+        instance = None
+        if node.args:
+            raw = node.args[0].value
+            if isinstance(raw, str):
+                instance = raw
+            elif isinstance(raw, float) and raw == int(raw):
+                instance = str(int(raw))
+            else:
+                instance = str(raw)
+
+        for child in node.nodes:
+            signal = child.name
+
+            if not child.args:
+                die(
+                    f"board pin config: {kind}"
+                    f"{' ' + instance if instance else ''}"
+                    f" {signal} missing pin assignment"
+                )
+
+            pin_name = child.args[0].value
+            if not isinstance(pin_name, str) or not pin_name.startswith('PA'):
+                die(
+                    f"board pin config: {kind}"
+                    f"{' ' + instance if instance else ''}"
+                    f" {signal}: expected pin name like 'PA18',"
+                    f" got '{pin_name}'"
+                )
+
+            # Check pin exists in chip capabilities
+            if pin_name not in chip_capabilities:
+                die(
+                    f"board pin config: {pin_name} does not exist on this chip"
+                )
+
+            # Check pin supports this peripheral+signal
+            caps = chip_capabilities[pin_name]
+            if not _pin_supports(caps, kind, instance, signal):
+                die(
+                    f"board pin config: {pin_name} does not support"
+                    f" {kind}"
+                    f"{' ' + instance if instance else ''}"
+                    f" {signal}"
+                )
+
+            # Conflict detection
+            desc = (
+                f"{kind}"
+                f"{' ' + instance if instance else ''}"
+                f" {signal}"
+            )
+            if pin_name in pins_used:
+                die(
+                    f"board pin config: {pin_name} assigned to both"
+                    f" '{pins_used[pin_name]}' and '{desc}'"
+                )
+            pins_used[pin_name] = desc
+
+            assignments.append({
+                'pin': pin_name,
+                'kind': kind,
+                'instance': instance,
+                'signal': signal,
+            })
+
+    return assignments
+
+
 def resolve_chip_path(chip_path_str, input_path):
     """Resolve a chip path (possibly proj:-prefixed) to an absolute path."""
     if chip_path_str.startswith('proj:'):
@@ -1312,10 +1502,11 @@ def ensure_supervisor_first(doc):
 # ---------------------------------------------------------------------------
 
 
-def build_hubake_doc(doc):
+def build_hubake_doc(doc, strip_board_children=frozenset()):
     """Build a new document with only hubake-relevant nodes."""
     strip_top_level = {'define', 'block-device', 'filesystem', 'notifications', 'allocation'}
     strip_task_children = {'uses-partition', 'uses-notification', 'pushes-notification', 'uses-allocation'}
+    strip_board = {'memory', 'block-device'} | set(strip_board_children)
 
     new_nodes = []
     for node in doc.nodes:
@@ -1327,7 +1518,8 @@ def build_hubake_doc(doc):
             ]
         elif node.name == 'board':
             node.nodes = [
-                c for c in node.nodes if c.name != 'memory'
+                c for c in node.nodes
+                if c.name not in strip_board
             ]
         new_nodes.append(node)
 
@@ -1341,14 +1533,15 @@ def build_hubake_doc(doc):
 
 def main():
     if len(sys.argv) < 3:
-        print(f"usage: {sys.argv[0]} <input.kdl> <output.kdl> [--features A,B,C]", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} <input.kdl> <output.kdl> [--features A,B,C] [--board NAME]", file=sys.stderr)
         sys.exit(1)
 
     input_path = sys.argv[1]
     output_path = sys.argv[2]
 
-    # Parse --features flag (comma-delimited list)
+    # Parse flags
     enabled_features = set()
+    selected_board = None
     rest = sys.argv[3:]
     i = 0
     while i < len(rest):
@@ -1358,6 +1551,9 @@ def main():
                 if f:
                     enabled_features.add(f)
             i += 2
+        elif rest[i] == '--board' and i + 1 < len(rest):
+            selected_board = rest[i + 1]
+            i += 2
         else:
             die(f"unexpected argument: {rest[i]}")
 
@@ -1365,6 +1561,19 @@ def main():
         text = f.read()
 
     doc = kdl.parse(text, PARSE_CONFIG)
+
+    # Select board (strip non-matching board blocks)
+    board_nodes = list(find_children(doc, 'board'))
+    if selected_board is not None:
+        matching = [b for b in board_nodes if node_name_arg(b) == selected_board]
+        if not matching:
+            available = [node_name_arg(b) for b in board_nodes]
+            die(f"board '{selected_board}' not found. Available: {available}")
+        doc.nodes = [n for n in doc.nodes
+                     if n.name != 'board' or node_name_arg(n) == selected_board]
+    elif len(board_nodes) > 1:
+        available = [node_name_arg(b) for b in board_nodes]
+        die(f"multiple boards defined, use --board to select one: {available}")
 
     # Apply feature gates (must be first — strips nodes before validation)
     apply_feature_gates(doc, enabled_features)
@@ -1428,8 +1637,19 @@ def main():
     # Parse chip memory regions and inject allocation peripherals
     chip_path = get_chip_path(doc, input_path)
     chip_regions = {}
+    pin_assignments = []
+    known_pin_peripherals = set()
     if chip_path:
         chip_regions = parse_chip_memory_regions(chip_path)
+
+        # Parse and validate pin configuration against chip capabilities
+        with open(chip_path) as f:
+            chip_doc = kdl.parse(f.read(), PARSE_CONFIG)
+        chip_capabilities = parse_chip_pin_capabilities(chip_doc)
+        if chip_capabilities:
+            known_pin_peripherals = _build_known_peripherals(chip_capabilities)
+            pin_assignments = parse_pin_config(doc, chip_capabilities)
+
         if resolved_allocations or ftab_info:
             mod_chip_path = write_modified_chip(
                 chip_path, resolved_allocations, output_path,
@@ -1463,7 +1683,7 @@ def main():
             print(result.stdout.strip(), file=sys.stderr)
 
     # Strip non-hubake sections
-    build_hubake_doc(doc)
+    build_hubake_doc(doc, strip_board_children=known_pin_peripherals)
 
     # Write output
     output = doc.print(PRINT_CONFIG)
@@ -1475,13 +1695,15 @@ def main():
     if devices or filesystems:
         json_path = output_path.rsplit('.', 1)[0] + '.partitions.json'
         partition_data = {
-            'block_size': BLOCK_SIZE,
             'devices': {
                 name: dev['partitions'] for name, dev in devices.items()
             },
             'device_sizes': {
                 name: dev['size'] for name, dev in devices.items()
                 if dev['size'] is not None
+            },
+            'device_block_sizes': {
+                name: dev['block_size'] for name, dev in devices.items()
             },
             'device_mappings': {
                 name: dev['mapping'] for name, dev in devices.items()
@@ -1540,6 +1762,12 @@ def main():
         }
         with open(json_path, 'w') as f:
             json.dump(alloc_data, f, indent=2)
+
+    # Write pin configuration JSON alongside the output
+    if pin_assignments:
+        json_path = output_path.rsplit('.', 1)[0] + '.pins.json'
+        with open(json_path, 'w') as f:
+            json.dump({'assignments': pin_assignments}, f, indent=2)
 
     # Write notification groups JSON alongside the output
     if notification_groups:
