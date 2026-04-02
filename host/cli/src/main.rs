@@ -223,8 +223,16 @@ fn print_structured(entry: &LogEntry, meta: &TfwMetadata, task_pad: usize, pw: u
         );
         print_wrapped(&msg, loc.as_deref(), term_width, pw);
     } else {
-        let vals: Vec<String> = entry.values.iter().map(|v| format_value(v, &meta.type_names)).collect();
-        let body = if vals.is_empty() { String::from("?") } else { vals.join(", ") };
+        let vals: Vec<String> = entry
+            .values
+            .iter()
+            .map(|v| format_value(v, &meta.type_names))
+            .collect();
+        let body = if vals.is_empty() {
+            String::from("?")
+        } else {
+            vals.join(", ")
+        };
         println!(
             " {lc}{BOLD}{ll}{RESET} {MAGENTA}{task:>tp$}{RESET} {DIM}│{RESET} {body} {DIM}(species=0x{:x}){RESET}",
             entry.log_species,
@@ -242,21 +250,14 @@ fn print_structured(entry: &LogEntry, meta: &TfwMetadata, task_pad: usize, pw: u
     }
 }
 
-fn print_backtrace(
-    bt: &stacktrace::Backtrace,
-    _task_pad: usize,
-    term_width: usize,
-    pw: usize,
-) {
-    let cont_prefix = format!(
-        "{:>width$} {DIM}│{RESET} ",
-        "",
-        width = pw - 3,
-    );
+fn print_backtrace(bt: &stacktrace::Backtrace, _task_pad: usize, term_width: usize, pw: usize) {
+    let cont_prefix = format!("{:>width$} {DIM}│{RESET} ", "", width = pw - 3,);
     let content_width = term_width.saturating_sub(pw);
 
     println!("{cont_prefix}{DIM}backtrace:{RESET}");
-    for frame in &bt.frames {
+
+    // skip the first frame, since it's rcade_log::stack_dump::capture() itself
+    for frame in bt.frames.iter().skip(1) {
         let inline_tag = if frame.is_inline { " [inline]" } else { "" };
         let loc = match (&frame.file, frame.line) {
             (Some(file), Some(line)) => format!("{file}:{line}"),
@@ -451,7 +452,10 @@ fn format_value(val: &OwnedValue, type_names: &HashMap<u64, String>) -> String {
             }
         }
         StackDump { sp, stack, .. } => {
-            format!("<stack dump: sp=0x{sp:08x}, {len} bytes>", len = stack.len())
+            format!(
+                "<stack dump: sp=0x{sp:08x}, {len} bytes>",
+                len = stack.len()
+            )
         }
     }
 }

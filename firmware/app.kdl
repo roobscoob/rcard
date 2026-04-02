@@ -224,6 +224,7 @@ task "sysmodule_log" {
     workspace-crate "sysmodule_log"
     stack-size (KiB)4
     priority (workgroup)"core-sysmodule"
+    uses-peripheral "usart1"
     uses-sysmodule "usart" { with-priority 0; }
     uses-sysmodule "reactor" { with-priority 0; }
     pushes-notification "logs"
@@ -255,7 +256,7 @@ task "sysmodule_compositor" {
 
 task "sysmodule_mpi" {
     workspace-crate "sysmodule_mpi"
-    stack-size (KiB)2
+    stack-size (KiB)4
     priority (workgroup)"sysmodule"
     uses-peripheral "mpi1"
     uses-peripheral "mpi2"
@@ -264,7 +265,7 @@ task "sysmodule_mpi" {
 
 task "sysmodule_storage" {
     workspace-crate "sysmodule_storage"
-    stack-size (KiB)4
+    stack-size (KiB)8
     priority (workgroup)"sysmodule"
     uses-sysmodule "mpi" { with-priority 0; }
     peer-sysmodule "fs"

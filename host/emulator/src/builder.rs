@@ -8,7 +8,14 @@ use crate::peripherals::usart::log::{UsartLog, UsartLogKind};
 use crate::peripherals::usart::{NullSink, StringLogger, StructuredSink};
 use crate::{Device, EmulatorError, FLASH_BASE, find_free_port, spawn_usart_reader};
 
-const RENODE_EXE: &str = r"C:\Program Files\Renode\bin\Renode.exe";
+fn find_renode() -> Result<std::path::PathBuf, EmulatorError> {
+    which::which("renode").or_else(|_| which::which("Renode")).map_err(|_| {
+        EmulatorError::RenodeSpawn(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not find Renode on PATH",
+        ))
+    })
+}
 
 const MODEL_SSD1312: &str = include_str!("models/SSD1312.cs");
 const MODEL_SF32LB52_RTC: &str = include_str!("models/SF32LB52_RTC.cs");
@@ -81,7 +88,7 @@ impl DeviceBuilder {
             .map_err(EmulatorError::TempFile)?;
 
         // Spawn Renode headless (no --execute; we drive everything via monitor)
-        let mut renode = Command::new(RENODE_EXE)
+        let mut renode = Command::new(find_renode()?)
             .args(["--disable-xwt", "--port", &monitor_port.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -127,7 +134,7 @@ impl DeviceBuilder {
         }
 
         // Connect to monitor
-        let mut monitor = Monitor::connect(monitor_port, Duration::from_secs(15))?;
+        let monitor = Monitor::connect(monitor_port, Duration::from_secs(15))?;
 
         // Send all setup commands sequentially via monitor — errors come back
         // as responses so we can see them in the log.

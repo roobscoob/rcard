@@ -406,3 +406,8 @@ pub fn sys_post(
     let _ = (task, notifications);
     unimplemented!()
 }
+
+pub fn sys_refresh_task_id(task_id: TaskId) -> TaskId {
+    let _ = task_id;
+    unimplemented!()
+}

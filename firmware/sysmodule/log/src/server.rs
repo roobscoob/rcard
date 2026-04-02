@@ -6,6 +6,7 @@ use sysmodule_log_api::LogError;
 use crate::ringbuf::LogRing;
 use crate::{generated, usart_write, Reactor};
 
+
 fn get_timestamp() -> u64 {
     userlib::sys_get_timer().now
 }

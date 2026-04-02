@@ -125,23 +125,41 @@ pub trait Cloneable {
 
 /// A `Sync` wrapper around a `TaskId` for use in statics. Safe because Hubris
 /// tasks are single-threaded.
-pub struct StaticTaskId(core::cell::UnsafeCell<kern::TaskId>);
+///
+/// On first `get()`, asks the kernel for the peer's current generation via
+/// `sys_refresh_task_id`. This ensures the first IPC call uses the correct
+/// generation even if the peer has restarted since this task was compiled.
+pub struct StaticTaskId {
+    id: core::cell::UnsafeCell<kern::TaskId>,
+    refreshed: core::cell::Cell<bool>,
+}
 
 unsafe impl Sync for StaticTaskId {}
 
 impl StaticTaskId {
     pub const fn new(id: kern::TaskId) -> Self {
-        Self(core::cell::UnsafeCell::new(id))
+        Self {
+            id: core::cell::UnsafeCell::new(id),
+            refreshed: core::cell::Cell::new(false),
+        }
     }
 
     pub fn get(&self) -> kern::TaskId {
-        unsafe { *self.0.get() }
+        if !self.refreshed.get() {
+            let current = kern::sys_refresh_task_id(unsafe { *self.id.get() });
+            unsafe { *self.id.get() = current; }
+            self.refreshed.set(true);
+            current
+        } else {
+            unsafe { *self.id.get() }
+        }
     }
 
     pub fn set(&self, id: kern::TaskId) {
         unsafe {
-            *self.0.get() = id;
+            *self.id.get() = id;
         }
+        self.refreshed.set(true);
     }
 }
 

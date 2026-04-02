@@ -8,7 +8,7 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_void};
 
 use littlefs2_sys::*;
-use once_cell::{GlobalState, OnceCell};
+use once_cell::GlobalState;
 use rcard_log::OptionExt;
 use storage_api::StorageDyn;
 
@@ -269,18 +269,13 @@ impl FsState {
     }
 }
 
-static FS_STATE: OnceCell<GlobalState<FsState>> = OnceCell::new();
-
-/// Initialize the global filesystem state. Must be called once at startup.
-pub fn init() {
-    FS_STATE.set(GlobalState::new(FsState::new())).ok();
-}
+static FS_STATE: GlobalState<FsState> = GlobalState::new(FsState::new());
 
 /// Access the global filesystem state exclusively through a closure.
 ///
 /// Panics if called reentrantly (e.g. from within a littlefs callback).
 pub fn with_state<R>(f: impl FnOnce(&mut FsState) -> R) -> R {
-    FS_STATE.get().log_unwrap().with(f).log_unwrap()
+    FS_STATE.with(f).log_unwrap()
 }
 
 // ---------------------------------------------------------------------------

@@ -87,7 +87,6 @@ fn auto_mount_filesystems() {
 #[export_name = "main"]
 fn main() -> ! {
     rcard_log::info!("Awake");
-    state::init();
     auto_mount_filesystems();
 
     ipc::server! {

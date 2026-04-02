@@ -34,6 +34,7 @@
 //!   - Variant: [`sys_recv_open`]
 //!   - Variant: [`sys_recv_msg_open`]
 //!   - Variant: [`sys_recv_notification`]
+//! - [`sys_refresh_task_id`]
 //! - [`sys_reply`]
 //! - [`sys_reply_fault`]
 //! - [`sys_send`]
@@ -91,6 +92,7 @@ pub enum Sysnum {
     IrqControl = 7,
     Panic = 8,
     GetTimer = 9,
+    RefreshTaskId = 10,
     Post = 11,
     ReplyFault = 12,
 }
@@ -506,6 +508,9 @@ pub use self::arch::sys_borrow_write;
 
 #[doc(inline)]
 pub use self::arch::sys_post;
+
+#[doc(inline)]
+pub use self::arch::sys_refresh_task_id;
 
 
 ///////////////////////////////////////////////////////////////////////////////

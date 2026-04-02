@@ -1,4 +1,5 @@
 extern crate alloc;
+extern crate std;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,6 +28,7 @@ pub struct Decoder {
     stack: Vec<Frame>,
 }
 
+#[derive(Debug)]
 enum State {
     AwaitingTag,
     ReadingSingleByte {
@@ -51,6 +53,11 @@ enum State {
         buf: [u8; 72],
         pos: u8,
     },
+    ReadingStackDumpLength {
+        header: [u8; 72],
+        len_buf: [u8; 4],
+        pos: u8,
+    },
     ReadingStackDumpData {
         header: [u8; 72],
         buf: Vec<u8>,
@@ -58,6 +65,7 @@ enum State {
     },
 }
 
+#[derive(Debug)]
 enum VarintPurpose {
     UnsignedValue { tag: u8 },
     SignedValue { tag: u8 },
@@ -199,15 +207,36 @@ impl Decoder {
                     self.state = State::ReadingStackDumpHeader { buf, pos };
                     FeedResult::Incomplete
                 } else {
-                    // Parse sp and stack_top from the header to compute stack length
-                    let sp = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                    let stack_top = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                    let remaining = stack_top.saturating_sub(sp);
+                    self.state = State::ReadingStackDumpLength {
+                        header: buf,
+                        len_buf: [0; 4],
+                        pos: 0,
+                    };
+                    FeedResult::Incomplete
+                }
+            }
+
+            State::ReadingStackDumpLength {
+                header,
+                mut len_buf,
+                pos,
+            } => {
+                len_buf[pos as usize] = byte;
+                let pos = pos + 1;
+                if pos < 4 {
+                    self.state = State::ReadingStackDumpLength {
+                        header,
+                        len_buf,
+                        pos,
+                    };
+                    FeedResult::Incomplete
+                } else {
+                    let remaining = u32::from_le_bytes(len_buf);
                     if remaining == 0 {
-                        self.complete_value(Self::stack_dump_from_header(buf, Vec::new()))
+                        self.complete_value(Self::stack_dump_from_header(header, Vec::new()))
                     } else {
                         self.state = State::ReadingStackDumpData {
-                            header: buf,
+                            header,
                             buf: Vec::with_capacity(remaining as usize),
                             remaining,
                         };

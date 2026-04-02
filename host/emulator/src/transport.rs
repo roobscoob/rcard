@@ -2,8 +2,8 @@ use std::io::{Cursor, Read as _};
 use std::path::Path;
 use std::sync::mpsc;
 
-use engine::Backend;
 use engine::logs::{HypervisorLine, LogEntry, Logs};
+use engine::Backend;
 use tokio::sync::broadcast;
 use zip::ZipArchive;
 

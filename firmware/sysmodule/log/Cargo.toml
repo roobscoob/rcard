@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = ["bare-panics"]
 bare-panics = []
+panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 
 [dependencies]
 idyll_runtime.workspace = true

@@ -68,6 +68,7 @@ import json
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 import kdl
@@ -255,6 +256,81 @@ def apply_feature_gates(doc, enabled_features):
                 strip_include_if(c)
         kept_nodes.append(node)
     doc.nodes = kept_nodes
+
+
+# ---------------------------------------------------------------------------
+# Cargo feature injection
+# ---------------------------------------------------------------------------
+
+
+def _build_crate_feature_index(project_dir):
+    """Build a mapping of workspace crate name -> set of defined features.
+
+    Reads the workspace Cargo.toml to find members, then reads each member's
+    Cargo.toml to extract its package name and [features] keys.
+    """
+    root_toml_path = project_dir / 'Cargo.toml'
+    with open(root_toml_path, 'rb') as f:
+        root = tomllib.load(f)
+
+    index = {}  # crate_name -> set of feature names
+    for member in root.get('workspace', {}).get('members', []):
+        member_toml = project_dir / member / 'Cargo.toml'
+        if not member_toml.exists():
+            continue
+        with open(member_toml, 'rb') as f:
+            cargo = tomllib.load(f)
+        crate_name = cargo.get('package', {}).get('name')
+        if crate_name is None:
+            continue
+        features = set(cargo.get('features', {}).keys())
+        if features:
+            index[crate_name] = features
+
+    return index
+
+
+def inject_cargo_features(doc, project_dir, scoped_features, broadcast_features):
+    """Inject ``features "X"`` nodes into task definitions.
+
+    *scoped_features*: ``{task_name: {feat, ...}}`` — unconditionally injected.
+    *broadcast_features*: ``{feat, ...}`` — injected only when the task's
+    workspace-crate Cargo.toml defines that feature.
+    """
+    if not scoped_features and not broadcast_features:
+        return
+
+    crate_index = _build_crate_feature_index(project_dir)
+
+    for task_node in find_tasks(doc):
+        tname = task_name(task_node)
+        crate_node = find_child(task_node, 'workspace-crate')
+        crate_name = node_name_arg(crate_node) if crate_node else None
+        crate_features = crate_index.get(crate_name, set()) if crate_name else set()
+
+        to_inject = set()
+
+        # Broadcast: add if the crate defines the feature
+        for feat in broadcast_features:
+            if feat in crate_features:
+                to_inject.add(feat)
+
+        # Scoped: add unconditionally (error if crate doesn't define it)
+        for feat in scoped_features.get(tname, ()):
+            if crate_name and feat not in crate_features:
+                die(f"feature '{feat}' scoped to task '{tname}' "
+                    f"but crate '{crate_name}' does not define it")
+            to_inject.add(feat)
+
+        # Collect already-declared features so we don't duplicate
+        existing = {node_arg(c) for c in find_children(task_node, 'features')}
+
+        for feat in sorted(to_inject):
+            if feat not in existing:
+                task_node.nodes.append(
+                    kdl.Node(name='features',
+                             args=[kdl.String(value=feat, tag=None)])
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1541,6 +1617,8 @@ def main():
 
     # Parse flags
     enabled_features = set()
+    scoped_features = {}   # task_name -> set of features
+    broadcast_features = set()
     selected_board = None
     rest = sys.argv[3:]
     i = 0
@@ -1548,8 +1626,14 @@ def main():
         if rest[i] == '--features' and i + 1 < len(rest):
             for f in rest[i + 1].split(','):
                 f = f.strip()
-                if f:
-                    enabled_features.add(f)
+                if not f:
+                    continue
+                if ':' in f:
+                    scope, feat = f.split(':', 1)
+                    scoped_features.setdefault(scope, set()).add(feat)
+                else:
+                    broadcast_features.add(f)
+                enabled_features.add(f.split(':')[-1])
             i += 2
         elif rest[i] == '--board' and i + 1 < len(rest):
             selected_board = rest[i + 1]
@@ -1577,6 +1661,10 @@ def main():
 
     # Apply feature gates (must be first — strips nodes before validation)
     apply_feature_gates(doc, enabled_features)
+
+    # Inject cargo features into tasks based on Cargo.toml definitions
+    project_dir = Path(input_path).resolve().parent
+    inject_cargo_features(doc, project_dir, scoped_features, broadcast_features)
 
     # Error on bare uses-task (must use uses-sysmodule or unsafe-uses-task)
     check_no_raw_uses_task(doc)

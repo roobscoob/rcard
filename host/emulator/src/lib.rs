@@ -127,7 +127,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        self.monitor.send("quit").ok();
+        self.monitor.send_nowait("quit");
         // Give it a moment, then force kill
         std::thread::sleep(Duration::from_millis(500));
         self.renode.kill().ok();

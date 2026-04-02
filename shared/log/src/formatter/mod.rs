@@ -174,6 +174,7 @@ impl<W: Writer> Formatter<W> {
     pub fn write_stack_dump(&mut self, header: &[u8; 72], stack: &[u8]) {
         self.w.write(&[TAG_STACK_DUMP]);
         self.w.write(header);
+        self.w.write(&(stack.len() as u32).to_le_bytes());
         self.w.write(stack);
     }
 

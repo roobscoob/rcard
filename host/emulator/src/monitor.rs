@@ -1,12 +1,148 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::EmulatorError;
 
+// ── Protocol phases ─────────────────────────────────────────────────
+
+enum Phase {
+    /// Consuming the initial banner until the first prompt.
+    Banner,
+    /// Prompt received; ready for the next command.
+    Idle,
+    /// Command sent; waiting for Renode to echo it back.
+    AwaitEcho(String),
+    /// Echo matched; accumulating response lines until the next prompt.
+    AwaitPrompt,
+    /// TCP stream closed or unrecoverable timeout.
+    Closed,
+}
+
+// ── Shared state (Mutex + Condvar) ──────────────────────────────────
+
+struct Inner {
+    phase: Phase,
+    /// Response lines collected during `AwaitPrompt`.
+    response: Vec<String>,
+    /// Byte accumulator for the current (unterminated) line.
+    partial: Vec<u8>,
+    /// Remaining bytes to skip for an in-progress telnet IAC sequence.
+    iac_skip: u8,
+    /// True while inside an ANSI escape sequence (ESC … letter).
+    in_ansi: bool,
+    /// The prompt bytes we expect, e.g. `b"(monitor) "`.
+    prompt: Vec<u8>,
+}
+
+impl Inner {
+    fn new() -> Self {
+        Self {
+            phase: Phase::Banner,
+            response: Vec::new(),
+            partial: Vec::new(),
+            iac_skip: 0,
+            in_ansi: false,
+            prompt: b"(monitor) ".to_vec(),
+        }
+    }
+
+    /// Feed one byte from the TCP stream into the state machine.
+    fn feed(&mut self, b: u8) {
+        // Telnet IAC: skip the 2 bytes following 0xFF.
+        if self.iac_skip > 0 {
+            self.iac_skip -= 1;
+            return;
+        }
+        if b == 0xFF {
+            self.iac_skip = 2;
+            return;
+        }
+
+        // ANSI escape: ESC … <letter>.
+        if b == 0x1B {
+            self.in_ansi = true;
+            return;
+        }
+        if self.in_ansi {
+            if b.is_ascii_alphabetic() {
+                self.in_ansi = false;
+            }
+            return;
+        }
+
+        match self.phase {
+            Phase::Banner => {
+                if b == b'\n' {
+                    self.partial.clear();
+                } else {
+                    self.partial.push(b);
+                    if self.at_prompt() {
+                        self.partial.clear();
+                        self.phase = Phase::Idle;
+                    }
+                }
+            }
+
+            Phase::AwaitEcho(_) => {
+                if b == b'\n' {
+                    let line =
+                        strip_control_str(&String::from_utf8_lossy(&self.partial));
+                    self.partial.clear();
+                    let matches = match self.phase {
+                        Phase::AwaitEcho(ref cmd) => line.trim() == cmd.as_str(),
+                        _ => false,
+                    };
+                    if matches {
+                        self.phase = Phase::AwaitPrompt;
+                    }
+                } else {
+                    self.partial.push(b);
+                }
+            }
+
+            Phase::AwaitPrompt => {
+                if b == b'\n' {
+                    let line =
+                        String::from_utf8_lossy(&self.partial).into_owned();
+                    self.response.push(line);
+                    self.partial.clear();
+                } else {
+                    self.partial.push(b);
+                    if self.at_prompt() {
+                        self.partial.clear();
+                        self.phase = Phase::Idle;
+                    }
+                }
+            }
+
+            Phase::Idle => {
+                // Discard unexpected data while idle.
+                if b == b'\n' {
+                    self.partial.clear();
+                }
+            }
+
+            Phase::Closed => {}
+        }
+    }
+
+    /// True when `partial` exactly matches the expected prompt.
+    fn at_prompt(&self) -> bool {
+        let p = &self.partial;
+        let start = if p.first() == Some(&b'\r') { 1 } else { 0 };
+        p.get(start..) == Some(self.prompt.as_slice())
+    }
+}
+
+// ── Public API ──────────────────────────────────────────────────────
+
 pub struct Monitor {
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+    shared: Arc<(Mutex<Inner>, Condvar)>,
+    writer: Mutex<TcpStream>,
+    _reader: JoinHandle<()>,
 }
 
 impl Monitor {
@@ -26,100 +162,218 @@ impl Monitor {
             }
         };
 
-        stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .ok();
-
         let writer = stream.try_clone().map_err(EmulatorError::MonitorConnect)?;
-        let mut mon = Monitor {
-            reader: BufReader::new(stream),
-            writer,
+        let shared = Arc::new((Mutex::new(Inner::new()), Condvar::new()));
+
+        let r_shared = Arc::clone(&shared);
+        let reader =
+            std::thread::spawn(move || reader_loop(stream, r_shared));
+
+        let mon = Monitor {
+            shared,
+            writer: Mutex::new(writer),
+            _reader: reader,
         };
 
-        // Drain the initial banner/prompt
-        mon.drain()?;
+        // Wait for the banner to be consumed (transitions to Idle).
+        mon.wait_idle(timeout.saturating_sub(start.elapsed()))?;
         Ok(mon)
     }
 
-    /// Send a command, don't wait for a response.
-    pub fn send(&mut self, cmd: &str) -> Result<(), EmulatorError> {
-        self.write_cmd(cmd)?;
-        self.drain()?;
+    /// Send a command; block until Renode has finished processing it.
+    pub fn send(&self, cmd: &str) -> Result<(), EmulatorError> {
+        self.execute(cmd, Duration::from_secs(30))?;
         Ok(())
     }
 
-    /// Send a command and return the response line (echo skipped).
-    /// Expects the renode call-response pattern:
-    ///   "command\n"        ← echo
-    ///   "\rresponse\r\r\n" ← actual response
-    pub fn query(&mut self, cmd: &str) -> Result<String, EmulatorError> {
-        self.query_with_timeout(cmd, Duration::from_millis(500))
+    /// Fire a command without waiting for a response (used in Drop paths).
+    pub fn send_nowait(&self, cmd: &str) {
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = w.write_all(cmd.as_bytes());
+            let _ = w.write_all(b"\n");
+            let _ = w.flush();
+        }
     }
 
-    /// Like `query`, but with a custom read timeout for slow operations.
+    /// Send a command and return the stripped response.
+    pub fn query(&self, cmd: &str) -> Result<String, EmulatorError> {
+        self.query_with_timeout(cmd, Duration::from_secs(30))
+    }
+
+    /// Like `query`, but with a custom timeout for slow operations.
     pub fn query_with_timeout(
-        &mut self,
+        &self,
         cmd: &str,
         timeout: Duration,
     ) -> Result<String, EmulatorError> {
-        // Temporarily override the stream read timeout
-        let stream = self.reader.get_ref();
-        let old_timeout = stream.read_timeout().ok().flatten();
-        stream.set_read_timeout(Some(timeout)).ok();
-
-        self.write_cmd(cmd)?;
-
-        let mut lines: Vec<String> = Vec::new();
-        loop {
-            let line = match self.read_line() {
-                Some(line) => line,
-                None => break,
-            };
-
-            let clean = strip_control_str(&line);
-            let trimmed = clean.trim();
-            if trimmed.is_empty() || trimmed == cmd {
-                continue;
+        let raw = self.execute(cmd, timeout)?;
+        let mut out = Vec::new();
+        for line in &raw {
+            let clean = strip_control_str(line);
+            let trimmed = clean.trim().to_string();
+            if !trimmed.is_empty() {
+                out.push(trimmed);
             }
-            lines.push(trimmed.to_string());
         }
-        let response = lines.join("\n");
-
-        // Restore original timeout
-        let stream = self.reader.get_ref();
-        stream.set_read_timeout(old_timeout).ok();
-
-        Ok(response)
+        Ok(out.join("\n"))
     }
 
-    fn write_cmd(&mut self, cmd: &str) -> Result<(), EmulatorError> {
-        self.writer
-            .write_all(cmd.as_bytes())
-            .map_err(EmulatorError::MonitorSend)?;
-        self.writer
-            .write_all(b"\n")
-            .map_err(EmulatorError::MonitorSend)?;
-        self.writer.flush().map_err(EmulatorError::MonitorSend)
-    }
+    // ── Internals ───────────────────────────────────────────────────
 
-    /// Read one line, returning None on timeout/EOF.
-    fn read_line(&mut self) -> Option<String> {
-        let mut raw = Vec::new();
-        match self.reader.read_until(b'\n', &mut raw) {
-            Ok(0) => None,
-            Ok(_) => Some(String::from_utf8_lossy(&raw).into_owned()),
-            Err(_) => None,
+    /// Core primitive: send `cmd`, wait for the next prompt, return the
+    /// raw response lines collected between the echo and the prompt.
+    fn execute(
+        &self,
+        cmd: &str,
+        timeout: Duration,
+    ) -> Result<Vec<String>, EmulatorError> {
+        let (lock, cvar) = &*self.shared;
+        let deadline = Instant::now() + timeout;
+
+        // 1. Wait for Idle.
+        {
+            let mut inner = lock.lock().unwrap();
+            loop {
+                match inner.phase {
+                    Phase::Idle => break,
+                    Phase::Closed => return Err(EmulatorError::MonitorDisconnected),
+                    _ => {}
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(EmulatorError::MonitorCommand(format!(
+                        "timed out waiting to send '{cmd}'"
+                    )));
+                }
+                let (g, _) = cvar.wait_timeout(inner, remaining).unwrap();
+                inner = g;
+            }
+
+            // 2. Prepare and transition to AwaitEcho.
+            inner.response.clear();
+            if let Some(name) = parse_mach_create(cmd) {
+                inner.prompt = format!("({name}) ").into_bytes();
+            }
+            inner.phase = Phase::AwaitEcho(cmd.to_string());
+        }
+
+        // 3. Write the command (outside the inner lock so the reader
+        //    thread can process bytes while we write).
+        {
+            let mut w = self.writer.lock().unwrap();
+            w.write_all(cmd.as_bytes())
+                .map_err(EmulatorError::MonitorSend)?;
+            w.write_all(b"\n")
+                .map_err(EmulatorError::MonitorSend)?;
+            w.flush().map_err(EmulatorError::MonitorSend)?;
+        }
+
+        // 4. Wait for the state machine to reach Idle again.
+        {
+            let mut inner = lock.lock().unwrap();
+            loop {
+                match inner.phase {
+                    Phase::Idle => {
+                        return Ok(std::mem::take(&mut inner.response))
+                    }
+                    Phase::Closed => {
+                        return Err(EmulatorError::MonitorDisconnected)
+                    }
+                    _ => {}
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    inner.phase = Phase::Closed;
+                    return Err(EmulatorError::MonitorCommand(format!(
+                        "timed out waiting for response to '{cmd}'"
+                    )));
+                }
+                let (g, _) = cvar.wait_timeout(inner, remaining).unwrap();
+                inner = g;
+            }
         }
     }
 
-    /// Read and discard all available data until timeout.
-    fn drain(&mut self) -> Result<(), EmulatorError> {
-        while self.read_line().is_some() {}
-        Ok(())
+    /// Block until phase is `Idle` (used during connect for the banner).
+    fn wait_idle(&self, timeout: Duration) -> Result<(), EmulatorError> {
+        let (lock, cvar) = &*self.shared;
+        let mut inner = lock.lock().unwrap();
+        let deadline = Instant::now() + timeout;
+        loop {
+            match inner.phase {
+                Phase::Idle => return Ok(()),
+                Phase::Closed => return Err(EmulatorError::MonitorDisconnected),
+                _ => {}
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(EmulatorError::MonitorCommand(
+                    "timed out waiting for Renode banner".into(),
+                ));
+            }
+            let (g, _) = cvar.wait_timeout(inner, remaining).unwrap();
+            inner = g;
+        }
     }
 }
 
-/// Strip ANSI escapes, telnet IAC sequences, and control characters from a string.
+// ── Reader thread ───────────────────────────────────────────────────
+
+fn reader_loop(
+    stream: TcpStream,
+    shared: Arc<(Mutex<Inner>, Condvar)>,
+) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .ok();
+
+    let (lock, cvar) = &*shared;
+    let mut buf = [0u8; 1024];
+
+    loop {
+        match (&stream).read(&mut buf) {
+            Ok(0) => {
+                lock.lock().unwrap().phase = Phase::Closed;
+                cvar.notify_all();
+                break;
+            }
+            Ok(n) => {
+                let mut inner = lock.lock().unwrap();
+                let was_idle = matches!(inner.phase, Phase::Idle);
+                for &b in &buf[..n] {
+                    inner.feed(b);
+                }
+                if !was_idle && matches!(inner.phase, Phase::Idle) {
+                    drop(inner);
+                    cvar.notify_all();
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                if matches!(lock.lock().unwrap().phase, Phase::Closed) {
+                    break;
+                }
+            }
+            Err(_) => {
+                lock.lock().unwrap().phase = Phase::Closed;
+                cvar.notify_all();
+                break;
+            }
+        }
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/// Extract the machine name from `mach create "name"`.
+fn parse_mach_create(cmd: &str) -> Option<&str> {
+    let rest = cmd.trim().strip_prefix("mach create")?.trim();
+    rest.strip_prefix('"')?.strip_suffix('"')
+}
+
+/// Strip ANSI escapes, telnet IAC sequences, and control characters.
 fn strip_control_str(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(bytes.len());
@@ -127,11 +381,11 @@ fn strip_control_str(s: &str) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         if b == 0xFF {
-            i += 3; // Telnet IAC: skip 3 bytes
+            i += 3;
             continue;
         }
         if b == 0x1B {
-            i += 1; // ANSI escape: skip until letter
+            i += 1;
             while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
                 i += 1;
             }

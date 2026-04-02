@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 bare-panics = []
+panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 
 [dependencies]
 hubris-task-slots.workspace = true

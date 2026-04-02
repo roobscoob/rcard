@@ -4,7 +4,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use hubris_task_slots::SLOTS;
-use rcard_log::{debug, error, panic, trace, OptionExt};
+use rcard_log::{debug, error, info, panic, trace, OptionExt};
 use sifli_pac::mpi::Mpi as MpiPeri;
 use sysmodule_mpi_api::*;
 
@@ -63,11 +63,9 @@ struct MpiResource {
 #[allow(clippy::double_must_use)]
 impl MpiResource {
     fn wait_transfer_complete(&self) -> Result<(), HwTimeout> {
-        trace!("MPI{}: waiting for transfer complete", self.index);
         for _ in 0..MAX_TRANSFER_POLLS {
             if self.regs.sr().read().tcf() {
                 self.regs.scr().write(|w| w.set_tcfc(true));
-                trace!("MPI{}: transfer complete", self.index);
                 return Ok(());
             }
         }
@@ -75,10 +73,8 @@ impl MpiResource {
     }
 
     fn wait_rx_ready(&self) -> Result<(), HwTimeout> {
-        trace!("MPI{}: waiting for RX ready", self.index);
         for _ in 0..MAX_FIFO_POLLS {
             if !self.regs.fifocr().read().rxe() {
-                trace!("MPI{}: RX ready", self.index);
                 return Ok(());
             }
         }
@@ -86,10 +82,8 @@ impl MpiResource {
     }
 
     fn wait_tx_ready(&self) -> Result<(), HwTimeout> {
-        trace!("MPI{}: waiting for TX ready", self.index);
         for _ in 0..MAX_FIFO_POLLS {
             if !self.regs.fifocr().read().txf() {
-                trace!("MPI{}: TX ready", self.index);
                 return Ok(());
             }
         }
@@ -98,7 +92,6 @@ impl MpiResource {
 
     /// Send a command-only sequence (no address, no data).
     fn cmd_only(&self, instruction: u8) -> Result<(), HwTimeout> {
-        trace!("MPI{}: cmd_only instruction={}", self.index, instruction);
         self.regs.ccr1().write(|w| {
             w.set_imode(self.config.imode as u8);
         });
@@ -109,7 +102,6 @@ impl MpiResource {
 
     /// Send a command + address, no data.
     fn cmd_addr(&self, instruction: u8, address: u32) -> Result<(), HwTimeout> {
-        trace!("MPI{}: cmd_addr instruction={} address={}", self.index, instruction, address);
         self.regs.ar1().write(|w| w.0 = address);
         self.regs.ccr1().write(|w| {
             w.set_imode(self.config.imode as u8);
@@ -122,13 +114,11 @@ impl MpiResource {
     }
 
     fn write_enable(&self) -> Result<(), HwTimeout> {
-        trace!("MPI{}: write_enable", self.index);
         self.cmd_only(CMD_WRITE_ENABLE)
     }
 
     /// Poll status register 1 until WIP (bit 0) clears.
     fn wait_wip(&self) -> Result<(), HwTimeout> {
-        trace!("MPI{}: waiting for WIP clear", self.index);
         for _ in 0..MAX_WIP_POLLS {
             self.regs.dlr1().write(|w| w.0 = 0); // 1 byte (n-1 encoding)
             self.regs.ccr1().write(|w| {
@@ -141,7 +131,6 @@ impl MpiResource {
             self.wait_rx_ready()?;
             let sr = self.regs.dr().read().0 as u8;
             if sr & 0x01 == 0 {
-                trace!("MPI{}: WIP clear", self.index);
                 return Ok(());
             }
         }
@@ -150,7 +139,7 @@ impl MpiResource {
 }
 
 impl Mpi for MpiResource {
-    fn open(_meta: ipc::Meta, index: u8, config: MpiConfig) -> Result<Self, MpiOpenError> {
+    fn open(meta: ipc::Meta, index: u8, config: MpiConfig) -> Result<Self, MpiOpenError> {
         debug!("MPI{}: opening", index);
         let Some(regs) = mpi_instance(index) else {
             error!("MPI{}: invalid index", index);
@@ -170,16 +159,22 @@ impl Mpi for MpiResource {
             w.set_sckinv(config.clock_polarity as u8 != 0);
         });
 
-        debug!("MPI{}: opened, prescaler={}", index, config.prescaler);
-        Ok(MpiResource {
+        let mut resource = MpiResource {
             index,
             regs,
             config,
-        })
+        };
+
+        debug!(
+            "MPI{}: opened, format={}",
+            index,
+            resource.read_jedec_id(meta)
+        );
+
+        Ok(resource)
     }
 
     fn read_jedec_id(&mut self, _meta: ipc::Meta) -> JedecId {
-        debug!("MPI{}: read_jedec_id", self.index);
         self.regs.dlr1().write(|w| w.0 = 2); // 3 bytes (n-1 encoding)
         self.regs.ccr1().write(|w| {
             w.set_imode(self.config.imode as u8);
@@ -188,7 +183,10 @@ impl Mpi for MpiResource {
         // CMDR1 write triggers the hardware sequence — must come after CCR1/DLR1
         self.regs.cmdr1().write(|w| w.set_cmd(CMD_READ_JEDEC_ID));
         if let Err(e) = self.wait_transfer_complete() {
-            panic!("Timeout waiting for transfer complete during read_jedec_id: {}", e);
+            panic!(
+                "Timeout waiting for transfer complete during read_jedec_id: {}",
+                e
+            );
         }
 
         if let Err(e) = self.wait_rx_ready() {
@@ -196,13 +194,12 @@ impl Mpi for MpiResource {
         }
 
         let raw = self.regs.dr().read().0;
-        let id = JedecId {
+
+        JedecId {
             manufacturer: raw as u8,
             memory_type: (raw >> 8) as u8,
             capacity: (raw >> 16) as u8,
-        };
-        debug!("MPI{}: JEDEC ID mfr={} type={} cap={}", self.index, id.manufacturer, id.memory_type, id.capacity);
-        id
+        }
     }
 
     fn read(
@@ -212,7 +209,6 @@ impl Mpi for MpiResource {
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) {
         let len = buf.len();
-        debug!("MPI{}: read address={} len={}", self.index, address, len);
         if len == 0 {
             return;
         }
@@ -261,7 +257,6 @@ impl Mpi for MpiResource {
         data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) {
         let total = data.len();
-        debug!("MPI{}: write address={} len={}", self.index, address, total);
         if total == 0 {
             return;
         }
@@ -322,7 +317,10 @@ impl Mpi for MpiResource {
     }
 
     fn erase(&mut self, _meta: ipc::Meta, address: u32, length: u32) -> Result<(), EraseError> {
-        debug!("MPI{}: erase address={} length={}", self.index, address, length);
+        debug!(
+            "MPI{}: erase address={} length={}",
+            self.index, address, length
+        );
         const ALIGN_4K: u32 = 4096;
         const ALIGN_32K: u32 = 32 * 1024;
         const ALIGN_64K: u32 = 64 * 1024;
@@ -402,6 +400,8 @@ impl Drop for MpiResource {
 
 #[export_name = "main"]
 fn main() -> ! {
+    info!("Awake");
+
     ipc::server! {
         Mpi: MpiResource,
     }

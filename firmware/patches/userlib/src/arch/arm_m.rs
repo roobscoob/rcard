@@ -1602,6 +1602,91 @@ cfg_if::cfg_if! {
         );
     }
 }
+/// Ask the kernel for the current generation of a task.
+///
+/// Given a `TaskId` (whose generation may be stale), returns a new `TaskId`
+/// with the same index but the kernel's current generation for that task.
+/// This avoids the need to discover the generation via a failed `sys_send`.
+pub fn sys_refresh_task_id(task_id: TaskId) -> TaskId {
+    let tid = unsafe { sys_refresh_task_id_stub(task_id.0 as u32) };
+    TaskId(tid as u16)
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(any(
+        hubris_target = "thumbv7m-none-eabi",
+        hubris_target = "thumbv7em-none-eabi",
+        hubris_target = "thumbv7em-none-eabihf",
+        hubris_target = "thumbv8m.main-none-eabi",
+        hubris_target = "thumbv8m.main-none-eabihf",
+    ))] {
+        global_asm!("
+        .section .text.sys_refresh_task_id_stub
+        .globl sys_refresh_task_id_stub
+        .type sys_refresh_task_id_stub,function
+        sys_refresh_task_id_stub:
+            .cfi_startproc
+
+            push {{r4, r11}}
+            .cfi_adjust_cfa_offset 8
+            .cfi_offset r4, -8
+            .cfi_offset r11, -4
+
+            mov r11, #{sysnum}
+            mov r4, r0
+
+            svc #0
+
+            mov r0, r4
+
+            pop {{r4, r11}}
+            .cfi_adjust_cfa_offset -8
+            bx lr
+
+            .cfi_endproc
+        ",
+            sysnum = const Sysnum::RefreshTaskId as u32,
+        );
+    } else {
+        global_asm!("
+        .section .text.sys_refresh_task_id_stub
+        .globl sys_refresh_task_id_stub
+        .type sys_refresh_task_id_stub,function
+        sys_refresh_task_id_stub:
+            .cfi_startproc
+
+            push {{r4}}
+            .cfi_adjust_cfa_offset 4
+            .cfi_offset r4, -4
+
+            mov r4, r11
+            push {{r4}}
+            .cfi_adjust_cfa_offset 4
+            .cfi_offset r11, -8
+
+            eors r4, r4
+            adds r4, #{sysnum}
+            mov r11, r4
+
+            mov r4, r0
+
+            svc #0
+
+            mov r0, r4
+
+            pop {{r4}}
+            .cfi_adjust_cfa_offset -4
+            mov r11, r4
+            pop {{r4}}
+            bx lr
+
+            .cfi_endproc
+        ",
+            sysnum = const Sysnum::RefreshTaskId as u32,
+        );
+    }
+}
+
 extern "C" {
     /// Low-level send syscall stub.
     ///
@@ -1718,6 +1803,8 @@ extern "C" {
     fn sys_borrow_write_stub(tid_bits: u32, index: u32, offset: u32, src: *const u8, src_len: usize) -> u64;
 
     fn sys_post_stub(tid_bits: u32, notification: u32) -> u32;
+
+    fn sys_refresh_task_id_stub(tid_bits: u32) -> u32;
 }
 
 cfg_if::cfg_if! {

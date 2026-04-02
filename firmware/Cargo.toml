@@ -9,7 +9,7 @@ members = [
     "sysmodule/log/api",
     "sysmodule/time",
     "sysmodule/time/api",
-"sysmodule/fs",
+    "sysmodule/fs",
     "sysmodule/fs/api",
     "sysmodule/reactor",
     "sysmodule/reactor/api",

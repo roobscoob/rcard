@@ -6,7 +6,9 @@ use crate::parse::{
     ConstructorReturn, HandleMode, MethodKind, ParsedMethod, ParsedParam, ResourceAttr,
     collect_peer_traits, interface_op_path, parse_slice_ref,
 };
-use crate::util::{panic_path, replace_ident_in_type, to_pascal_case, to_screaming_snake_case, to_snake_case};
+use crate::util::{
+    panic_path, replace_ident_in_type, to_pascal_case, to_screaming_snake_case, to_snake_case,
+};
 
 /// Build a map from impl_trait_name -> PeerGenericName for resolvable peers.
 fn peer_generic_name(trait_name: &Ident) -> Ident {
@@ -423,7 +425,11 @@ fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
                     let __h = #pname.handle;
                     __acq_call.push_arg(&__h);
                     match __acq_call.send_raw() {
-                        Ok((rc, _len, _retbuf)) => rc == ipc::kern::ResponseCode::SUCCESS,
+                        Ok((rc, len, retbuf)) => {
+                            rc == ipc::kern::ResponseCode::SUCCESS
+                                && len > 0
+                                && retbuf[0] == 0u8
+                        }
                         _ => false,
                     }
                 };
@@ -608,7 +614,7 @@ fn gen_dispatch_arm(_trait_name: &Ident, enum_name: &Ident, m: &ParsedMethod) ->
                                     let mut __buf: [core::mem::MaybeUninit<u8>; 2 + ipc::RawHandle::SIZE] =
                                         unsafe { core::mem::MaybeUninit::uninit().assume_init() };
                                     ipc::wire::set_uninit(&mut __buf, 0, 0); // outer Ok
-                                    ipc::wire::set_uninit(&mut __buf, 1, 1); // Some
+                                    ipc::wire::set_uninit(&mut __buf, 1, 0); // Some
                                     ipc::wire::write_uninit(&mut __buf[2..], &handle);
                                     reply.reply_ok(unsafe {
                                         ipc::wire::assume_init_slice(&__buf, 2 + ipc::RawHandle::SIZE)
@@ -619,7 +625,7 @@ fn gen_dispatch_arm(_trait_name: &Ident, enum_name: &Ident, m: &ParsedMethod) ->
                                 }
                             },
                             None => {
-                                reply.reply_ok(&[0u8, 0u8]); // Ok(None)
+                                reply.reply_ok(&[0u8, 1u8]); // Ok(None)
                             }
                         }
                     }
@@ -663,6 +669,7 @@ fn gen_dispatch_arm(_trait_name: &Ident, enum_name: &Ident, m: &ParsedMethod) ->
                 #enum_name::#variant => {
                     #deserialize
                     #destructure
+                    #(#lease_bindings)*
                     #(#peer_resolution)*
                     #acquire_block
                     #handle_result

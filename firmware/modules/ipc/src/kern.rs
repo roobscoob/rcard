@@ -12,7 +12,7 @@ pub use userlib::{
     ResponseCode, TaskDeath, TaskId, Truncated,
     // Syscalls
     sys_borrow_info, sys_borrow_read, sys_borrow_write, sys_panic, sys_post, sys_recv_msg_open,
-    sys_recv_open, sys_reply, sys_reply_fault, sys_send,
+    sys_recv_open, sys_refresh_task_id, sys_reply, sys_reply_fault, sys_send,
 };
 
 // ── Host target: portable definitions ────────────────────────────────

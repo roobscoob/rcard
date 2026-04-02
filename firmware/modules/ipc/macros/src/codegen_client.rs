@@ -561,7 +561,8 @@ fn gen_constructor(
         pub fn #method_name(
             #(#sig_params),*
         ) -> #fn_ret {
-            let server = core::cell::Cell::new(S::task_id());
+            let server_id = S::server_id();
+            let server = core::cell::Cell::new(server_id.get());
             #handle_transfer_stmts
             #serialize
             let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; #retbuf_size] =
@@ -576,7 +577,10 @@ fn gen_constructor(
                 argbuffer,
                 retbuffer,
                 &mut leases,
-            ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
+            ).map_err(|dead| {
+                server_id.set(server.get().with_generation(dead.new_generation()));
+                #err_type::from_wire(ipc::Error::ServerDied)
+            })?;
             if rc == ipc::ACCESS_VIOLATION {
                 #_p!(
                     "ipc: server {:?} rejected our message: access violation \
@@ -648,7 +652,10 @@ fn gen_message(
                 #handle_transfer_stmts
                 #serialize
                 #send_body
-                let (rc, len) = send_result.map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
+                let (rc, len) = send_result.map_err(|dead| {
+                    S::server_id().set(self.server.get().with_generation(dead.new_generation()));
+                    #err_type::from_wire(ipc::Error::HandleLost)
+                })?;
                 let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
                 wire_result.map(|v| { #map_handles }).map_err(#err_type::from_wire)
             }
@@ -666,7 +673,10 @@ fn gen_message(
                 #handle_transfer_stmts
                 #serialize
                 #send_body
-                let (rc, len) = send_result.map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
+                let (rc, len) = send_result.map_err(|dead| {
+                    S::server_id().set(self.server.get().with_generation(dead.new_generation()));
+                    #err_type::from_wire(ipc::Error::HandleLost)
+                })?;
                 let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
                 wire_result.map_err(#err_type::from_wire)
             }
@@ -708,7 +718,10 @@ fn gen_destructor(
             #handle_transfer_stmts
             #serialize
             #send_body
-            let (rc, len) = send_result.map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
+            let (rc, len) = send_result.map_err(|dead| {
+                    S::server_id().set(self.server.get().with_generation(dead.new_generation()));
+                    #err_type::from_wire(ipc::Error::HandleLost)
+                })?;
             let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
             wire_result.map_err(#err_type::from_wire)
         }
@@ -752,30 +765,17 @@ fn gen_static_message(
             let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
                 unsafe { core::mem::MaybeUninit::uninit().assume_init() };
             let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
-            let send_result = ipc::kern::sys_send(
+            let (rc, len) = ipc::kern::sys_send(
                 server_id.get(),
                 opcode,
                 argbuffer,
                 retbuffer,
                 &mut leases,
-            );
-            let wire_result: core::result::Result<_, ipc::Error> = match send_result {
-                Ok((rc, len)) => {
-                    #parse_reply
-                }
-                Err(dead) => {
-                    server_id.set(server_id.get().with_generation(dead.new_generation()));
-                    // Retry once with new generation.
-                    let (rc, len) = ipc::kern::sys_send(
-                        server_id.get(),
-                        opcode,
-                        argbuffer,
-                        retbuffer,
-                        &mut leases,
-                    ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
-                    #parse_reply
-                }
-            };
+            ).map_err(|dead| {
+                server_id.set(server_id.get().with_generation(dead.new_generation()));
+                #err_type::from_wire(ipc::Error::ServerDied)
+            })?;
+            let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
             wire_result.map_err(#err_type::from_wire)
         }
     }
@@ -831,29 +831,14 @@ fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
             let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
                 unsafe { core::mem::MaybeUninit::uninit().assume_init() };
             let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
-            let send_result = ipc::kern::sys_send(
+            let (rc, len) = ipc::kern::sys_send(
                 self.server.get(),
                 opcode,
                 argbuffer,
                 retbuffer,
                 &mut leases,
-            );
-            let wire_result: core::result::Result<_, ipc::Error> = match send_result {
-                Ok((rc, len)) => {
-                    #parse_reply
-                }
-                Err(dead) => {
-                    self.server.set(self.server.get().with_generation(dead.new_generation()));
-                    let (rc, len) = ipc::kern::sys_send(
-                        self.server.get(),
-                        opcode,
-                        argbuffer,
-                        retbuffer,
-                        &mut leases,
-                    ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
-                    #parse_reply
-                }
-            };
+            ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
+            let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
             wire_result.map_err(#err_type::from_wire)
         }
     }
