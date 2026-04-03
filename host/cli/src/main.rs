@@ -52,9 +52,9 @@ fn parse_backend(spec: &str, tfw: &PathBuf) -> Box<dyn Backend> {
                 .unwrap_or_else(|e| panic!("failed to start emulator: {e}")),
         )
     } else if let Some(ports) = spec.strip_prefix("serial:") {
-        let (p1, p2) = ports
-            .split_once(',')
-            .unwrap_or_else(|| panic!("expected serial:PORT1,PORT2, got {spec}"));
+        let mut parts = ports.split(',');
+        let p1 = parts.next().filter(|s| !s.is_empty());
+        let p2 = parts.next().filter(|s| !s.is_empty());
         Box::new(
             serial::Serial::connect(p1, p2)
                 .unwrap_or_else(|e| panic!("failed to connect serial: {e}")),
