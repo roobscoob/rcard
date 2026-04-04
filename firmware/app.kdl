@@ -6,6 +6,14 @@ define "workgroup" {
     idle
 }
 
+feature "panics-emit-stack-dump" {
+    description "Dump raw stack bytes over log on panic"
+}
+
+feature "stub" {
+    description "Builds a stub version of the application for flashing to hardware without full functionality"
+}
+
 app "rcard"
 
 board "sf32lb52-devkit-nano" {
@@ -48,6 +56,11 @@ board "bentoboard" {
 
     // Emulation side-channel (not exposed over hardware)
     // usart 3 {}
+
+    usb11 {
+        dp "PA35"
+        dm "PA36"
+    }
 
     // SSD1312 OLED display (https://www.buydisplay.com/download/ic/SSD1312_Datasheet.pdf)
     // Note: display logic voltage powered by VDD33_VOUT2, must be enabled BEFORE 9V supply
@@ -203,7 +216,7 @@ task "supervisor" {
     uses-peripheral "usart1"
 }
 
-task "sysmodule_usart" {
+sysmodule "usart" {
     workspace-crate "sysmodule_usart"
     stack-size (KiB)2
     priority (workgroup)"core-sysmodule"
@@ -213,30 +226,29 @@ task "sysmodule_usart" {
     uses-peripheral "usart3"
 }
 
-task "sysmodule_time" {
+sysmodule "time" {
     workspace-crate "sysmodule_time"
     stack-size (KiB)1
     priority (workgroup)"core-sysmodule"
     uses-peripheral "rtc"
 }
 
-task "sysmodule_log" {
+sysmodule "log" {
     workspace-crate "sysmodule_log"
     stack-size (KiB)4
     priority (workgroup)"core-sysmodule"
-    uses-peripheral "usart1"
     uses-sysmodule "usart" { with-priority 0; }
     uses-sysmodule "reactor" { with-priority 0; }
     pushes-notification "logs"
 }
 
-task "sysmodule_reactor" {
+sysmodule "reactor" {
     workspace-crate "sysmodule_reactor"
     stack-size (KiB)2
     priority (workgroup)"core-sysmodule"
 }
 
-task "sysmodule_display" {
+sysmodule "display" {
     workspace-crate "sysmodule_display"
     stack-size (KiB)2
     priority (workgroup)"sysmodule"
@@ -244,7 +256,7 @@ task "sysmodule_display" {
     uses-sysmodule "log" { with-priority 0; }
 }
 
-task "sysmodule_compositor" {
+sysmodule "compositor" {
     workspace-crate "sysmodule_compositor"
     stack-size (KiB)8
     priority (workgroup)"sysmodule"
@@ -254,7 +266,7 @@ task "sysmodule_compositor" {
     uses-notification "present"
 }
 
-task "sysmodule_mpi" {
+sysmodule "mpi" {
     workspace-crate "sysmodule_mpi"
     stack-size (KiB)4
     priority (workgroup)"sysmodule"
@@ -263,7 +275,7 @@ task "sysmodule_mpi" {
     uses-sysmodule "log" { with-priority 0; }
 }
 
-task "sysmodule_storage" {
+sysmodule "storage" {
     workspace-crate "sysmodule_storage"
     stack-size (KiB)8
     priority (workgroup)"sysmodule"
@@ -272,7 +284,7 @@ task "sysmodule_storage" {
     uses-sysmodule "log" { with-priority 0; }
 }
 
-task "sysmodule_log_sink_storage" {
+sysmodule "log_sink_storage" {
     workspace-crate "sysmodule_log_sink_storage"
     stack-size (KiB)8
     priority (workgroup)"sysmodule"
@@ -281,7 +293,7 @@ task "sysmodule_log_sink_storage" {
     uses-notification "logs"
 }
 
-task "sysmodule_fs" {
+sysmodule "fs" {
     workspace-crate "sysmodule_fs"
     stack-size (KiB)32
     priority (workgroup)"sysmodule"
@@ -290,10 +302,30 @@ task "sysmodule_fs" {
     uses-sysmodule "log" { with-priority 0; }
 }
 
+sysmodule "usb" {
+    workspace-crate "sysmodule_usb"
+    stack-size (KiB)4
+    priority (workgroup)"sysmodule"
+    uses-sysmodule "log" { with-priority 0; }
+    uses-peripheral "pinctrl"
+    uses-peripheral "rcc"
+    uses-peripheral "syscon"
+    uses-peripheral "usbc"
+}
+
 task "fob" {
+    include-if "not(feature(stub))"
     workspace-crate "fob"
     stack-size (KiB)8
     priority (workgroup)"app"
     uses-sysmodule "log" { with-priority 0; }
-    pushes-notification "present"
+}
+
+task "stub" {
+    include-if "feature(stub)"
+    workspace-crate "stub"
+    stack-size (KiB)8
+    priority (workgroup)"app"
+    uses-sysmodule "log" { with-priority 0; }
+    uses-sysmodule "usb" { with-priority 0; }
 }

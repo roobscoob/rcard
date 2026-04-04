@@ -151,6 +151,9 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+dependencies = [
+ "rustc-std-workspace-core",
+]
 
 [[package]]
 name = "clang-sys"
@@ -202,6 +205,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "embassy-usb-driver"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17119855ccc2d1f7470a39756b12068454ae27a3eabb037d940b5c03d9c77b7a"
+dependencies = [
+ "embedded-io-async",
+]
+
+[[package]]
 name = "embedded-hal"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,6 +221,21 @@ checksum = "35949884794ad573cf46071e41c9b60efb0cb311e3ca01f7af807af1debc66ff"
 dependencies = [
  "nb 0.1.3",
  "void",
+]
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
+name = "embedded-io-async"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ff09972d4073aa8c299395be75161d582e7629cd663171d62af73c8d50dba3f"
+dependencies = [
+ "embedded-io",
 ]
 
 [[package]]
@@ -402,6 +429,7 @@ dependencies = [
  "cortex-m-rt",
  "kern",
  "serde_json",
+ "sifli-pac",
 ]
 
 [[package]]
@@ -451,6 +479,19 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "musb"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cbd1ff7d290ac701ca73a02c270c19df8b22f80cbd80c9e37f328b0e72a9a6d"
+dependencies = [
+ "cfg-if",
+ "embassy-usb-driver",
+ "serde",
+ "serde_yaml",
+ "usb-device",
+]
 
 [[package]]
 name = "nb"
@@ -505,6 +546,12 @@ dependencies = [
  "rand",
  "rand_chacha",
 ]
+
+[[package]]
+name = "portable-atomic"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "ppv-lite86"
@@ -625,6 +672,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
+name = "rustc-std-workspace-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa9c45b374136f52f2d6311062c7146bff20fec063c3f5d46a410bd937746955"
+
+[[package]]
 name = "rustc_version"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -696,6 +749,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.13.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -734,6 +800,19 @@ dependencies = [
  "ipc",
  "userlib",
  "zerocopy 0.8.40",
+]
+
+[[package]]
+name = "stub"
+version = "0.1.0"
+dependencies = [
+ "hubris-task-slots",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "sysmodule_log_api",
+ "sysmodule_usb_api",
+ "userlib",
 ]
 
 [[package]]
@@ -1026,6 +1105,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_usb"
+version = "0.1.0"
+dependencies = [
+ "hubris-task-slots",
+ "idyll_runtime",
+ "ipc",
+ "musb",
+ "rcard-log",
+ "rcard-log-macros",
+ "sifli-pac",
+ "sysmodule_log_api",
+ "sysmodule_usb_api",
+ "usb-device",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_usb_api"
+version = "0.1.0"
+dependencies = [
+ "idyll_runtime",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "userlib",
+ "zerocopy 0.8.40",
+]
+
+[[package]]
 name = "toml"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1077,9 +1185,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
 name = "unwrap-lite"
 version = "0.1.0"
 source = "git+https://github.com/cbiffle/hubris-fork.git?rev=061df2fc76433bbc7cc3931a8981fbd509e35c97#061df2fc76433bbc7cc3931a8981fbd509e35c97"
+
+[[package]]
+name = "usb-device"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
+dependencies = [
+ "heapless",
+ "portable-atomic",
+]
 
 [[package]]
 name = "userlib"

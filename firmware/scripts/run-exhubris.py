@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# /// script
+# dependencies = ["pywinpty; sys_platform == 'win32'"]
+# ///
 """
 run-exhubris.py <app_kdl> <zip>
 
@@ -59,6 +61,34 @@ def _launch_unix(argv: list[str]):
     return stream, wait
 
 
+def _save_console_modes():
+    """Snapshot Windows console input/output modes so they can be restored."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.windll.kernel32
+    modes = {}
+    for name, handle_id in (("stdin", -10), ("stdout", -11), ("stderr", -12)):
+        h = kernel32.GetStdHandle(handle_id)
+        if h and h != wintypes.HANDLE(-1).value:
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+                modes[handle_id] = (h, mode.value)
+    return modes
+
+
+def _restore_console_modes(modes):
+    """Restore previously saved console modes and flush leaked input."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.windll.kernel32
+    for handle_id, (h, mode) in modes.items():
+        kernel32.SetConsoleMode(h, mode)
+    # Flush DA1 responses that ConPTY leaked into the parent's input buffer
+    stdin_h = kernel32.GetStdHandle(-10)
+    if stdin_h and stdin_h != wintypes.HANDLE(-1).value:
+        kernel32.FlushConsoleInputBuffer(stdin_h)
+
+
 def _launch_windows(argv: list[str]):
     try:
         import winpty
@@ -66,6 +96,7 @@ def _launch_windows(argv: list[str]):
         print("ERROR: pywinpty is required on Windows.  pip install pywinpty", file=sys.stderr)
         sys.exit(1)
 
+    saved_modes = _save_console_modes()
     proc = winpty.PtyProcess.spawn(argv)
 
     class _WinStream(io.RawIOBase):
@@ -87,6 +118,7 @@ def _launch_windows(argv: list[str]):
 
     def wait():
         proc.wait()
+        _restore_console_modes(saved_modes)
         return proc.exitstatus
 
     return _WinStream(), wait

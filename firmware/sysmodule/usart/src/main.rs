@@ -18,6 +18,8 @@ fn usart_instance(index: u8) -> Option<UsartPeri> {
 }
 
 fn init_usart(regs: UsartPeri) {
+    // BRR = 240MHz / 115200 = 2083 (0x823)
+    // regs.brr().write(|w| w.0 = 0x823);
     // BRR = 48MHz / 115200 = 417 (0x1A1)
     regs.brr().write(|w| w.0 = 0x1A1);
     regs.cr1().write(|w| {

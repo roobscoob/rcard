@@ -27,20 +27,7 @@ pub(crate) fn usart_write(data: &[u8]) {
 }
 
 #[panic_handler]
-fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    if USART.get().is_some() {
-        use core::fmt::Write;
-        struct PanicWriter;
-        impl Write for PanicWriter {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                usart_write(s.as_bytes());
-                Ok(())
-            }
-        }
-        usart_write(b"\r\n\r\n[PANIC sysmodule_log] ");
-        let _ = write!(PanicWriter, "{}", info);
-        usart_write(b"\r\n");
-    }
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     ipc::notify_dead!(Reactor);
     userlib::sys_panic(b"log panic")
 }

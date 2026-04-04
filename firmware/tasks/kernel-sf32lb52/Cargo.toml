@@ -11,6 +11,7 @@ bench = false
 [dependencies]
 cortex-m = { version = "0.7.7", features = ["inline-asm"] }
 cortex-m-rt = { version = "0.7.5", features = ["device"] }
+sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
 
 [dependencies.hubris-kern]
 package = "kern"

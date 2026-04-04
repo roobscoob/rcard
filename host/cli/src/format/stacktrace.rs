@@ -4,6 +4,8 @@ use object::read::File as ObjectFile;
 use object::{Object, ObjectSection};
 use rcard_log::OwnedValue;
 
+use super::{DIM, RESET};
+
 /// A single frame in a resolved backtrace.
 pub struct Frame {
     pub function: String,
@@ -34,7 +36,7 @@ impl ElfCache {
         }
     }
 
-    pub fn load_from_archive(&mut self, archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) {
+    pub fn load_from_archive<R: std::io::Read + std::io::Seek>(&mut self, archive: &mut zip::ZipArchive<R>) {
         for i in 0..archive.len() {
             let Ok(mut entry) = archive.by_index(i) else {
                 continue;
@@ -262,4 +264,30 @@ fn shorten_path(path: &str) -> String {
         }
     }
     path
+}
+
+pub fn print_backtrace(bt: &Backtrace, _task_pad: usize, term_width: usize, pw: usize) {
+    let cont_prefix = format!("{:>width$} {DIM}|{RESET} ", "", width = pw - 3,);
+    let content_width = term_width.saturating_sub(pw);
+
+    println!("{cont_prefix}{DIM}backtrace:{RESET}");
+
+    // skip the first frame, since it's rcade_log::stack_dump::capture() itself
+    for frame in bt.frames.iter().skip(1) {
+        let inline_tag = if frame.is_inline { " [inline]" } else { "" };
+        let loc = match (&frame.file, frame.line) {
+            (Some(file), Some(line)) => format!("{file}:{line}"),
+            (Some(file), None) => file.clone(),
+            _ => String::new(),
+        };
+
+        let name = &frame.function;
+        let left = format!("  {name}{inline_tag}");
+        if !loc.is_empty() {
+            let pad = content_width.saturating_sub(left.len() + loc.len() + 1);
+            println!("{cont_prefix}{left}{:pad$} {DIM}{loc}{RESET}", "");
+        } else {
+            println!("{cont_prefix}{left}");
+        }
+    }
 }

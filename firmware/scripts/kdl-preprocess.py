@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# /// script
+# dependencies = ["kdl-py"]
+# ///
 """
 KDL preprocessor: resolves named constants defined in `define` blocks,
 extracts block-device partition tables and filesystem mappings, and
@@ -36,6 +38,20 @@ Block-device and filesystem sections are parsed, validated, and written
 to a partition table JSON file alongside the output. They are stripped
 from the hubake output.
 
+Sysmodule blocks:
+    sysmodule "X" { ... } -> task "sysmodule_X" { ... }
+
+    Sysmodules not reachable from any non-sysmodule task (via
+    uses-sysmodule, peer-sysmodule, or uses-partition edges) are
+    automatically pruned ("dead sysmodule elimination").
+
+Feature definitions:
+    feature "name" { description "..."; dependency "other"; }
+
+    --features only accepts features with a corresponding feature block.
+    Dependencies are resolved transitively.
+    --list-features prints all defined features and exits.
+
 Task dependency directives:
     uses-sysmodule X      -> uses-task sysmodule_X
     peer-sysmodule X      -> uses-task sysmodule_X  (peers.json; bind macro will error)
@@ -58,6 +74,7 @@ Memory allocations:
 
 Conditional compilation:
     include-if "feature(NAME)"   -> node is kept only if NAME is in --feature list
+    include-if "not(feature(X))" -> negation; also works with &&, ||, parens
 
     Supported on: task, block-device/partition, filesystem/map,
     and notification group children. Nodes without include-if are always kept.
@@ -106,9 +123,10 @@ PRINT_CONFIG = kdl.PrintConfig(indent='    ')
 # Grammar (standard precedence: && binds tighter than ||):
 #   expr     = and_expr ( "||" and_expr )*
 #   and_expr = atom ( "&&" atom )*
-#   atom     = "feature(" NAME ")" | "(" expr ")"
+#   atom     = "feature(" NAME ")" | "not(" expr ")" | "(" expr ")"
 
 _FEATURE_RE = re.compile(r'feature\(\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\)')
+_NOT_RE = re.compile(r'not\s*\(')
 
 
 def _tokenize_feature_expr(s):
@@ -121,15 +139,16 @@ def _tokenize_feature_expr(s):
         elif s[i:i+2] in ('&&', '||'):
             tokens.append(s[i:i+2])
             i += 2
-        elif s[i] == '(':
-            # Check if this is feature(...)
+        elif s[i:i+3] == 'not' and _NOT_RE.match(s, i):
+            tokens.append('not')
+            i += _NOT_RE.match(s, i).end() - i  # skip "not("
+        elif _FEATURE_RE.match(s, i):
             m = _FEATURE_RE.match(s, i)
-            if m:
-                tokens.append(('feature', m.group(1)))
-                i = m.end()
-            else:
-                tokens.append('(')
-                i += 1
+            tokens.append(('feature', m.group(1)))
+            i = m.end()
+        elif s[i] == '(':
+            tokens.append('(')
+            i += 1
         elif s[i] == ')':
             tokens.append(')')
             i += 1
@@ -157,12 +176,18 @@ def _parse_and_expr(tokens, pos):
 
 
 def _parse_atom(tokens, pos):
-    """Parse an atom: feature(NAME) or ( expr )."""
+    """Parse an atom: feature(NAME), not( expr ), or ( expr )."""
     if pos >= len(tokens):
         die("unexpected end of include-if expression")
     tok = tokens[pos]
     if isinstance(tok, tuple) and tok[0] == 'feature':
         return tok, pos + 1
+    if tok == 'not':
+        # not( already consumed the opening paren during tokenization
+        inner, pos = _parse_feature_expr(tokens, pos + 1)
+        if pos >= len(tokens) or tokens[pos] != ')':
+            die("missing ')' in not(...) expression")
+        return ('not', inner), pos + 1
     if tok == '(':
         node, pos = _parse_feature_expr(tokens, pos + 1)
         if pos >= len(tokens) or tokens[pos] != ')':
@@ -183,6 +208,8 @@ def eval_feature_expr(expr_str, enabled_features):
     def evaluate(node):
         if isinstance(node, tuple) and node[0] == 'feature':
             return node[1] in enabled_features
+        if isinstance(node, tuple) and node[0] == 'not':
+            return not evaluate(node[1])
         op, left, right = node
         if op == 'and':
             return evaluate(left) and evaluate(right)
@@ -256,6 +283,186 @@ def apply_feature_gates(doc, enabled_features):
                 strip_include_if(c)
         kept_nodes.append(node)
     doc.nodes = kept_nodes
+
+
+# ---------------------------------------------------------------------------
+# Sysmodule block transform
+# ---------------------------------------------------------------------------
+
+
+def transform_sysmodules(doc):
+    """Transform ``sysmodule "X" { ... }`` into ``task "sysmodule_X" { ... }``.
+
+    Returns the set of task names that originated from sysmodule blocks.
+    """
+    sysmodule_names = set()
+    for node in doc.nodes:
+        if node.name == 'sysmodule':
+            short_name = node_name_arg(node)
+            if short_name is None:
+                die("sysmodule block missing name")
+            full_name = f'sysmodule_{short_name}'
+            node.name = 'task'
+            node.args = [kdl.String(value=full_name, tag=None)]
+            sysmodule_names.add(full_name)
+    return sysmodule_names
+
+
+# ---------------------------------------------------------------------------
+# Feature definitions
+# ---------------------------------------------------------------------------
+
+
+def parse_feature_definitions(doc):
+    """Extract ``feature "name" { description "..."; dependency "..."; }`` blocks.
+
+    Returns a dict mapping feature_name -> {description, dependencies}.
+    """
+    features = {}
+    for node in find_children(doc, 'feature'):
+        name = node_name_arg(node)
+        if name is None:
+            die("feature block missing name")
+        if name in features:
+            die(f"duplicate feature definition '{name}'")
+
+        desc_node = find_child(node, 'description')
+        description = node_arg(desc_node) if desc_node else None
+
+        deps = set()
+        for dep_node in find_children(node, 'dependency'):
+            dep = node_arg(dep_node)
+            if dep is None:
+                die(f"feature '{name}' has dependency with no name")
+            deps.add(dep)
+
+        features[name] = {
+            'description': description,
+            'dependencies': deps,
+        }
+    return features
+
+
+def resolve_feature_dependencies(enabled_features, feature_defs):
+    """Transitively resolve feature dependencies.
+
+    Returns the expanded set of enabled features.
+    """
+    resolved = set(enabled_features)
+    queue = list(enabled_features)
+    while queue:
+        feat = queue.pop()
+        defn = feature_defs.get(feat)
+        if defn is None:
+            continue
+        for dep in defn['dependencies']:
+            if dep not in resolved:
+                resolved.add(dep)
+                queue.append(dep)
+    return resolved
+
+
+def validate_enabled_features(enabled_features, feature_defs):
+    """Error if any enabled feature is not defined in a feature block."""
+    for feat in sorted(enabled_features):
+        if feat not in feature_defs:
+            available = sorted(feature_defs.keys())
+            die(f"unknown feature '{feat}'. Defined features: {available}")
+
+
+def list_features(feature_defs):
+    """Print defined features to stderr and exit."""
+    if not feature_defs:
+        print("no features defined", file=sys.stderr)
+        sys.exit(0)
+    for name in sorted(feature_defs):
+        desc = feature_defs[name]['description'] or '(no description)'
+        deps = feature_defs[name]['dependencies']
+        dep_str = f'  deps: {", ".join(sorted(deps))}' if deps else ''
+        print(f"  {name:30s} {desc}{dep_str}", file=sys.stderr)
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Dead sysmodule elimination
+# ---------------------------------------------------------------------------
+
+
+def _is_core_sysmodule(task_node):
+    """Check if a task node has priority (workgroup)"core-sysmodule"."""
+    prio = find_child(task_node, 'priority')
+    if prio is None or not prio.args:
+        return False
+    arg = prio.args[0]
+    return (hasattr(arg, 'tag') and arg.tag == 'workgroup'
+            and arg.value == 'core-sysmodule')
+
+
+def eliminate_dead_sysmodules(doc, sysmodule_names):
+    """Remove sysmodule tasks not reachable from any non-sysmodule task.
+
+    Core sysmodules (priority workgroup "core-sysmodule") are never pruned.
+
+    Walks uses-sysmodule, peer-sysmodule, and uses-partition (implicit
+    sysmodule_storage) edges transitively. Notifications are NOT followed.
+
+    Logs each eliminated sysmodule to stderr. Returns the set of eliminated
+    task names.
+    """
+    if not sysmodule_names:
+        return set()
+
+    # Build adjacency: task_name -> set of sysmodule task names it depends on
+    deps = {}
+    core = set()
+    for task_node in find_tasks(doc):
+        tname = task_name(task_node)
+        edges = set()
+
+        for c in find_children(task_node, 'uses-sysmodule'):
+            edges.add(f'sysmodule_{node_arg(c)}')
+
+        for c in find_children(task_node, 'peer-sysmodule'):
+            edges.add(f'sysmodule_{node_arg(c)}')
+
+        if any(True for _ in find_children(task_node, 'uses-partition')):
+            edges.add('sysmodule_storage')
+
+        deps[tname] = edges
+
+        if tname in sysmodule_names and _is_core_sysmodule(task_node):
+            core.add(tname)
+
+    # BFS from root set (non-sysmodule tasks + core sysmodules)
+    reachable = set(core)
+    queue = [name for name in deps if name not in sysmodule_names] + list(core)
+    while queue:
+        tname = queue.pop()
+        for dep in deps.get(tname, ()):
+            if dep in sysmodule_names and dep not in reachable:
+                reachable.add(dep)
+                queue.append(dep)
+
+    # Eliminate unreachable sysmodules
+    dead = sysmodule_names - reachable
+    if dead:
+        # Collect workspace-crate names before removing nodes
+        dead_crates = {}
+        for node in doc.nodes:
+            if node.name == 'task' and task_name(node) in dead:
+                tname = task_name(node)
+                crate_node = find_child(node, 'workspace-crate')
+                crate = node_name_arg(crate_node) if crate_node else tname
+                dead_crates[tname] = crate
+
+        for name in sorted(dead):
+            print(f"  sysmodule pruned: {name}", file=sys.stderr)
+        doc.nodes = [
+            n for n in doc.nodes
+            if n.name != 'task' or task_name(n) not in dead
+        ]
+
+    return dead_crates if dead else {}
 
 
 # ---------------------------------------------------------------------------
@@ -1238,14 +1445,115 @@ def parse_chip_memory_regions(chip_path):
     return regions
 
 
+def _parse_size_expr(s):
+    """Parse a size expression like '64k', '1M', '0x10000', or '1024'.
+
+    Returns an integer byte count, or None if the string is empty.
+    """
+    s = s.strip()
+    if not s:
+        return None
+    suffixes = {
+        'k': 1024, 'K': 1024, 'kib': 1024, 'KiB': 1024,
+        'm': 1024**2, 'M': 1024**2, 'mib': 1024**2, 'MiB': 1024**2,
+    }
+    for suffix, mult in sorted(suffixes.items(), key=lambda x: -len(x[0])):
+        if s.endswith(suffix):
+            return int(s[:-len(suffix)], 0) * mult
+    return int(s, 0)
+
+
+def resolve_target_spec(spec, flag_name, devices, memory_regions, chip_regions):
+    """Resolve a target spec to (base, size).
+
+    Accepted forms:
+    - "device:partition"        — partition on a block-device (mapping + offset)
+    - "region"                  — full board or chip memory region
+    - "region@[start..end]"     — slice of a region
+    - "region@[start..]"        — slice from start to end of region
+
+    Returns (base, size) or calls die() on failure.
+    """
+    # --- device:partition form (no slice) ---
+    # Distinguish from slice syntax: '@' is only in the slice form.
+    if ':' in spec and '@' not in spec:
+        dev_name, part_name = spec.split(':', 1)
+        dev = devices.get(dev_name)
+        if dev is None:
+            die(f"{flag_name}: unknown block-device '{dev_name}'")
+        if dev.get('mapping') is None:
+            die(
+                f"{flag_name}: block-device '{dev_name}' has no mapping "
+                f"address (required to compute link address)"
+            )
+        part = next(
+            (p for p in dev['partitions'] if p['name'] == part_name), None,
+        )
+        if part is None:
+            available = [p['name'] for p in dev['partitions']]
+            die(
+                f"{flag_name}: unknown partition '{part_name}' on "
+                f"device '{dev_name}'. Available: {available}"
+            )
+        base = dev['mapping'] + part['offset_bytes']
+        size = part['size_bytes']
+        return base, size
+
+    # --- region or region@[slice] form ---
+    region_name = spec
+    slice_start = 0
+    slice_end = None  # None means "to end of region"
+
+    if '@' in spec:
+        region_name, slice_part = spec.split('@', 1)
+        # Expect [start..end] or [start..]
+        slice_part = slice_part.strip()
+        if not (slice_part.startswith('[') and slice_part.endswith(']')):
+            die(f"{flag_name}: invalid slice syntax in '{spec}' — expected region@[start..end]")
+        inner = slice_part[1:-1]
+        if '..' not in inner:
+            die(f"{flag_name}: invalid slice syntax in '{spec}' — expected '..' range separator")
+        left, right = inner.split('..', 1)
+        slice_start = _parse_size_expr(left) or 0
+        slice_end = _parse_size_expr(right)  # None if empty (open-ended)
+
+    # Look up region — board memory first, then chip regions.
+    if region_name in memory_regions:
+        r = memory_regions[region_name]
+    elif region_name in chip_regions:
+        r = chip_regions[region_name]
+    else:
+        all_names = sorted(set(list(memory_regions.keys()) + list(chip_regions.keys())))
+        die(
+            f"{flag_name}: unknown region '{region_name}'. "
+            f"Available: {all_names}"
+        )
+
+    region_base = r['base']
+    region_size = r['size']
+
+    if slice_end is None:
+        slice_end = region_size
+
+    if slice_start >= slice_end:
+        die(f"{flag_name}: empty slice [{slice_start}..{slice_end}) in '{spec}'")
+    if slice_end > region_size:
+        die(
+            f"{flag_name}: slice end ({slice_end}) exceeds region "
+            f"'{region_name}' size ({region_size})"
+        )
+
+    return region_base + slice_start, slice_end - slice_start
+
+
 def write_modified_chip(chip_path, resolved_allocations, output_path,
-                        ftab_info=None):
+                        code_target=None, ram_target=None):
     """Read the chip KDL, apply modifications, write modified copy.
 
     Modifications:
     - Add allocation peripherals (if resolved_allocations is non-empty).
-    - Rewrite vectors/flash memory regions to match ftab boot_target
-      (if ftab_info is provided).
+    - Rewrite vectors/flash memory regions from code_target (base, size).
+    - Rewrite ram memory region from ram_target (base, size).
 
     Returns the path to the modified chip file.
     """
@@ -1270,41 +1578,46 @@ def write_modified_chip(chip_path, resolved_allocations, output_path,
         )
         chip_doc.nodes.append(periph_node)
 
-    # Rewrite vectors/flash regions to match ftab boot_target
-    if ftab_info is not None:
-        boot_addr = ftab_info['boot_target_addr']
-        boot_size = ftab_info['boot_target_size']
+    for mem_node in find_children(chip_doc, 'memory'):
+        for region_node in find_children(mem_node, 'region'):
+            rname = node_name_arg(region_node)
 
-        for mem_node in find_children(chip_doc, 'memory'):
-            for region_node in find_children(mem_node, 'region'):
-                rname = node_name_arg(region_node)
-                if rname == 'vectors':
-                    vec_size_node = find_child(region_node, 'size')
-                    vec_size = int(float(node_arg(vec_size_node)))
-                    base_node = find_child(region_node, 'base')
-                    base_node.args = [
-                        kdl.Decimal(mantissa=boot_addr, exponent=0, tag=None),
-                    ]
-                elif rname == 'flash':
-                    # vectors region must be parsed first — it precedes flash
-                    # in both chip KDL files.
-                    vec_size_node = 0
-                    for r in find_children(mem_node, 'region'):
-                        if node_name_arg(r) == 'vectors':
-                            vec_size_node = find_child(r, 'size')
-                            break
-                    vec_size = int(float(node_arg(vec_size_node)))
-                    flash_base = boot_addr + vec_size
-                    flash_size = boot_size - vec_size
+            if rname == 'vectors' and code_target is not None:
+                code_base, _ = code_target
+                base_node = find_child(region_node, 'base')
+                base_node.args = [
+                    kdl.Decimal(mantissa=code_base, exponent=0, tag=None),
+                ]
 
-                    base_node = find_child(region_node, 'base')
-                    base_node.args = [
-                        kdl.Decimal(mantissa=flash_base, exponent=0, tag=None),
-                    ]
-                    size_node = find_child(region_node, 'size')
-                    size_node.args = [
-                        kdl.Decimal(mantissa=flash_size, exponent=0, tag=None),
-                    ]
+            elif rname == 'flash' and code_target is not None:
+                code_base, code_size = code_target
+                # Read the vectors region size (always 0x400)
+                for r in find_children(mem_node, 'region'):
+                    if node_name_arg(r) == 'vectors':
+                        vec_size = int(float(node_arg(find_child(r, 'size'))))
+                        break
+                flash_base = code_base + vec_size
+                flash_size = code_size - vec_size
+
+                base_node = find_child(region_node, 'base')
+                base_node.args = [
+                    kdl.Decimal(mantissa=flash_base, exponent=0, tag=None),
+                ]
+                size_node = find_child(region_node, 'size')
+                size_node.args = [
+                    kdl.Decimal(mantissa=flash_size, exponent=0, tag=None),
+                ]
+
+            elif rname == 'ram' and ram_target is not None:
+                ram_base, ram_size = ram_target
+                base_node = find_child(region_node, 'base')
+                base_node.args = [
+                    kdl.Decimal(mantissa=ram_base, exponent=0, tag=None),
+                ]
+                size_node = find_child(region_node, 'size')
+                size_node.args = [
+                    kdl.Decimal(mantissa=ram_size, exponent=0, tag=None),
+                ]
 
     # Write modified chip alongside the output
     content = chip_doc.print(PRINT_CONFIG)
@@ -1580,7 +1893,7 @@ def ensure_supervisor_first(doc):
 
 def build_hubake_doc(doc, strip_board_children=frozenset()):
     """Build a new document with only hubake-relevant nodes."""
-    strip_top_level = {'define', 'block-device', 'filesystem', 'notifications', 'allocation'}
+    strip_top_level = {'define', 'block-device', 'filesystem', 'notifications', 'allocation', 'feature'}
     strip_task_children = {'uses-partition', 'uses-notification', 'pushes-notification', 'uses-allocation'}
     strip_board = {'memory', 'block-device'} | set(strip_board_children)
 
@@ -1608,19 +1921,26 @@ def build_hubake_doc(doc, strip_board_children=frozenset()):
 
 
 def main():
-    if len(sys.argv) < 3:
-        print(f"usage: {sys.argv[0]} <input.kdl> <output.kdl> [--features A,B,C] [--board NAME]", file=sys.stderr)
+    if len(sys.argv) < 2:
+        print(f"usage: {sys.argv[0]} <input.kdl> <output.kdl> --code-target TARGET --ram-target TARGET [--features A,B,C] [--board NAME] [--list-features]", file=sys.stderr)
         sys.exit(1)
 
     input_path = sys.argv[1]
-    output_path = sys.argv[2]
+    if len(sys.argv) >= 3 and not sys.argv[2].startswith('--'):
+        output_path = sys.argv[2]
+        rest = sys.argv[3:]
+    else:
+        output_path = None
+        rest = sys.argv[2:]
 
     # Parse flags
     enabled_features = set()
     scoped_features = {}   # task_name -> set of features
     broadcast_features = set()
     selected_board = None
-    rest = sys.argv[3:]
+    code_target_arg = None
+    ram_target_arg = None
+    do_list_features = False
     i = 0
     while i < len(rest):
         if rest[i] == '--features' and i + 1 < len(rest):
@@ -1638,13 +1958,33 @@ def main():
         elif rest[i] == '--board' and i + 1 < len(rest):
             selected_board = rest[i + 1]
             i += 2
+        elif rest[i] == '--code-target' and i + 1 < len(rest):
+            code_target_arg = rest[i + 1]
+            i += 2
+        elif rest[i] == '--ram-target' and i + 1 < len(rest):
+            ram_target_arg = rest[i + 1]
+            i += 2
+        elif rest[i] == '--list-features':
+            do_list_features = True
+            i += 1
         else:
             die(f"unexpected argument: {rest[i]}")
+
+    if not do_list_features:
+        if code_target_arg is None:
+            die("--code-target is required (e.g. --code-target ext_flash:firmware or --code-target ram@[0..64k])")
+        if ram_target_arg is None:
+            ram_target_arg = 'ram'
 
     with open(input_path) as f:
         text = f.read()
 
     doc = kdl.parse(text, PARSE_CONFIG)
+
+    # Parse feature definitions and handle --list-features (before board selection)
+    feature_defs = parse_feature_definitions(doc)
+    if do_list_features:
+        list_features(feature_defs)
 
     # Select board (strip non-matching board blocks)
     board_nodes = list(find_children(doc, 'board'))
@@ -1659,8 +1999,23 @@ def main():
         available = [node_name_arg(b) for b in board_nodes]
         die(f"multiple boards defined, use --board to select one: {available}")
 
-    # Apply feature gates (must be first — strips nodes before validation)
+    if output_path is None:
+        die("output path required (unless using --list-features)")
+
+    # Validate and resolve feature dependencies
+    validate_enabled_features(enabled_features, feature_defs)
+    enabled_features = resolve_feature_dependencies(
+        enabled_features, feature_defs,
+    )
+
+    # Transform sysmodule blocks into task blocks
+    sysmodule_names = transform_sysmodules(doc)
+
+    # Apply feature gates (strips nodes before validation)
     apply_feature_gates(doc, enabled_features)
+
+    # Eliminate dead sysmodules (unreachable from non-sysmodule tasks)
+    pruned = eliminate_dead_sysmodules(doc, sysmodule_names)
 
     # Inject cargo features into tasks based on Cargo.toml definitions
     project_dir = Path(input_path).resolve().parent
@@ -1738,14 +2093,23 @@ def main():
             known_pin_peripherals = _build_known_peripherals(chip_capabilities)
             pin_assignments = parse_pin_config(doc, chip_capabilities)
 
-        if resolved_allocations or ftab_info:
-            mod_chip_path = write_modified_chip(
-                chip_path, resolved_allocations, output_path,
-                ftab_info=ftab_info,
-            )
-            update_board_chip_ref(doc, mod_chip_path, input_path)
-            # Re-parse so chip-regions.json reflects the modified layout
-            chip_regions = parse_chip_memory_regions(mod_chip_path)
+        # Resolve --code-target and --ram-target to (base, size)
+        code_target = resolve_target_spec(
+            code_target_arg, '--code-target',
+            devices, memory_regions, chip_regions,
+        )
+        ram_target = resolve_target_spec(
+            ram_target_arg, '--ram-target',
+            devices, memory_regions, chip_regions,
+        )
+
+        mod_chip_path = write_modified_chip(
+            chip_path, resolved_allocations, output_path,
+            code_target=code_target, ram_target=ram_target,
+        )
+        update_board_chip_ref(doc, mod_chip_path, input_path)
+        # Re-parse so chip-regions.json reflects the modified layout
+        chip_regions = parse_chip_memory_regions(mod_chip_path)
 
     # Generate ftab binary if an ftab partition was declared
     if ftab_info is not None:
@@ -1867,6 +2231,11 @@ def main():
         }
         with open(json_path, 'w') as f:
             json.dump(notif_data, f, indent=2)
+
+    # Write pruned sysmodules JSON (always, so clippy can read it)
+    pruned_path = output_path.rsplit('.', 1)[0] + '.pruned.json'
+    with open(pruned_path, 'w') as f:
+        json.dump(pruned, f, indent=2)
 
 
 if __name__ == '__main__':

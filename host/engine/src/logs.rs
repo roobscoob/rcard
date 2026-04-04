@@ -18,7 +18,7 @@ pub struct LogEntry {
 
 /// A line from the hypervisor stream (USART1). Plain UTF-8 text.
 #[derive(Clone, Debug)]
-pub struct HypervisorLine {
+pub struct Usart1Line {
     pub text: String,
 }
 
@@ -28,7 +28,7 @@ pub trait Logs: Send + Sync {
     fn subscribe_structured(&self) -> broadcast::Receiver<LogEntry>;
 
     /// Subscribe to hypervisor (plain text) lines.
-    fn subscribe_hypervisor(&self) -> broadcast::Receiver<HypervisorLine>;
+    fn subscribe_usart1(&self) -> broadcast::Receiver<Usart1Line>;
 
     /// Backend-specific named text streams (e.g. "renode" for emulator output).
     /// Returns the names of available auxiliary streams.

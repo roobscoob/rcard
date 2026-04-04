@@ -1,10 +1,13 @@
-use std::collections::HashMap;
-use std::io::Read as _;
+pub mod sifli_debug;
 
-use engine::logs::{HypervisorLine, LogEntry, Logs};
+use std::collections::HashMap;
+
 use engine::Backend;
-use rcard_log::decoder::{Decoder, FeedResult};
+use engine::logs::{LogEntry, Logs, Usart1Line};
 use rcard_log::LogMetadata;
+use rcard_log::decoder::{Decoder, FeedResult};
+use sifli_debug::{DebugHandle, TapReader};
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 use zerocopy::TryFromBytes;
 
@@ -17,7 +20,8 @@ pub struct Serial {
 
 struct SerialLogs {
     structured_tx: broadcast::Sender<LogEntry>,
-    hypervisor_tx: broadcast::Sender<HypervisorLine>,
+    hypervisor_tx: broadcast::Sender<Usart1Line>,
+    debug_handle: Option<DebugHandle>,
 }
 
 impl Serial {
@@ -27,54 +31,58 @@ impl Serial {
     /// - `usart2`: structured binary log stream (115200 baud)
     ///
     /// Either or both may be `None` to skip that stream.
-    pub fn connect(
-        usart1: Option<&str>,
-        usart2: Option<&str>,
-    ) -> Result<Self, serialport::Error> {
+    pub fn connect(usart1: Option<&str>, usart2: Option<&str>) -> Result<Self, serialport::Error> {
         let (structured_tx, _) = broadcast::channel(256);
         let (hypervisor_tx, _) = broadcast::channel(256);
 
-        if let Some(port) = usart1 {
-            let port = serialport::new(port, 1_000_000).open()?;
+        let debug_handle = if let Some(port) = usart1 {
+            let stream = tokio_serial::SerialStream::open(&tokio_serial::new(port, 1_000_000))?;
+            let (reader, writer) = tokio::io::split(stream);
+            let (handle, tap_reader, _tap_writer) = sifli_debug::tap(reader, writer);
             let tx = hypervisor_tx.clone();
-            std::thread::spawn(move || read_hypervisor(port, tx));
-        }
+            tokio::spawn(read_hypervisor(tap_reader, tx));
+            Some(handle)
+        } else {
+            None
+        };
 
         if let Some(port) = usart2 {
-            let port = serialport::new(port, 115_200).open()?;
+            let stream = tokio_serial::SerialStream::open(&tokio_serial::new(port, 115_200))?;
             let tx = structured_tx.clone();
-            std::thread::spawn(move || read_structured(port, tx));
+            tokio::spawn(read_structured(stream, tx));
         }
 
-        Ok(Serial {
+        Ok(Self {
             logs: SerialLogs {
                 structured_tx,
                 hypervisor_tx,
+                debug_handle,
             },
         })
+    }
+
+    /// Returns the SifliDebug handle, if USART1 is connected.
+    pub fn debug_handle(&self) -> Option<&DebugHandle> {
+        self.logs.debug_handle.as_ref()
     }
 }
 
 /// Read UTF-8 lines from USART1 and broadcast them as hypervisor lines.
-fn read_hypervisor(
-    mut port: Box<dyn serialport::SerialPort>,
-    tx: broadcast::Sender<HypervisorLine>,
-) {
+async fn read_hypervisor(mut reader: TapReader, tx: broadcast::Sender<Usart1Line>) {
     let mut buf = [0u8; 1024];
     let mut line = String::new();
 
     loop {
-        let n = match port.read(&mut buf) {
+        let n = match reader.read(&mut buf).await {
             Ok(0) => return,
             Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
             Err(_) => return,
         };
 
         for &byte in &buf[..n] {
             if byte == b'\n' {
                 let text = std::mem::take(&mut line);
-                let _ = tx.send(HypervisorLine { text });
+                let _ = tx.send(Usart1Line { text });
             } else {
                 line.push(byte as char);
             }
@@ -83,10 +91,7 @@ fn read_hypervisor(
 }
 
 /// Read framed binary data from USART2 and broadcast decoded log entries.
-fn read_structured(
-    mut port: Box<dyn serialport::SerialPort>,
-    tx: broadcast::Sender<LogEntry>,
-) {
+async fn read_structured(mut port: tokio_serial::SerialStream, tx: broadcast::Sender<LogEntry>) {
     let mut buf = [0u8; 1024];
     let mut frame = FrameState::ReadingId {
         buf: [0; 8],
@@ -95,7 +100,7 @@ fn read_structured(
     let mut streams: HashMap<u64, StreamState> = HashMap::new();
 
     loop {
-        let n = match port.read(&mut buf) {
+        let n = match port.read(&mut buf).await {
             Ok(0) => return,
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
@@ -241,7 +246,7 @@ impl Logs for SerialLogs {
         self.structured_tx.subscribe()
     }
 
-    fn subscribe_hypervisor(&self) -> broadcast::Receiver<HypervisorLine> {
+    fn subscribe_usart1(&self) -> broadcast::Receiver<Usart1Line> {
         self.hypervisor_tx.subscribe()
     }
 }

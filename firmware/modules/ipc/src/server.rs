@@ -17,7 +17,7 @@ pub mod debug_uart {
     impl Uart3 {
         pub fn init() {
             unsafe {
-                core::ptr::write_volatile(BRR as *mut u32, 0x1A1); // 48MHz / 115200
+                core::ptr::write_volatile(BRR as *mut u32, 0x823); // 240MHz / 115200
                 core::ptr::write_volatile(CR1 as *mut u32, (1 << 0) | (1 << 3)); // UE | TE
             }
         }

@@ -105,17 +105,19 @@ fn derive_struct(
             field_json,
         );
 
-        let field_access = if is_named {
+        let tmp = format_ident!("__field{}", i);
+        let field_copy = if is_named {
             let ident = field.ident.as_ref().unwrap();
-            quote! { &self.#ident }
+            quote! { let #tmp = self.#ident; }
         } else {
             let index = syn::Index::from(i);
-            quote! { &self.#index }
+            quote! { let #tmp = self.#index; }
         };
 
         format_body.push(quote! {
+            #field_copy
             __f.write_field_id(#field_hash);
-            rcard_log::formatter::Format::format(#field_access, __f);
+            rcard_log::formatter::Format::format(&#tmp, __f);
         });
     }
 
@@ -139,8 +141,10 @@ fn derive_struct(
             .enumerate()
             .map(|(i, _)| {
                 let index = syn::Index::from(i);
+                let tmp = format_ident!("__field{}", i);
                 quote! {
-                    rcard_log::formatter::Format::format(&self.#index, __f);
+                    let #tmp = self.#index;
+                    rcard_log::formatter::Format::format(&#tmp, __f);
                 }
             })
             .collect();

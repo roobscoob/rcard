@@ -1,3 +1,6 @@
+# /// script
+# dependencies = ["littlefs-python"]
+# ///
 """
 LittleFS helper for sdmmc.nu.
 

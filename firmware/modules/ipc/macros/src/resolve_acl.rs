@@ -20,8 +20,7 @@ pub fn resolve() -> Result<Vec<u16>, String> {
         .map_err(|_| format!("cannot read {}", uses_path.display()))?;
 
     let peers_path = work_dir.join("app.peers.json");
-    let peers_content = std::fs::read_to_string(&peers_path)
-        .map_err(|_| format!("cannot read {}", peers_path.display()))?;
+    let peers_content = std::fs::read_to_string(&peers_path).unwrap_or_else(|_| "{}".to_string());
 
     let server_name = std::env::var("CARGO_PKG_NAME").map_err(|_| "CARGO_PKG_NAME not set")?;
 

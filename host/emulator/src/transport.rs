@@ -2,8 +2,8 @@ use std::io::{Cursor, Read as _};
 use std::path::Path;
 use std::sync::mpsc;
 
-use engine::logs::{HypervisorLine, LogEntry, Logs};
 use engine::Backend;
+use engine::logs::{LogEntry, Logs, Usart1Line};
 use tokio::sync::broadcast;
 use zip::ZipArchive;
 
@@ -21,7 +21,7 @@ pub struct Emulator {
 
 struct EmulatorLogs {
     structured_tx: broadcast::Sender<LogEntry>,
-    hypervisor_tx: broadcast::Sender<HypervisorLine>,
+    usart1_tx: broadcast::Sender<Usart1Line>,
     renode_tx: broadcast::Sender<String>,
 }
 
@@ -42,11 +42,11 @@ impl Emulator {
             })?;
 
         let (structured_tx, _) = broadcast::channel(256);
-        let (hypervisor_tx, _) = broadcast::channel(256);
+        let (usart1_tx, _) = broadcast::channel(256);
         let (renode_tx, _) = broadcast::channel(256);
 
         let s_tx = structured_tx.clone();
-        let h_tx = hypervisor_tx.clone();
+        let h_tx = usart1_tx.clone();
         let r_tx = renode_tx.clone();
 
         // Everything — Renode spawn, monitor connect, load, run — happens in the background.
@@ -80,7 +80,7 @@ impl Emulator {
             _run_thread: run_thread,
             logs: EmulatorLogs {
                 structured_tx,
-                hypervisor_tx,
+                usart1_tx,
                 renode_tx,
             },
         })
@@ -114,8 +114,8 @@ impl Logs for EmulatorLogs {
         self.structured_tx.subscribe()
     }
 
-    fn subscribe_hypervisor(&self) -> broadcast::Receiver<HypervisorLine> {
-        self.hypervisor_tx.subscribe()
+    fn subscribe_usart1(&self) -> broadcast::Receiver<Usart1Line> {
+        self.usart1_tx.subscribe()
     }
 
     fn auxiliary_streams(&self) -> &[&str] {
@@ -134,13 +134,13 @@ impl Logs for EmulatorLogs {
 fn bridge_logs(
     rx: mpsc::Receiver<UsartLog>,
     structured_tx: broadcast::Sender<LogEntry>,
-    hypervisor_tx: broadcast::Sender<HypervisorLine>,
+    usart1_tx: broadcast::Sender<Usart1Line>,
     renode_tx: broadcast::Sender<String>,
 ) {
     while let Ok(log) = rx.recv() {
         match log.kind {
             UsartLogKind::Line(text) => {
-                let _ = hypervisor_tx.send(HypervisorLine { text });
+                let _ = usart1_tx.send(Usart1Line { text });
             }
             UsartLogKind::Renode(text) => {
                 if renode_tx.send(text.clone()).is_err() {

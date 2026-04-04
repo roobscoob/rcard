@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# /// script
+# dependencies = ["kdl-py"]
+# ///
 """
 Generate a Renode .repl platform description from app and chip KDL files.
 

@@ -20,6 +20,8 @@ fn usart() -> sifli_pac::usart::Usart {
 fn usart_init() {
     let u = usart();
     // TODO: fixme (corrupted output?)
+    // BRR = 240MHz / 1000000 = 240 (0xF0)
+    // u.brr().write(|w| w.0 = 0xF0);
     // BRR = 48MHz / 1000000 = 48 (0x30)
     u.brr().write(|w| w.0 = 0x30);
     // CR1: UE | TE
@@ -32,10 +34,16 @@ fn usart_init() {
 
 fn usart_write_bytes(msg: &[u8]) {
     let u = usart();
+    // Acquire EXR lock: reading busy==0 atomically sets it to 1.
+    while u.exr().read().busy() {}
     for &b in msg {
         while !u.isr().read().txe() {}
         u.tdr().write(|w| w.0 = b as u32);
     }
+    // Wait for transmission to fully complete before releasing.
+    while !u.isr().read().tc() {}
+    // Release EXR lock: write 1 to busy to unlock.
+    u.exr().write(|w| w.set_busy(true));
 }
 
 fn usart_write_u32(mut val: u32) {

@@ -35,7 +35,7 @@ peripheral "usart1" {
 
     renode {
         model "UART.STM32F7_USART" {
-            frequency 48000000
+            frequency 240000000
         }
     }
 }
@@ -47,7 +47,7 @@ peripheral "usart2" {
 
     renode {
         model "UART.STM32F7_USART" {
-            frequency 48000000
+            frequency 240000000
         }
     }
 }
@@ -59,7 +59,7 @@ peripheral "usart3" {
 
     renode {
         model "UART.STM32F7_USART" {
-            frequency 48000000
+            frequency 240000000
         }
     }
 }

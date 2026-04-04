@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# /// script
+# dependencies = ["pywinpty; sys_platform == 'win32'"]
+# ///
 """
 run-clippy.py <cargo_args>...
 
