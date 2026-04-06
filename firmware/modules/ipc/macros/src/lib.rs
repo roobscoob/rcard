@@ -6,21 +6,27 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse_macro_input;
 
-mod codegen_client;
-mod codegen_server;
+mod client;
 mod emit_meta;
+mod lease;
 mod parse;
 mod resolve_acl;
 mod resolve_alloc;
 mod resolve_priority;
+mod server;
+mod server_macro;
+mod transfer;
 mod util;
+mod wire_format;
 
-use codegen_client::{gen_client, gen_dyn_client};
-use codegen_server::{
-    gen_constants, gen_dispatcher, gen_operation_enum, gen_server_trait, gen_wiring_macro,
-};
+use client::{gen_client, gen_dyn_client};
 use parse::{InterfaceAttr, MethodKind, ResourceAttr, parse_methods};
+use server::{gen_constants, gen_dispatcher, gen_operation_enum, gen_server_trait, gen_wiring_macro};
 use util::to_screaming_snake_case;
+
+// ===========================================================================
+// #[ipc::resource(...)]
+// ===========================================================================
 
 #[proc_macro_attribute]
 pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -114,6 +120,10 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     output.into()
 }
 
+// ===========================================================================
+// #[ipc::interface(...)]
+// ===========================================================================
+
 #[proc_macro_attribute]
 pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
     let iface_attrs = parse_macro_input!(attr as InterfaceAttr);
@@ -131,7 +141,6 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         emit_meta::emit_interface(&crate_name, &trait_name.to_string(), iface_attrs.kind);
     }
 
-    // Build a ResourceAttr for codegen compatibility (no arena, no dispatcher).
     let attrs = ResourceAttr {
         arena_size: None,
         kind: iface_attrs.kind,
@@ -152,87 +161,9 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
     output.into()
 }
 
-// ---------------------------------------------------------------------------
-// server! proc macro
-// ---------------------------------------------------------------------------
-
-struct ServerEntry {
-    trait_name: syn::Ident,
-    concrete_type: syn::Path,
-}
-
-struct NotificationConfig {
-    /// The reactor client type (e.g., `Reactor` from `bind_reactor!`).
-    reactor_client: syn::Path,
-    /// Handler functions to call for each pulled notification.
-    handlers: Vec<syn::Path>,
-}
-
-struct ServerInput {
-    entries: Vec<ServerEntry>,
-    notifications: Option<NotificationConfig>,
-}
-
-impl syn::parse::Parse for ServerInput {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut entries = Vec::new();
-        let mut notifications = None;
-
-        while !input.is_empty() {
-            // Check for @notifications
-            if input.peek(syn::Token![@]) {
-                input.parse::<syn::Token![@]>()?;
-                let kw: syn::Ident = input.parse()?;
-                if kw != "notifications" {
-                    return Err(syn::Error::new(kw.span(), "expected `notifications`"));
-                }
-
-                // Parse (ReactorClient)
-                let content;
-                syn::parenthesized!(content in input);
-                let reactor_client: syn::Path = content.parse()?;
-
-                input.parse::<syn::Token![=>]>()?;
-
-                // Parse handler1, handler2, ...
-                let mut handlers = Vec::new();
-                handlers.push(input.parse::<syn::Path>()?);
-                while input.peek(syn::Token![,]) && !input.is_empty() {
-                    input.parse::<syn::Token![,]>()?;
-                    if input.is_empty() || input.peek(syn::Token![@]) {
-                        break;
-                    }
-                    // Check if next token is an ident followed by `:` (a ServerEntry)
-                    // If so, break out — this comma was the trailing comma before the next entry
-                    if input.peek(syn::Ident) && input.peek2(syn::Token![:]) {
-                        break;
-                    }
-                    handlers.push(input.parse::<syn::Path>()?);
-                }
-
-                notifications = Some(NotificationConfig {
-                    reactor_client,
-                    handlers,
-                });
-            } else {
-                let trait_name: syn::Ident = input.parse()?;
-                input.parse::<syn::Token![:]>()?;
-                let concrete_type: syn::Path = input.parse()?;
-                entries.push(ServerEntry {
-                    trait_name,
-                    concrete_type,
-                });
-                if !input.is_empty() {
-                    input.parse::<syn::Token![,]>()?;
-                }
-            }
-        }
-        Ok(ServerInput {
-            entries,
-            notifications,
-        })
-    }
-}
+// ===========================================================================
+// ipc::server!(...)
+// ===========================================================================
 
 /// Construct and run an IPC server from a list of `TraitName: ConcreteType` pairs.
 ///
@@ -251,7 +182,7 @@ impl syn::parse::Parse for ServerInput {
 /// ```
 #[proc_macro]
 pub fn server(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as ServerInput);
+    let input = parse_macro_input!(input as server_macro::ServerInput);
 
     // Emit metadata for post-build handle ACL verification.
     {
@@ -264,216 +195,12 @@ pub fn server(input: TokenStream) -> TokenStream {
         emit_meta::emit_server(&task_name, &serves);
     }
 
-    let count = input.entries.len();
-
-    let mut arena_decls = Vec::new();
-    let mut dispatcher_decls = Vec::new();
-    let mut register_calls = Vec::new();
-
-    // Collect all trait names for the wiring macro calls
-    let all_trait_names: Vec<&syn::Ident> = input.entries.iter().map(|e| &e.trait_name).collect();
-
-    for entry in &input.entries {
-        let trait_name = &entry.trait_name;
-        let concrete_type = &entry.concrete_type;
-
-        let snake = util::to_snake_case(&trait_name.to_string());
-        let screaming = util::to_screaming_snake_case(&trait_name.to_string());
-
-        let arena_var = format_ident!("__arena_{}", snake);
-        let disp_var = format_ident!("__disp_{}", snake);
-        let kind_const = format_ident!("{}_KIND", screaming);
-        let arena_size_const = format_ident!("{}_ARENA_SIZE", screaming);
-        let wiring_macro = format_ident!("__new_{}Dispatcher", trait_name);
-
-        arena_decls.push(quote! {
-            let #arena_var = ipc::SharedArena::<
-                #concrete_type, { #arena_size_const }
-            >::new(#kind_const);
-        });
-
-        // Build all-arenas key-value list for the wiring macro
-        let arena_kvs: Vec<proc_macro2::TokenStream> = all_trait_names
-            .iter()
-            .map(|tn| {
-                let tn_snake = util::to_snake_case(&tn.to_string());
-                let tn_arena = format_ident!("__arena_{}", tn_snake);
-                quote! { #tn => &#tn_arena }
-            })
-            .collect();
-
-        dispatcher_decls.push(quote! {
-            let mut #disp_var = #wiring_macro!(
-                &#arena_var, __ipc_priority_for, __ipc_self_task_index;
-                #(#arena_kvs),*
-            );
-        });
-
-        register_calls.push(quote! {
-            __server.register(#kind_const, &mut #disp_var);
-        });
-    }
-
-    let run_call = if let Some(notif_cfg) = &input.notifications {
-        let reactor = &notif_cfg.reactor_client;
-        let handlers = &notif_cfg.handlers;
-        quote! {
-            __server.run_with_notifications(
-                &mut __buf,
-                sysmodule_reactor_api::NOTIFICATION_BIT,
-                |_bits| {
-                    loop {
-                        match #reactor::pull() {
-                            Ok(Some(notif)) => {
-                                #( #handlers(&notif); )*
-                            }
-                            _ => break,
-                        }
-                    }
-                },
-            )
-        }
-    } else {
-        quote! { __server.run(&mut __buf) }
-    };
-
-    // Generate __ipc_priority_for function from app.priorities.json
-    let priority_fn = gen_priority_fn();
-    // Generate __ipc_acl_check function from app.uses.json + app.peers.json
-    let acl_fn = gen_acl_fn();
-    // Generate __ipc_self_task_index constant from HUBRIS_TASKS + CARGO_PKG_NAME
-    let self_task_index_const = gen_self_task_index();
-
-    let output = quote! {
-        {
-            #priority_fn
-            #acl_fn
-            #self_task_index_const
-
-            #(#arena_decls)*
-            #(#dispatcher_decls)*
-
-            let mut __buf = [core::mem::MaybeUninit::uninit(); 256];
-            let mut __server = ipc::Server::<#count>::new(__ipc_acl_check);
-            #(#register_calls)*
-            #run_call
-        }
-    };
-
-    output.into()
+    server_macro::gen_server(&input).into()
 }
 
-/// Generate a `__ipc_priority_for(sender_index: u16) -> i8` function
-/// by reading `.work/app.priorities.json` and `HUBRIS_TASKS` at compile time.
-fn gen_priority_fn() -> proc_macro2::TokenStream {
-    match resolve_priority::resolve() {
-        Ok(entries) if !entries.is_empty() => {
-            let arms: Vec<proc_macro2::TokenStream> = entries
-                .iter()
-                .map(|e| {
-                    let idx = e.task_index as u16;
-                    let prio = e.priority as i8;
-                    quote! { #idx => #prio }
-                })
-                .collect();
-            quote! {
-                fn __ipc_priority_for(sender_index: u16) -> i8 {
-                    match sender_index {
-                        #(#arms,)*
-                        _ => 0,
-                    }
-                }
-            }
-        }
-        Ok(_) => {
-            // No entries — default everything to 0
-            quote! {
-                fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
-            }
-        }
-        Err(msg) => {
-            // File missing (IDE cargo check, no prior build) → silently skip.
-            // Malformed JSON → compile error so it doesn't go unnoticed.
-            if msg.contains("cannot read") {
-                quote! {
-                    fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
-                }
-            } else {
-                let err = format!("ipc: failed to resolve priorities: {}", msg);
-                quote! { compile_error!(#err); }
-            }
-        }
-    }
-}
-
-/// Generate a `__ipc_acl_check(sender_index: u16) -> bool` function
-/// by reading `.work/app.uses.json`, `.work/app.peers.json`, and `HUBRIS_TASKS`
-/// at compile time.
-fn gen_acl_fn() -> proc_macro2::TokenStream {
-    match resolve_acl::resolve() {
-        Ok(allowed) if !allowed.is_empty() => {
-            let arms: Vec<proc_macro2::TokenStream> = allowed
-                .iter()
-                .map(|&idx| {
-                    quote! { #idx => true }
-                })
-                .collect();
-            quote! {
-                fn __ipc_acl_check(sender_index: u16) -> bool {
-                    match sender_index {
-                        #(#arms,)*
-                        _ => false,
-                    }
-                }
-            }
-        }
-        Ok(_) => {
-            // No entries — no clients declared. Deny all by default.
-            quote! {
-                fn __ipc_acl_check(_sender_index: u16) -> bool { false }
-            }
-        }
-        Err(msg) => {
-            // File missing (IDE cargo check, no prior build) → silently skip.
-            // Malformed JSON → compile error so it doesn't go unnoticed.
-            if msg.contains("cannot read") {
-                quote! {
-                    fn __ipc_acl_check(_sender_index: u16) -> bool { false }
-                }
-            } else {
-                let err = format!("ipc: failed to resolve ACL: {}", msg);
-                quote! { compile_error!(#err); }
-            }
-        }
-    }
-}
-
-/// Generate a `__ipc_self_task_index: u16` constant by looking up
-/// `CARGO_PKG_NAME` in the `HUBRIS_TASKS` environment variable.
-fn gen_self_task_index() -> proc_macro2::TokenStream {
-    let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-    let task_names: Vec<String> = std::env::var("HUBRIS_TASKS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.to_string())
-        .collect();
-
-    if let Some(idx) = task_names.iter().position(|t| t == &pkg) {
-        let idx = idx as u16;
-        quote! {
-            let __ipc_self_task_index: u16 = #idx;
-        }
-    } else {
-        // Fallback: task not found (IDE cargo check, no HUBRIS_TASKS) → use 0
-        quote! {
-            let __ipc_self_task_index: u16 = 0;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// #[notification_handler(group_name)] proc macro attribute
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// #[ipc::notification_handler(group_name)]
+// ===========================================================================
 
 /// Transforms a notification handler function.
 ///
@@ -485,17 +212,6 @@ fn gen_self_task_index() -> proc_macro2::TokenStream {
 /// The attribute transforms it into a function that takes `&Notification`
 /// and only executes the body when `notif.group_id` matches the specified
 /// group. The group ID is resolved from `generated::GROUP_ID_<SCREAMING_NAME>`.
-///
-/// Example:
-/// ```ignore
-/// #[notification_handler(logs)]
-/// fn handle_log(sender: u16, code: u32) {
-///     // only called for the "logs" notification group
-/// }
-/// ```
-///
-/// Convention: the subscriber task must have a `generated` module
-/// (from build.rs) containing `GROUP_ID_LOGS: u16` constants.
 #[proc_macro_attribute]
 pub fn notification_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let group_name = parse_macro_input!(attr as syn::Ident);
@@ -505,7 +221,6 @@ pub fn notification_handler(attr: TokenStream, item: TokenStream) -> TokenStream
     let fn_vis = &func.vis;
     let fn_body = &func.block;
 
-    // Convert group name to SCREAMING_SNAKE for the generated constant
     let screaming = to_screaming_snake_case(&group_name.to_string());
     let group_id_const = format_ident!("GROUP_ID_{}", screaming);
 
@@ -523,9 +238,9 @@ pub fn notification_handler(attr: TokenStream, item: TokenStream) -> TokenStream
     output.into()
 }
 
-// ---------------------------------------------------------------------------
-// __check_uses! – dependency enforcement at consumer compile time
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// ipc::__check_uses!(...)
+// ===========================================================================
 
 /// Internal proc macro invoked by generated `bind_X!` macros.
 ///
@@ -533,18 +248,11 @@ pub fn notification_handler(attr: TokenStream, item: TokenStream) -> TokenStream
 /// task via `uses-sysmodule` in `app.kdl`. Reads `.work/app.uses.json`
 /// at compile time. If the file doesn't exist (e.g. during IDE cargo check),
 /// enforcement is silently skipped.
-///
-/// Usage (generated, not user-facing):
-/// ```ignore
-/// ipc_macros::__check_uses!("sysmodule_fs");
-/// ```
 #[proc_macro]
 pub fn __check_uses(input: TokenStream) -> TokenStream {
     let lit = parse_macro_input!(input as syn::LitStr);
     let dep_task = lit.value();
 
-    // Inline the check logic so we can distinguish file-not-found (skip)
-    // from JSON parse errors (compile error).
     let result = (|| -> Result<Option<String>, (bool, String)> {
         let manifest_dir =
             std::env::var("CARGO_MANIFEST_DIR").map_err(|e| (true, e.to_string()))?;
@@ -556,14 +264,12 @@ pub fn __check_uses(input: TokenStream) -> TokenStream {
 
         let json_path = project_root.join(".work").join("app.uses.json");
         let content = std::fs::read_to_string(&json_path).map_err(|e| {
-            // File not found is expected during IDE cargo check
             let is_not_found = e.kind() == std::io::ErrorKind::NotFound;
             (is_not_found, e.to_string())
         })?;
 
         let pkg_name = std::env::var("CARGO_PKG_NAME").map_err(|e| (true, e.to_string()))?;
 
-        // JSON parse errors should be compile errors, not silently skipped
         let root: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| (false, format!("failed to parse app.uses.json: {}", e)))?;
         let obj = root
@@ -598,12 +304,8 @@ pub fn __check_uses(input: TokenStream) -> TokenStream {
             err.to_compile_error().into()
         }
         Ok(None) => TokenStream::new(),
-        Err((true, _)) => {
-            // File not found or env var missing → skip (expected during IDE cargo check)
-            TokenStream::new()
-        }
+        Err((true, _)) => TokenStream::new(),
         Err((false, msg)) => {
-            // JSON parse error → compile error
             syn::Error::new(proc_macro::Span::call_site().into(), msg)
                 .to_compile_error()
                 .into()
@@ -611,24 +313,13 @@ pub fn __check_uses(input: TokenStream) -> TokenStream {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ipc::allocation!() – declare a handle to a named memory allocation
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// ipc::allocation!(...)
+// ===========================================================================
 
 /// Declare a static handle to a named memory allocation.
 ///
 /// Syntax: `ipc::allocation!(NAME = @alloc_name: Type);`
-///
-/// Example:
-/// ```ignore
-/// ipc::allocation!(FRAME_BUFFERS = @frame_buffers: [[u8; 8192]; 64]);
-/// let fb = FRAME_BUFFERS.get(); // &'static mut [[u8; 8192]; 64]
-/// ```
-///
-/// The allocation must be defined in `app.kdl` and the task must have
-/// `uses-allocation "alloc_name"`. Compile-time checks verify that
-/// `size_of::<Type>() == allocation size` and `align_of::<Type>() <= allocation align`.
-/// Calling `.get()` twice panics.
 #[proc_macro]
 pub fn allocation(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as AllocationInput);
@@ -648,7 +339,6 @@ pub fn allocation(input: TokenStream) -> TokenStream {
         Err(_) => {}   // file missing, skip check
     }
 
-    // Look up the allocation for compile-time checks and base address
     let info = match resolve_alloc::resolve(&alloc_name_str) {
         Ok(Some(info)) => info,
         Ok(None) => {
@@ -657,7 +347,6 @@ pub fn allocation(input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
         }
-        // JSON not available (e.g. IDE cargo check) — emit a dummy static
         Err(_) => {
             return quote! {
                 static #static_name: () = ();
@@ -681,8 +370,6 @@ pub fn allocation(input: TokenStream) -> TokenStream {
 
     let wrapper_type = format_ident!("__Alloc_{}", static_name);
 
-    // Sentinel symbol: prevents two statics from using the same allocation
-    // within one binary. The linker will error on duplicate symbols.
     let sentinel_ident =
         format_ident!("__only_one_usage_allowed_for_allocation_{}", alloc_name_str);
 
@@ -718,7 +405,6 @@ pub fn allocation(input: TokenStream) -> TokenStream {
     output.into()
 }
 
-/// Parse: `NAME = @alloc_name: Type`
 struct AllocationInput {
     static_name: syn::Ident,
     alloc_name: syn::Ident,
