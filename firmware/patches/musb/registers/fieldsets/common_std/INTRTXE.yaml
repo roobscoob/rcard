@@ -1,0 +1,11 @@
+fieldset/INTRTXE:
+  bit_size: INTR_REG_BIT_SIZE
+  description: Transmit Endpoint Interrupt Enable Register
+  fields:
+  - name: EP_TXE
+    description: Endpoint transmit interrupt enable (EP0:TXE_RXE)
+    bit_offset: 0
+    bit_size: 1
+    array:
+      len: ENDPOINTS_NUM
+      stride : 1

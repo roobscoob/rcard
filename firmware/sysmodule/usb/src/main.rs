@@ -6,6 +6,7 @@ use core::cell::UnsafeCell;
 use hubris_task_slots::SLOTS;
 use musb::{MusbInstance, UsbInstance, UsbdBus};
 use rcard_log::{debug, info, OptionExt, ResultExt};
+use usb_device::device::UsbRev;
 
 #[derive(rcard_log::Format)]
 enum UsbdError {
@@ -91,18 +92,27 @@ struct VendorClass<'a, B: usb_device::bus::UsbBus> {
     iface: usb_device::bus::InterfaceNumber,
     ep_in: [Option<EndpointIn<'a, B>>; 7],
     ep_out: [Option<EndpointOut<'a, B>>; 7],
+    /// Pre-built MSOS 2.0 platform capability (25 bytes) and descriptor set (30 bytes).
+    msos_platform_capability: [u8; 25],
+    msos_descriptor_set: [u8; 30],
+    msos_vendor_code: u8,
 }
 
 impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
     fn new(
         alloc: &'a UsbBusAllocator<UsbdBus<UsbInstance>>,
         endpoints: &[Option<EndpointConfig>; 7],
+        identity: &DeviceIdentity,
     ) -> Self {
         let iface = alloc.interface();
+
         let mut class = VendorClass {
             iface,
             ep_in: [const { None }; 7],
             ep_out: [const { None }; 7],
+            msos_platform_capability: identity.msos_platform_capability,
+            msos_descriptor_set: identity.msos_descriptor_set,
+            msos_vendor_code: identity.msos_vendor_code,
         };
 
         for (idx, ep_config) in endpoints.iter().enumerate() {
@@ -152,6 +162,7 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
     }
 }
 
+/// Vendor request code for MSOS 2.0 descriptor set retrieval.
 impl<B: usb_device::bus::UsbBus> UsbClass<B> for VendorClass<'_, B> {
     fn get_configuration_descriptors(
         &self,
@@ -165,6 +176,28 @@ impl<B: usb_device::bus::UsbBus> UsbClass<B> for VendorClass<'_, B> {
             writer.endpoint(ep)?;
         }
         Ok(())
+    }
+
+    fn get_bos_descriptors(
+        &self,
+        writer: &mut usb_device::descriptor::BosWriter,
+    ) -> usb_device::Result<()> {
+        if self.msos_platform_capability[1] != 0 {
+            // Platform capability type = 0x05
+            writer.capability(0x05, &self.msos_platform_capability)?;
+        }
+        Ok(())
+    }
+
+    fn control_in(&mut self, xfer: usb_device::class::ControlIn<B>) {
+        let req = xfer.request();
+        if self.msos_vendor_code != 0
+            && req.request_type == usb_device::control::RequestType::Vendor
+            && req.request == self.msos_vendor_code
+            && req.index == 0x07
+        {
+            let _ = xfer.accept_with(&self.msos_descriptor_set);
+        }
     }
 }
 
@@ -200,6 +233,12 @@ impl UsbGlobal {
                 device_subclass: 0,
                 device_protocol: 0,
                 bcd_device: 0,
+                manufacturer: [0; 32],
+                product: [0; 32],
+                serial: [0; 32],
+                msos_platform_capability: [0; 25],
+                msos_descriptor_set: [0; 30],
+                msos_vendor_code: 0,
             },
             endpoint_count: 0,
             endpoints: [None; 7],
@@ -231,11 +270,40 @@ impl UsbGlobal {
         debug!("MUSB power before activate: {}", power_before.0);
 
         // Create our class (allocates endpoints from usb-device)
-        let class = VendorClass::new(alloc, &self.endpoints);
+        let class = VendorClass::new(alloc, &self.endpoints, &self.identity);
 
-        // Build the USB device with our identity
-        let id = &self.identity;
+        // SAFETY: UsbGlobal only exists inside `static USB`, so self.identity
+        // has 'static lifetime. We reborrow through a pointer to decouple
+        // from &mut self, which we need for self.poll() below.
+        // note from rose hall: i hate this.
+        //                      claude pressured me into adding it, and honestly i don't see a better solution since it really wants a pointer
+        //                      but it still makes me queasy. if you have suggestions, please let me know.
+        #[allow(clippy::deref_addrof)]
+        let id: &'static DeviceIdentity = unsafe { &*(core::ptr::addr_of!(self.identity)) };
+
+        let mut strings = usb_device::device::StringDescriptors::default();
+        let mfr = id.manufacturer_str();
+        if !mfr.is_empty() {
+            strings = strings.manufacturer(mfr);
+        }
+        let prod = id.product_str();
+        if !prod.is_empty() {
+            strings = strings.product(prod);
+        }
+        let ser = id.serial_str();
+        if !ser.is_empty() {
+            strings = strings.serial_number(ser);
+        }
+
         let device = UsbDeviceBuilder::new(alloc, UsbVidPid(id.vendor_id, id.product_id))
+            .usb_rev(if id.has_msos() {
+                UsbRev::Usb210
+            } else {
+                UsbRev::Usb200
+            })
+            .strings(&[strings])
+            .map_err(BuilderErr::from)
+            .log_expect("string descriptors failed")
             .device_class(id.device_class)
             .device_sub_class(id.device_subclass)
             .device_protocol(id.device_protocol)
@@ -290,13 +358,8 @@ impl UsbGlobal {
             return;
         }
 
-        // Capture clear-on-read interrupt registers into atomics
-        unsafe {
-            musb::on_interrupt::<UsbInstance>();
-        }
-
-        // Drive the usb-device state machine (EP0, enumeration, etc.)
         if let (Some(device), Some(class)) = (&mut self.device, &mut self.class) {
+            unsafe { musb::on_interrupt::<UsbInstance>() };
             device.poll(&mut [class]);
         }
     }

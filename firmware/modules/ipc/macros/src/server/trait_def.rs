@@ -2,10 +2,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Ident;
 
-use crate::parse::{
-    MethodKind, ParsedMethod, ResourceAttr, collect_peer_traits,
-    parse_slice_ref,
-};
+use crate::parse::{MethodKind, ParsedMethod, ResourceAttr, collect_peer_traits, parse_slice_ref};
 use crate::util::replace_ident_in_type;
 
 use super::peers::{is_resolvable_peer, peer_generic_name};
@@ -25,10 +22,7 @@ pub fn gen_server_trait(
         })
         .collect();
 
-    let method_fns: Vec<TokenStream2> = methods
-        .iter()
-        .map(|m| gen_trait_method(m))
-        .collect();
+    let method_fns: Vec<TokenStream2> = methods.iter().map(gen_trait_method).collect();
 
     if peer_generics.is_empty() {
         quote! {
@@ -82,8 +76,7 @@ fn gen_trait_method(m: &ParsedMethod) -> TokenStream2 {
 
     let inner = if let Some(rt) = &m.return_type {
         if let Some((_trait_name, generic_ident)) = &m.constructs {
-            let replaced =
-                replace_ident_in_type(rt, generic_ident, &quote! { ipc::RawHandle });
+            let replaced = replace_ident_in_type(rt, generic_ident, &quote! { ipc::RawHandle });
             quote! { #replaced }
         } else {
             quote! { #rt }

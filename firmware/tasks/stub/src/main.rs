@@ -2,7 +2,7 @@
 #![no_main]
 
 use hubris_task_slots::SLOTS;
-use rcard_log::{debug, error, info, warn, OptionExt, ResultExt};
+use rcard_log::{error, info, warn, OptionExt, ResultExt};
 use sysmodule_usb_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -18,14 +18,12 @@ fn main() -> ! {
 
     // Claim the USB bus as a vendor-specific device with 2 endpoints
     let bus = UsbBus::take(
-        DeviceIdentity {
-            vendor_id: 0x1209, // pid.codes open-source VID
-            product_id: 0x0001,
-            device_class: 0xFF, // vendor-specific
-            device_subclass: 0x00,
-            device_protocol: 0x00,
-            bcd_device: 0x0100,
-        },
+        DeviceIdentity::new(0x16D0, 0x14EF)
+            .device_class(0xFF, 0x01, 0x00)
+            .manufacturer("Rose Kodsi-Hall (rose@hall.ly)")
+            .product("Charm ✨ (stub)")
+            .serial_number("BB01")
+            .windows_driver("WINUSB"),
         2,
     )
     .log_unwrap()
@@ -51,6 +49,8 @@ fn main() -> ! {
     .log_unwrap()
     .log_unwrap();
 
+    info!("USB IN endpoint configured");
+
     // Open a bulk OUT endpoint (host → device) on EP2 (RX-only)
     let ep_out = UsbEndpoint::open(
         h_out,
@@ -65,11 +65,23 @@ fn main() -> ! {
     .log_unwrap()
     .log_unwrap();
 
+    info!("USB OUT endpoint configured");
+
     info!("USB endpoints configured, waiting for host");
+
+    let mut last_state = None;
 
     // Poll until the host finishes enumeration
     loop {
-        if bus.state().log_unwrap() == BusState::Configured {
+        let state = bus.state().log_unwrap();
+
+        if Some(state) != last_state {
+            info!("USB bus state changed: {}", state);
+        }
+
+        last_state = Some(state);
+
+        if state == BusState::Configured {
             break;
         }
     }
@@ -81,13 +93,12 @@ fn main() -> ! {
 
     // Simple echo: read from OUT, write back to IN
     let mut buf = [0u8; 64];
+
     loop {
         match ep_out.read(&mut buf) {
             Ok(Ok(n)) => {
                 let n = n as usize;
                 if n > 0 {
-                    debug!("USB received {} bytes, echoing back", n);
-
                     match ep_in.write(&buf[..n]) {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => error!("USB write error: {}", e),
@@ -95,11 +106,8 @@ fn main() -> ! {
                     }
                 }
             }
-            Ok(Err(UsbError::EndpointBusy)) => {
-                info!("USB endpoint busy, retrying");
-            }
+            Ok(Err(UsbError::EndpointBusy)) => {}
             Ok(Err(UsbError::Disconnected)) => {
-                // Bus lost configuration, wait for re-enumeration
                 warn!("USB disconnected, waiting for host");
                 loop {
                     if bus.state().log_unwrap() == BusState::Configured {

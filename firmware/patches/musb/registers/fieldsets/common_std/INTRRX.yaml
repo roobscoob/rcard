@@ -1,0 +1,11 @@
+fieldset/INTRRX:
+  bit_size: INTR_REG_BIT_SIZE
+  description: Receive Endpoint Interrupt Status Register
+  fields:
+  - name: EP_RX
+    description: Receive endpoint interrupt (except EP0)
+    bit_offset: 0
+    bit_size: 1
+    array:
+      len: ENDPOINTS_NUM
+      stride : 1

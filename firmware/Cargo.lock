@@ -483,8 +483,6 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "musb"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cbd1ff7d290ac701ca73a02c270c19df8b22f80cbd80c9e37f328b0e72a9a6d"
 dependencies = [
  "cfg-if",
  "embassy-usb-driver",

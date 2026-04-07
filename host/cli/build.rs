@@ -41,7 +41,12 @@ fn main() {
     cmd.arg(firmware_dir.join("build.nu"))
         .args(["--features", "stub"])
         .args(["--board", board])
-        .args(["--code-target", "ram@[0..384k]", "--ram-target", "ram@[384k..]"])
+        .args([
+            "--code-target",
+            "ram@[0..128k]",
+            "--ram-target",
+            "ram@[128k..]",
+        ])
         .arg("--out")
         .arg(&stub_tfw)
         .current_dir(&firmware_dir);

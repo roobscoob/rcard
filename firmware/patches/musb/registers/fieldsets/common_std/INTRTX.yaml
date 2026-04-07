@@ -1,0 +1,11 @@
+fieldset/INTRTX:
+  bit_size: INTR_REG_BIT_SIZE
+  description: Transmit Endpoint Interrupt Status Register
+  fields:
+  - name: EP_TX
+    description: Endpoint 0 and transmit endpoints interrupt
+    bit_offset: 0
+    bit_size: 1
+    array:
+      len: ENDPOINTS_NUM
+      stride : 1

@@ -28,7 +28,7 @@ impl Serial {
     /// Connect to a device over two serial ports.
     ///
     /// - `usart1`: hypervisor/supervisor text stream (1M baud)
-    /// - `usart2`: structured binary log stream (115200 baud)
+    /// - `usart2`: structured binary log stream (921600 baud)
     ///
     /// Either or both may be `None` to skip that stream.
     pub fn connect(usart1: Option<&str>, usart2: Option<&str>) -> Result<Self, serialport::Error> {
@@ -47,7 +47,7 @@ impl Serial {
         };
 
         if let Some(port) = usart2 {
-            let stream = tokio_serial::SerialStream::open(&tokio_serial::new(port, 115_200))?;
+            let stream = tokio_serial::SerialStream::open(&tokio_serial::new(port, 921_600))?;
             let tx = structured_tx.clone();
             tokio::spawn(read_structured(stream, tx));
         }

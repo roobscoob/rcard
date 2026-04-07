@@ -55,6 +55,9 @@ rcard_log = { path = "../shared/log", package = "rcard-log" }
 [patch."https://github.com/cbiffle/exhubris"]
 userlib = { path = "patches/userlib" }
 
+[patch.crates-io]
+musb = { path = "patches/musb" }
+
 [patch."https://github.com/cbiffle/hubris-fork.git"]
 abi = { path = "patches/abi" }
 
