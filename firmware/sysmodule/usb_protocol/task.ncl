@@ -6,6 +6,7 @@ fun ctx => {
   depends_on = [
     ctx.tasks.sysmodule_log,
     ctx.tasks.sysmodule_usb,
+    ctx.tasks.sysmodule_device_info,
   ],
   regions = {
     code  = { place = ctx.places.image },

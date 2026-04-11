@@ -10,7 +10,9 @@ bare-panics = []
 [dependencies]
 ipc = { path = "../../modules/ipc" }
 generated = { path = "../../modules/generated" }
+once-cell = { path = "../../modules/once_cell" }
 sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
+sysmodule_reactor_api = { path = "../reactor/api", features = ["bare-panics"] }
 sysmodule_usart_api = { path = "api", features = ["bare-panics"] }
 userlib.workspace = true
 

@@ -43,7 +43,7 @@ pub enum SidebarSection {
 
 // ── Serial port config ─────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SerialAdapterType {
     Usart1,
     Usart2,
@@ -66,8 +66,18 @@ pub struct SerialPortConfig {
     pub port: String,
     pub adapter_type: SerialAdapterType,
     pub status: SerialPortStatus,
+    /// USB identity for the persistent registry. Always Some for ports
+    /// added via the dropdown; reserved as Option for future expansion.
+    pub identity: Option<crate::port_registry::PortIdentity>,
     /// Device ID created when device is detected (None otherwise).
     pub device_id: Option<DeviceId>,
+    /// USART1 only: raw text lines off the wire. Unbounded scrollback.
+    pub raw_lines: std::collections::VecDeque<String>,
+    /// USART2 only: decoded structured log entries. Unbounded scrollback.
+    pub structured_logs: Vec<device::logs::LogEntry>,
+    /// USART2 only: decoded IPC control events (tunnel errors, replies,
+    /// frame-decode errors). Unbounded scrollback.
+    pub control_events: Vec<device::logs::ControlEvent>,
 }
 
 /// Stable serial config index (not an ID — just Vec position).
@@ -77,22 +87,30 @@ pub type SerialPortIndex = usize;
 
 pub struct FirmwareHandle {
     pub id: FirmwareId,
-    pub path: PathBuf,
+    /// On-disk location, or `None` for builtin (in-memory) entries like the
+    /// embedded stub firmware.
+    pub path: Option<PathBuf>,
     pub metadata: TfwMetadata,
 }
 
 impl FirmwareHandle {
+    pub fn is_builtin(&self) -> bool {
+        self.path.is_none()
+    }
+
     /// Short display name derived from the build metadata or filename.
     pub fn display_name(&self) -> String {
         if let Some(build) = &self.metadata.build {
             let ver = build.version.as_deref().unwrap_or("?");
             let short_id = &build.build_id[..8.min(build.build_id.len())];
-            format!("{} v{ver} - {short_id}", build.name)
-        } else {
-            self.path
-                .file_name()
+            let tag = if self.is_builtin() { " (builtin)" } else { "" };
+            format!("{} v{ver}{tag} - {short_id}", build.name)
+        } else if let Some(path) = &self.path {
+            path.file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".into())
+        } else {
+            "builtin".into()
         }
     }
 
@@ -149,7 +167,11 @@ pub struct DeviceHandle {
     pub adapter_ids: Vec<AdapterId>,
     /// The firmware this device is running, if known.
     pub firmware_id: Option<FirmwareId>,
-    pub log_buffer: VecDeque<Log>,
+    /// Sorted by `received_at` via binary-insertion in [`push_log`].
+    /// Logs from multiple adapters (e.g. USART1 text + USART2 structured)
+    /// land in correct device-emission order because each adapter stamps
+    /// its logs at first-byte-receipt before they reach the main thread.
+    pub log_buffer: Vec<Log>,
 }
 
 impl DeviceHandle {
@@ -169,12 +191,20 @@ impl DeviceHandle {
             capabilities: HashSet::new(),
             adapter_ids,
             firmware_id,
-            log_buffer: VecDeque::new(),
+            log_buffer: Vec::new(),
         }
     }
 
     pub fn push_log(&mut self, log: Log) {
-        self.log_buffer.push_back(log);
+        // Sorted insertion by `received_at`. `partition_point` finds the
+        // first index whose stamp is *strictly greater* than the new
+        // log's stamp; inserting there keeps ties in arrival order
+        // (stable) — which is what we want for logs sharing a wall-clock
+        // nanosecond.
+        let idx = self
+            .log_buffer
+            .partition_point(|existing| existing.received_at <= log.received_at);
+        self.log_buffer.insert(idx, log);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -295,7 +325,12 @@ pub struct AppState {
 
     // Serial adapter configs.
     pub serial_ports: Vec<SerialPortConfig>,
-    pub new_port_name: String,
+    /// Persistent on-disk record of configured ports, keyed by USB identity.
+    pub port_registry: crate::port_registry::PortRegistry,
+    /// Cached snapshot of OS-visible USB serial ports, refreshed on demand.
+    pub available_ports: Vec<crate::port_registry::AvailablePort>,
+    /// Index into `available_ports` selected in the "Add port" form.
+    pub new_port_selection: Option<usize>,
     pub new_port_type: SerialAdapterType,
 
     // Build configuration (sidebar state).
@@ -336,7 +371,10 @@ impl AppState {
             egui_tiles::Tree::new("fw_sidebar", root, tiles)
         };
 
-        AppState {
+        let port_registry = crate::port_registry::PortRegistry::load();
+        let available_ports = crate::port_registry::available_usb_ports();
+
+        let mut state = AppState {
             sidebar_section: SidebarSection::Devices,
             firmware_sidebar_tree,
             tree: egui_tiles::Tree::empty("main_tree"),
@@ -349,7 +387,9 @@ impl AppState {
             next_build_id: 0,
             flash_modal: None,
             serial_ports: Vec::new(),
-            new_port_name: String::new(),
+            port_registry,
+            available_ports,
+            new_port_selection: None,
             new_port_type: SerialAdapterType::Usart1,
             firmware_dir,
             firmware_dir_input,
@@ -362,7 +402,81 @@ impl AppState {
             file_drag: None,
             cmd_tx,
             event_rx,
+        };
+
+        // Auto-register every port from the registry that we can see right
+        // now. Ports that aren't currently plugged in are simply skipped;
+        // they stay in the registry and will be picked up on next startup
+        // if they reappear.
+        let plan: Vec<(crate::port_registry::AvailablePort, SerialAdapterType)> = state
+            .port_registry
+            .iter()
+            .filter_map(|(identity, cfg)| {
+                state
+                    .available_ports
+                    .iter()
+                    .find(|p| p.identity == *identity)
+                    .map(|p| (p.clone(), cfg.adapter_type))
+            })
+            .collect();
+        for (port, adapter_type) in plan {
+            state.start_serial_port(port, adapter_type, false);
         }
+
+        state
+    }
+
+    /// Re-scan the OS for USB serial ports and update `available_ports`.
+    pub fn refresh_available_ports(&mut self) {
+        self.available_ports = crate::port_registry::available_usb_ports();
+    }
+
+    /// `available_ports` minus any port already in `serial_ports`.
+    pub fn unconfigured_available_ports(&self) -> Vec<&crate::port_registry::AvailablePort> {
+        self.available_ports
+            .iter()
+            .filter(|p| {
+                !self
+                    .serial_ports
+                    .iter()
+                    .any(|cfg| cfg.identity.as_ref() == Some(&p.identity))
+            })
+            .collect()
+    }
+
+    /// Start a serial port: create the SerialPortConfig, optionally
+    /// persist to the registry, send RegisterSerial to the bridge.
+    fn start_serial_port(
+        &mut self,
+        port: crate::port_registry::AvailablePort,
+        adapter_type: SerialAdapterType,
+        persist: bool,
+    ) {
+        if persist {
+            self.port_registry.insert(
+                port.identity.clone(),
+                crate::port_registry::PortConfiguration { adapter_type },
+            );
+            self.port_registry.save();
+        }
+
+        let index = self.serial_ports.len();
+        self.serial_ports.push(SerialPortConfig {
+            port: port.port_name.clone(),
+            adapter_type,
+            status: SerialPortStatus::Connecting,
+            identity: Some(port.identity),
+            device_id: None,
+            raw_lines: std::collections::VecDeque::new(),
+            structured_logs: Vec::new(),
+            control_events: Vec::new(),
+        });
+
+        let _ = self.cmd_tx.send(crate::bridge::Command::RegisterSerial {
+            index,
+            port: port.port_name,
+            adapter_type,
+        });
     }
 
     pub fn next_device_id(&mut self) -> DeviceId {
@@ -483,11 +597,30 @@ impl AppState {
             id,
             FirmwareHandle {
                 id,
-                path: db_path,
+                path: Some(db_path),
                 metadata,
             },
         );
         Ok(id)
+    }
+
+    /// Register the compile-time-embedded stub firmware as an in-memory
+    /// (ephemeral) entry so it appears in firmware lists and is searchable
+    /// by id alongside disk-loaded firmware.
+    pub fn register_builtin_stub(&mut self) {
+        let metadata = match tfw::archive::load_metadata_from_bytes(crate::stub::TFW) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let id = self.next_firmware_id();
+        self.firmware.insert(
+            id,
+            FirmwareHandle {
+                id,
+                path: None,
+                metadata,
+            },
+        );
     }
 
     /// Scan the firmware database directory and load all .tfw files.
@@ -511,7 +644,7 @@ impl AppState {
                     let id = self.next_firmware_id();
                     self.firmware.insert(
                         id,
-                        FirmwareHandle { id, path, metadata },
+                        FirmwareHandle { id, path: Some(path), metadata },
                     );
                 }
             }
@@ -587,6 +720,38 @@ impl AppState {
 
         self.tree
             .make_active(|_, tile| matches!(tile, egui_tiles::Tile::Pane(p) if *p == pane));
+    }
+
+    /// Open a USART2 serial port in the tile tree as a Logs + Control tab group.
+    ///
+    /// Mirrors `open_device`: if any sub-pane for this port is already open,
+    /// focuses the Logs tab; otherwise creates a new tab group with both.
+    pub fn open_serial_port(&mut self, idx: SerialPortIndex) {
+        let already_open = self.tree.tiles.iter().any(|(_, tile)| match tile {
+            egui_tiles::Tile::Pane(Pane::SerialAdapterLogs(i))
+            | egui_tiles::Tile::Pane(Pane::SerialAdapterControl(i)) => *i == idx,
+            _ => false,
+        });
+
+        if !already_open {
+            let logs = self.tree.tiles.insert_pane(Pane::SerialAdapterLogs(idx));
+            let ctrl = self.tree.tiles.insert_pane(Pane::SerialAdapterControl(idx));
+            let tab_group = self.tree.tiles.insert_tab_tile(vec![logs, ctrl]);
+
+            if let Some(root) = self.tree.root() {
+                let new_root = self
+                    .tree
+                    .tiles
+                    .insert_horizontal_tile(vec![root, tab_group]);
+                self.tree.root = Some(new_root);
+            } else {
+                self.tree.root = Some(tab_group);
+            }
+        }
+
+        let target = Pane::SerialAdapterLogs(idx);
+        self.tree
+            .make_active(|_, tile| matches!(tile, egui_tiles::Tile::Pane(p) if *p == target));
     }
 
     /// Open a firmware status panel in the tile tree.
@@ -667,10 +832,44 @@ impl AppState {
                     capabilities,
                     firmware_id,
                 } => {
-                    let mut dev = DeviceHandle::new(device_id, name, kind, adapter_ids, firmware_id);
-                    dev.capabilities = capabilities.into_iter().collect();
-                    let is_emulator = dev.kind == DeviceKind::Emulator;
-                    self.devices.insert(device_id, dev);
+                    // Idempotent: two adapters on the same chip (e.g. USART1
+                    // and USART2) both fire `DeviceCreated` for the same
+                    // persistent `DeviceId` resolved through the shared
+                    // `persistent_devices` registry. Treat the second call
+                    // as "attach this adapter + merge capabilities" rather
+                    // than replacing the whole handle — otherwise the
+                    // existing `log_buffer` and peer adapter bindings get
+                    // wiped.
+                    let is_emulator;
+                    if let Some(existing) = self.devices.get_mut(&device_id) {
+                        is_emulator = existing.kind == DeviceKind::Emulator;
+                        for id in adapter_ids {
+                            if !existing.adapter_ids.contains(&id) {
+                                existing.adapter_ids.push(id);
+                            }
+                        }
+                        existing.capabilities.extend(capabilities);
+                        // Upgrade ephemeral → persistent if the new binding
+                        // carries a stronger kind. Persistent > Ephemeral;
+                        // don't downgrade.
+                        if existing.kind == DeviceKind::Ephemeral
+                            && kind == DeviceKind::Persistent
+                        {
+                            existing.kind = DeviceKind::Persistent;
+                            existing.name = name;
+                        }
+                        if existing.firmware_id.is_none() {
+                            existing.firmware_id = firmware_id;
+                        }
+                    } else {
+                        let mut dev = DeviceHandle::new(
+                            device_id, name, kind, adapter_ids, firmware_id,
+                        );
+                        dev.capabilities = capabilities.into_iter().collect();
+                        is_emulator = dev.kind == DeviceKind::Emulator;
+                        self.devices.insert(device_id, dev);
+                    }
+
                     // Update serial config if this came from a serial connection.
                     for cfg in &mut self.serial_ports {
                         if cfg.device_id.is_none()
@@ -739,7 +938,12 @@ impl AppState {
                     // Migrate logs and phase from old (ephemeral) to new (persistent).
                     if let Some(old_dev) = self.devices.remove(&old_id) {
                         if let Some(new_dev) = self.devices.get_mut(&new_id) {
-                            new_dev.log_buffer.extend(old_dev.log_buffer);
+                            // Migrate via `push_log` so sort order is
+                            // preserved even if the target device already
+                            // has logs from another adapter.
+                            for log in old_dev.log_buffer {
+                                new_dev.push_log(log);
+                            }
                             new_dev.phase = old_dev.phase;
                         }
                     }
@@ -814,35 +1018,71 @@ impl AppState {
                         cfg.status = status;
                     }
                 }
+                crate::bridge::Event::SerialRawLine { index, line } => {
+                    if let Some(cfg) = self.serial_ports.get_mut(index) {
+                        cfg.raw_lines.push_back(line);
+                    }
+                }
+                crate::bridge::Event::SerialStructuredLog { index, entry } => {
+                    if let Some(cfg) = self.serial_ports.get_mut(index) {
+                        cfg.structured_logs.push(entry);
+                    }
+                }
+                crate::bridge::Event::SerialControlEvent { index, event } => {
+                    if let Some(cfg) = self.serial_ports.get_mut(index) {
+                        cfg.control_events.push(event);
+                    }
+                }
+                crate::bridge::Event::DeviceReportedBuildId {
+                    device_id,
+                    build_id_bytes,
+                } => {
+                    // Find the loaded .tfw archive whose build_id
+                    // (UUID string) parses to the same 16 bytes the
+                    // device just reported. On a match, bind it to the
+                    // device so the log viewer can resolve species and
+                    // type metadata.
+                    let matched_fw_id = self.firmware.iter().find_map(|(fw_id, fw)| {
+                        let build_id_str = fw.build_id()?;
+                        let parsed = uuid::Uuid::parse_str(build_id_str).ok()?;
+                        if *parsed.as_bytes() == build_id_bytes {
+                            Some(*fw_id)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(fw_id) = matched_fw_id {
+                        if let Some(dev) = self.devices.get_mut(&device_id) {
+                            dev.firmware_id = Some(fw_id);
+                        }
+                    }
+                }
             }
         }
     }
 
-    /// Register a serial port and start the background connection loop.
+    /// Register the port currently selected in the "Add port" form.
     pub fn register_serial(&mut self) {
-        let port = self.new_port_name.trim().to_string();
-        if port.is_empty() {
+        let Some(idx) = self.new_port_selection else {
             return;
-        }
+        };
+        let unconfigured: Vec<crate::port_registry::AvailablePort> = self
+            .unconfigured_available_ports()
+            .into_iter()
+            .cloned()
+            .collect();
+        let Some(port) = unconfigured.get(idx).cloned() else {
+            return;
+        };
 
-        let index = self.serial_ports.len();
-        self.serial_ports.push(SerialPortConfig {
-            port: port.clone(),
-            adapter_type: self.new_port_type,
-            status: SerialPortStatus::Connecting,
-            device_id: None,
-        });
-
-        let _ = self.cmd_tx.send(crate::bridge::Command::RegisterSerial {
-            index,
-            port,
-            adapter_type: self.new_port_type,
-        });
-
-        self.new_port_name.clear();
+        let adapter_type = self.new_port_type;
+        self.start_serial_port(port, adapter_type, true);
+        self.new_port_selection = None;
     }
 
-    /// Unregister a serial port and stop its connection loop.
+    /// Unregister a serial port and stop its connection loop. Also removes
+    /// it from the persistent registry so it won't auto-register on next
+    /// startup.
     pub fn unregister_serial(&mut self, index: usize) {
         if index >= self.serial_ports.len() {
             return;
@@ -855,7 +1095,31 @@ impl AppState {
             self.devices.remove(&device_id);
         }
 
-        self.serial_ports.remove(index);
+        // Remove any open tiles referencing this port.
+        let to_remove: Vec<egui_tiles::TileId> = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(tile_id, tile)| match tile {
+                egui_tiles::Tile::Pane(Pane::SerialAdapter(i))
+                | egui_tiles::Tile::Pane(Pane::SerialAdapterLogs(i))
+                | egui_tiles::Tile::Pane(Pane::SerialAdapterControl(i))
+                    if *i == index =>
+                {
+                    Some(*tile_id)
+                }
+                _ => None,
+            })
+            .collect();
+        for tile_id in to_remove {
+            self.tree.remove_recursively(tile_id);
+        }
+
+        let removed = self.serial_ports.remove(index);
+        if let Some(identity) = removed.identity {
+            self.port_registry.remove(&identity);
+            self.port_registry.save();
+        }
     }
 
     /// Start a build: create state, open a panel, send the command to the bridge.
@@ -929,7 +1193,11 @@ impl AppState {
         let Some(fw) = self.firmware.get(&fw_id) else {
             return;
         };
-        let tfw_path = fw.path.clone();
+        let Some(tfw_path) = fw.path.clone() else {
+            // Builtin entries (e.g. the embedded stub) have no on-disk
+            // representation, so they can't be launched in the emulator.
+            return;
+        };
 
         let _ = self.cmd_tx.send(crate::bridge::Command::RunEmulator {
             firmware_id: fw_id,

@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
+use std::time::Instant;
 
 use device::adapter::{Adapter, AdapterId};
 use device::device::LogSink;
@@ -29,16 +30,24 @@ impl Usart1Connection {
     }
 
     /// Read the next line from the text stream.
-    /// Returns None on EOF or error.
-    pub async fn read_line(&mut self, line_buf: &mut String) -> Option<()> {
+    ///
+    /// Returns the host `Instant` at which the *first byte* of the line
+    /// was observed, or `None` on EOF or error. The caller uses this
+    /// timestamp as the log's `received_at` so multi-adapter ordering
+    /// reflects real byte-arrival times, not event-dispatch times.
+    pub async fn read_line(&mut self, line_buf: &mut String) -> Option<Instant> {
         let mut buf = [0u8; 1];
+        let mut line_start: Option<Instant> = None;
         loop {
             match self.reader.read(&mut buf).await {
                 Ok(0) => return None,
                 Ok(_) => {
                     if buf[0] == b'\n' {
-                        return Some(());
+                        return Some(line_start.unwrap_or_else(Instant::now));
                     } else {
+                        if line_start.is_none() {
+                            line_start = Some(Instant::now());
+                        }
                         line_buf.push(buf[0] as char);
                     }
                 }
@@ -96,11 +105,16 @@ impl Drop for Usart1 {
 }
 
 /// Read UTF-8 lines from USART1 and push them into the device via LogSink.
+///
+/// Each line is stamped with the `Instant` at which its *first byte*
+/// arrived on the wire, so the host-side ordering of multi-adapter log
+/// streams reflects real byte-arrival times.
 async fn read_hypervisor(mut reader: TapReader, sink: LogSink) {
     use crate::error::SerialError;
 
     let mut buf = [0u8; 1024];
     let mut line = String::new();
+    let mut line_start: Option<Instant> = None;
 
     loop {
         let n = match reader.read(&mut buf).await {
@@ -118,8 +132,12 @@ async fn read_hypervisor(mut reader: TapReader, sink: LogSink) {
         for &byte in &buf[..n] {
             if byte == b'\n' {
                 let text = std::mem::take(&mut line);
-                sink.text(text);
+                let start = line_start.take().unwrap_or_else(Instant::now);
+                sink.text_at(text, start);
             } else {
+                if line_start.is_none() {
+                    line_start = Some(Instant::now());
+                }
                 line.push(byte as char);
             }
         }

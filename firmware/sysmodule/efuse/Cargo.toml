@@ -1,0 +1,22 @@
+[package]
+name = "sysmodule_efuse"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["bare-panics"]
+bare-panics = []
+
+[dependencies]
+ipc = { path = "../../modules/ipc" }
+sysmodule_efuse_api = { path = "api", features = ["bare-panics"] }
+userlib.workspace = true
+generated = { path = "../../modules/generated" }
+
+[[bin]]
+name = "sysmodule_efuse"
+test = false
+bench = false
+
+[lints]
+workspace = true

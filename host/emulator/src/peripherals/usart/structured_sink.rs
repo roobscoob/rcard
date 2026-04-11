@@ -76,21 +76,32 @@ impl StructuredSink {
     }
 
     fn process_chunk(&mut self, chunk: &[u8]) {
-        if chunk.len() < 9 {
+        // First byte is the type discriminator (see rcard_log::wire).
+        // Non-log types (IPC replies etc.) share this wire but aren't
+        // handled by the structured-log sink — skip them silently.
+        if chunk.is_empty() {
+            return;
+        }
+        match chunk[0] {
+            rcard_log::wire::TYPE_LOG_FRAGMENT => {}
+            _ => return,
+        }
+
+        if chunk.len() < 1 + 9 {
             return;
         }
 
         let id = u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3],
-            chunk[4], chunk[5], chunk[6], chunk[7],
+            chunk[1], chunk[2], chunk[3], chunk[4],
+            chunk[5], chunk[6], chunk[7], chunk[8],
         ]);
-        let length = chunk[8] as usize;
+        let length = chunk[9] as usize;
 
-        if length == 0 || chunk.len() < 9 + length {
+        if length == 0 || chunk.len() < 1 + 9 + length {
             return;
         }
 
-        let data = &chunk[9..9 + length];
+        let data = &chunk[10..10 + length];
         let stream = self.streams.entry(id).or_insert_with(StreamState::new);
 
         for &byte in data {

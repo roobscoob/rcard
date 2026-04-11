@@ -156,8 +156,32 @@ impl<T: MusbInstance> usb_device::bus::UsbBus for UsbdBus<T> {
         }
 
         if buf.len() != 0 {
-            buf.into_iter()
-                .for_each(|b| regs.fifo(index).write(|w| w.set_data(*b)));
+            // Word-wide FIFO write loop. The byte-at-a-time path used by the
+            // typed `Fifo(pub u8)` accessor triggers a word-pointer hazard on
+            // SF32LB52x's mini-MUSB silicon under back-to-back STRB pressure:
+            // a STRB occasionally lands in the wrong FIFO word while keeping
+            // its correct byte-lane. CherryUSB and every C reference driver
+            // for this IP avoid the hazard by doing 32-bit accesses against
+            // the same FIFO data register address. We bypass the typed PAC
+            // here to do the same. The byte tail covers non-aligned packet
+            // lengths (still hazardous, but only triggers for ≤3 trailing
+            // bytes per packet, which is acceptable).
+            //
+            // TEMP: prove the patched path is compiled in. sysmodule_usb
+            // reads this and logs once.
+            crate::WORD_WRITE_LOOP_REACHED
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+            let fifo_word_ptr = regs.fifo(index).as_ptr() as *mut u32;
+            let fifo_byte_ptr = fifo_word_ptr as *mut u8;
+            let chunks = buf.chunks_exact(4);
+            let tail = chunks.remainder();
+            for chunk in chunks {
+                let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                unsafe { core::ptr::write_volatile(fifo_word_ptr, word) };
+            }
+            for &b in tail {
+                unsafe { core::ptr::write_volatile(fifo_byte_ptr, b) };
+            }
         }
 
         if index == 0 {
@@ -243,9 +267,28 @@ impl<T: MusbInstance> usb_device::bus::UsbBus for UsbdBus<T> {
         //     panic!("read_count > buf.len()");
         //     return Err(UsbError::BufferOverflow);
         // }
-        buf.into_iter()
-            .take(read_count as _)
-            .for_each(|b| *b = regs.fifo(index).read().data());
+        // Word-wide FIFO read loop (mirror of the write path; same word-pointer
+        // hazard rationale on SF32LB52x). Reads 32 bits at a time against the
+        // FIFO data register, falling back to byte reads only for any 1-3 byte
+        // tail.
+        {
+            let fifo_word_ptr = regs.fifo(index).as_ptr() as *mut u32;
+            let fifo_byte_ptr = fifo_word_ptr as *mut u8;
+            let n = (read_count as usize).min(buf.len());
+            let buf_slice = &mut buf[..n];
+            let mut chunks = buf_slice.chunks_exact_mut(4);
+            for chunk in chunks.by_ref() {
+                let word = unsafe { core::ptr::read_volatile(fifo_word_ptr) };
+                let bytes = word.to_le_bytes();
+                chunk[0] = bytes[0];
+                chunk[1] = bytes[1];
+                chunk[2] = bytes[2];
+                chunk[3] = bytes[3];
+            }
+            for b in chunks.into_remainder() {
+                *b = unsafe { core::ptr::read_volatile(fifo_byte_ptr) };
+            }
+        }
         if index == 0 {
             regs.csr0l().modify(|w| w.set_serviced_rx_pkt_rdy(true));
             match self.control_state.get_state() {

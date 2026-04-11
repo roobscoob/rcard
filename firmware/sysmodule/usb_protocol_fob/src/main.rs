@@ -115,15 +115,11 @@ fn main() -> ! {
 
     EP_IN.set(ep_in).ok();
 
-    // Wait for USB configuration. Each bus_state() call drives a USB poll.
-    info!("Waiting for USB configuration");
-    loop {
-        match UsbProtocolManager::bus_state() {
-            Ok(BusState::Configured) => break,
-            _ => {}
-        }
-    }
-
+    // No spin-loop on bus_state — sysmodule_usb is IRQ-driven and the IN
+    // endpoint will start accepting writes the moment USB is Configured.
+    // Until then, the FobResource::send IPC handler will see EndpointBusy
+    // / Disconnected from the underlying ep.write() and surface that to
+    // the caller as FobSendError::Disconnected.
     info!("Fob channel ready, entering server loop");
 
     ipc::server! {

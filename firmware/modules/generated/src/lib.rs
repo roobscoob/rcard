@@ -27,6 +27,12 @@ pub mod acl {
     include!(concat!(env!("OUT_DIR"), "/acl.rs"));
 }
 
+/// Per-task IRQ → notification bit mapping.
+/// Use via the `generated::irq_bit!(crate_name, irq_name)` macro.
+pub mod irqs {
+    include!(concat!(env!("OUT_DIR"), "/irqs.rs"));
+}
+
 /// Build identity — build UUID and version string.
 pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/build_info.rs"));

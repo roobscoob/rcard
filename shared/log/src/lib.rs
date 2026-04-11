@@ -12,6 +12,7 @@ pub static PANIC_LOGGED: AtomicBool = AtomicBool::new(false);
 pub mod formatter;
 mod log_level;
 mod metadata;
+pub mod wire;
 
 pub use log_level::LogLevel;
 pub use metadata::LogMetadata;

@@ -7,6 +7,7 @@ use zip::ZipArchive;
 use crate::build_metadata::BuildMetadata;
 use crate::config::AppConfig;
 use crate::elf_cache::ElfCache;
+use crate::ipc_metadata::IpcMetadataBundle;
 use crate::metadata::{LogMetadataFile, Species};
 
 pub struct TfwMetadata {
@@ -16,6 +17,7 @@ pub struct TfwMetadata {
     pub elf_cache: ElfCache,
     pub build: Option<BuildMetadata>,
     pub config: Option<AppConfig>,
+    pub ipc: Option<IpcMetadataBundle>,
 }
 
 #[derive(Debug)]
@@ -108,6 +110,19 @@ pub fn load_metadata_from_bytes(tfw_bytes: &[u8]) -> Result<TfwMetadata, Archive
         }
     };
 
+    // Load IPC metadata (optional — older archives may not have it).
+    let ipc: Option<IpcMetadataBundle> = {
+        let mut archive5 = ZipArchive::new(Cursor::new(tfw_bytes)).map_err(ArchiveError::Zip)?;
+        match archive5.by_name("ipc-metadata.json") {
+            Ok(mut entry) => {
+                let mut json = String::new();
+                entry.read_to_string(&mut json).ok();
+                serde_json::from_str(&json).ok()
+            }
+            Err(_) => None,
+        }
+    };
+
     // Load task ELFs for stack dump resolution
     let mut elf_cache = ElfCache::new();
     let mut archive2 = ZipArchive::new(Cursor::new(tfw_bytes)).map_err(ArchiveError::Zip)?;
@@ -120,5 +135,6 @@ pub fn load_metadata_from_bytes(tfw_bytes: &[u8]) -> Result<TfwMetadata, Archive
         elf_cache,
         build,
         config,
+        ipc,
     })
 }

@@ -13,6 +13,16 @@ pub enum TunnelErrorCode {
     LeasePoolFull = 0x02,
     /// The request frame is malformed.
     BadRequest = 0x03,
+    /// This firmware build does not include the host-IPC dispatcher
+    /// (`sysmodule_host_proxy`). The transport accepted the frame but
+    /// has nowhere to forward it. The host should treat this as a
+    /// permanent capability error, not retry.
+    NoHostForwarding = 0x04,
+    /// The transport already has an in-flight request in its single
+    /// pending slot. The synchronous protocol shouldn't allow this in
+    /// normal operation, but a retrying host can see it. Safe to retry
+    /// after the previous reply is delivered.
+    Busy = 0x05,
     /// Unspecified internal error in the tunnel sysmodule.
     Internal = 0xFF,
 }
@@ -23,6 +33,8 @@ impl TunnelErrorCode {
             0x01 => Self::TaskDead,
             0x02 => Self::LeasePoolFull,
             0x03 => Self::BadRequest,
+            0x04 => Self::NoHostForwarding,
+            0x05 => Self::Busy,
             _ => Self::Internal,
         }
     }

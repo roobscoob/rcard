@@ -1,0 +1,21 @@
+[package]
+name = "sysmodule_efuse_api"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bare-panics = []
+
+[dependencies]
+ipc = { path = "../../../modules/ipc" }
+rcard-log = { path = "../../../../shared/log" }
+rcard-log-macros = { path = "../../../../shared/log/macros" }
+userlib.workspace = true
+zerocopy = "0.8"
+
+[lib]
+test = false
+bench = false
+
+[lints]
+workspace = true

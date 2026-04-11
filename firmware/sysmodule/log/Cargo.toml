@@ -11,10 +11,13 @@ panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 [dependencies]
 cobs = { version = "0.3", default-features = false }
 ipc = { path = "../../modules/ipc" }
-rcard-log = { path = "../../../shared/log" }
+rcard-log = { path = "../../../shared/log", features = ["writer"] }
+rcard-usb-proto = { path = "../../../shared/usb-proto" }
+sysmodule_host_transport_api = { path = "../host_transport/api", features = ["bare-panics"] }
 sysmodule_log_api = { path = "api", features = ["bare-panics"] }
 sysmodule_usart_api = { path = "../usart/api", features = ["bare-panics"] }
 sysmodule_reactor_api = { path = "../reactor/api", features = ["bare-panics"] }
+sysmodule_efuse_api = { path = "../efuse/api", features = ["bare-panics"] }
 once-cell = { path = "../../modules/once_cell" }
 userlib.workspace = true
 zerocopy = "0.8"

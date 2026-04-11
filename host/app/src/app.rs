@@ -60,6 +60,7 @@ impl RcardApp {
         runtime: tokio::runtime::Runtime,
     ) -> Self {
         let mut state = AppState::new(cmd_tx, event_rx);
+        state.register_builtin_stub();
         state.scan_firmware_db();
 
         RcardApp {
@@ -294,12 +295,18 @@ impl eframe::App for RcardApp {
                 self.state.flash_modal,
                 Some(FlashModalState::Flashing { .. })
             );
+            // Cap the window so the log viewer can't keep pushing it taller
+            // each frame. Within this cap the user can still resize freely
+            // and the log viewer will fill the extra space.
+            let max_h = (ctx.screen_rect().height() * 0.8).max(300.0);
             egui::Window::new(format!("{} Flash Firmware", icon::LIGHTNING))
                 .collapsible(false)
                 .resizable(is_flashing)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .min_width(if is_flashing { 500.0 } else { 340.0 })
                 .min_height(if is_flashing { 100.0 } else { 0.0 })
+                .max_height(max_h)
+                .default_height(if is_flashing { 480.0 } else { 0.0 })
                 .show(ctx, |ui| {
                     match self.state.flash_modal.as_ref().unwrap() {
                         FlashModalState::Picker {
@@ -326,108 +333,153 @@ impl eframe::App for RcardApp {
                                 .state
                                 .firmware
                                 .get(&firmware_id)
-                                .map(|fw| fw.path.clone());
+                                .and_then(|fw| fw.path.clone());
 
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    theme::TEXT_SECONDARY,
-                                    format!("{} Firmware:", icon::PACKAGE),
-                                );
-                                ui.strong(&fw_name);
-                            });
-                            ui.add_space(8.0);
+                            use egui_taffy::taffy::prelude::*;
+                            use egui_taffy::{tui as taffy_tui, TuiBuilderLogic};
 
-                            ui.colored_label(
-                                theme::TEXT_SECONDARY,
-                                format!("{} Target device:", icon::CPU),
-                            );
-
-                            if device_entries.is_empty() {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(16.0);
-                                    ui.colored_label(theme::TEXT_DIM, "No devices connected");
-                                });
-                            } else {
-                                let flash = self.state.flash_modal.as_mut().unwrap();
-                                if let FlashModalState::Picker {
-                                    selected_device: sel,
-                                    ..
-                                } = flash
-                                {
-                                    for (id, name) in &device_entries {
-                                        let selected = *sel == Some(*id);
-                                        if ui.selectable_label(selected, name).clicked() {
-                                            *sel = Some(*id);
-                                        }
-                                    }
-                                }
-                            }
-
-                            ui.add_space(8.0);
-
-                            if let Some(device_id) = selected_device {
-                                match method {
-                                    Some(FlashMethod::Usb) => {
+                            taffy_tui(ui, egui::Id::new("flash_modal_picker"))
+                                .reserve_available_width()
+                                .style(Style {
+                                    display: Display::Flex,
+                                    flex_direction: FlexDirection::Column,
+                                    align_items: Some(AlignItems::Stretch),
+                                    size: Size { width: percent(1.0), height: auto() },
+                                    gap: length(8.0),
+                                    ..Default::default()
+                                })
+                                .show(|tui| {
+                                    tui.ui(|ui| {
                                         ui.horizontal(|ui| {
-                                            ui.colored_label(theme::INFO, icon::USB);
                                             ui.colored_label(
-                                                theme::INFO,
-                                                "USB (via existing firmware)",
+                                                theme::TEXT_SECONDARY,
+                                                format!("{} Firmware:", icon::PACKAGE),
                                             );
+                                            ui.strong(&fw_name);
                                         });
-                                    }
-                                    Some(FlashMethod::SifliDebug) => {
-                                        ui.horizontal(|ui| {
-                                            ui.colored_label(theme::WARN, icon::PLUG);
-                                            ui.colored_label(theme::WARN, "SifliDebug (USART1)");
-                                        });
-                                    }
-                                    None => {
-                                        ui.horizontal(|ui| {
-                                            ui.colored_label(theme::ERROR, icon::WARNING);
-                                            ui.colored_label(
-                                                theme::ERROR,
-                                                "No USB or USART1 adapter",
-                                            );
-                                        });
-                                    }
-                                }
+                                    });
 
-                                ui.add_space(8.0);
-                                ui.horizontal(|ui| {
-                                    let flash_btn = egui::Button::new(egui::RichText::new(
-                                        format!("{} Flash", icon::LIGHTNING),
-                                    ));
-                                    if ui.add_enabled(method.is_some(), flash_btn).clicked() {
-                                        if let Some(tfw_path) = tfw_path {
-                                            match method.unwrap() {
-                                                FlashMethod::SifliDebug => {
-                                                    let _ = self.state.cmd_tx.send(
-                                                        crate::bridge::Command::FlashViaSifliDebug {
-                                                            device_id,
-                                                            firmware_id,
-                                                            tfw_path,
-                                                        },
-                                                    );
-                                                }
-                                                FlashMethod::Usb => {
-                                                    // TODO: USB flash path
+                                    tui.ui(|ui| {
+                                        ui.colored_label(
+                                            theme::TEXT_SECONDARY,
+                                            format!("{} Target device:", icon::CPU),
+                                        );
+                                    });
+
+                                    if device_entries.is_empty() {
+                                        tui.ui(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(16.0);
+                                                ui.colored_label(
+                                                    theme::TEXT_DIM,
+                                                    "No devices connected",
+                                                );
+                                            });
+                                        });
+                                    } else {
+                                        tui.ui(|ui| {
+                                            let flash = self.state.flash_modal.as_mut().unwrap();
+                                            if let FlashModalState::Picker {
+                                                selected_device: sel,
+                                                ..
+                                            } = flash
+                                            {
+                                                for (id, name) in &device_entries {
+                                                    let selected = *sel == Some(*id);
+                                                    if ui
+                                                        .selectable_label(selected, name)
+                                                        .clicked()
+                                                    {
+                                                        *sel = Some(*id);
+                                                    }
                                                 }
                                             }
+                                        });
+                                    }
+
+                                    if let Some(_) = selected_device {
+                                        tui.ui(|ui| match method {
+                                            Some(FlashMethod::Usb) => {
+                                                ui.horizontal(|ui| {
+                                                    ui.colored_label(theme::INFO, icon::USB);
+                                                    ui.colored_label(
+                                                        theme::INFO,
+                                                        "USB (via existing firmware)",
+                                                    );
+                                                });
+                                            }
+                                            Some(FlashMethod::SifliDebug) => {
+                                                ui.horizontal(|ui| {
+                                                    ui.colored_label(theme::WARN, icon::PLUG);
+                                                    ui.colored_label(
+                                                        theme::WARN,
+                                                        "SifliDebug (USART1)",
+                                                    );
+                                                });
+                                            }
+                                            None => {
+                                                ui.horizontal(|ui| {
+                                                    ui.colored_label(theme::ERROR, icon::WARNING);
+                                                    ui.colored_label(
+                                                        theme::ERROR,
+                                                        "No USB or USART1 adapter",
+                                                    );
+                                                });
+                                            }
+                                        });
+                                    }
+
+                                    // Footer row: Flash + Cancel, right-aligned.
+                                    tui.style(Style {
+                                        display: Display::Flex,
+                                        flex_direction: FlexDirection::Row,
+                                        align_items: Some(AlignItems::Center),
+                                        gap: length(8.0),
+                                        ..Default::default()
+                                    })
+                                    .add(|tui| {
+                                        tui.style(Style {
+                                            flex_grow: 1.0,
+                                            ..Default::default()
+                                        })
+                                        .add_empty();
+
+                                        if let Some(device_id) = selected_device {
+                                            tui.ui(|ui| {
+                                                let flash_btn = egui::Button::new(
+                                                    egui::RichText::new(format!(
+                                                        "{} Flash",
+                                                        icon::LIGHTNING
+                                                    )),
+                                                );
+                                                if ui
+                                                    .add_enabled(method.is_some(), flash_btn)
+                                                    .clicked()
+                                                {
+                                                    if let Some(tfw_path) = tfw_path.clone() {
+                                                        if let Some(FlashMethod::SifliDebug) =
+                                                            method
+                                                        {
+                                                            let _ = self.state.cmd_tx.send(
+                                                                crate::bridge::Command::FlashViaSifliDebug {
+                                                                    device_id,
+                                                                    firmware_id,
+                                                                    tfw_path,
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            });
                                         }
-                                        // Don't close — modal transitions to Flashing
-                                        // when FlashProgress(WaitingForReset) arrives.
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        close = true;
-                                    }
+
+                                        tui.ui(|ui| {
+                                            if ui.button("Cancel").clicked() {
+                                                close = true;
+                                            }
+                                        });
+                                    });
                                 });
-                            } else {
-                                ui.add_space(8.0);
-                                if ui.button("Cancel").clicked() {
-                                    close = true;
-                                }
-                            }
                         }
 
                         FlashModalState::Flashing {
@@ -448,46 +500,105 @@ impl eframe::App for RcardApp {
                                 .map(|d| d.name.clone())
                                 .unwrap_or_else(|| "?".into());
                             let device_id = *device_id;
+                            let phase_terminal = matches!(
+                                phase,
+                                FlashPhase::Booting
+                                    | FlashPhase::Done
+                                    | FlashPhase::Failed { .. }
+                            );
+                            let show_logs =
+                                matches!(phase, FlashPhase::Booting | FlashPhase::Done);
 
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    theme::TEXT_SECONDARY,
-                                    format!("{} Firmware:", icon::PACKAGE),
-                                );
-                                ui.strong(&fw_name);
-                            });
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    theme::TEXT_SECONDARY,
-                                    format!("{} Device:", icon::CPU),
-                                );
-                                ui.strong(&dev_name);
-                            });
-                            ui.add_space(12.0);
+                            use egui_taffy::taffy::prelude::*;
+                            use egui_taffy::{tui as taffy_tui, TuiBuilderLogic};
 
-                            flash_modal_steps(ui, phase);
+                            taffy_tui(ui, egui::Id::new("flash_modal_flashing"))
+                                .reserve_available_space()
+                                .style(Style {
+                                    display: Display::Flex,
+                                    flex_direction: FlexDirection::Column,
+                                    align_items: Some(AlignItems::Stretch),
+                                    size: Size { width: percent(1.0), height: percent(1.0) },
+                                    gap: length(6.0),
+                                    ..Default::default()
+                                })
+                                .show(|tui| {
+                                    // Header block: fw/device names + steps.
+                                    tui.style(Style {
+                                        flex_shrink: 0.0,
+                                        ..Default::default()
+                                    })
+                                    .ui(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(
+                                                theme::TEXT_SECONDARY,
+                                                format!("{} Firmware:", icon::PACKAGE),
+                                            );
+                                            ui.strong(&fw_name);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(
+                                                theme::TEXT_SECONDARY,
+                                                format!("{} Device:", icon::CPU),
+                                            );
+                                            ui.strong(&dev_name);
+                                        });
+                                        ui.add_space(6.0);
+                                        flash_modal_steps(ui, phase);
+                                    });
 
-                            if matches!(phase, FlashPhase::Booting | FlashPhase::Done) {
-                                ui.add_space(8.0);
-                                ui.separator();
-                                if let Some(dev) = self.state.devices.get(&device_id) {
-                                    panels::log_viewer::show(ui, dev, &self.state);
-                                }
-                            }
+                                    // Body: log viewer fills remaining space when shown.
+                                    if show_logs {
+                                        tui.separator();
+                                        tui.style(Style {
+                                            flex_grow: 1.0,
+                                            min_size: Size {
+                                                width: auto(),
+                                                height: length(0.0),
+                                            },
+                                            ..Default::default()
+                                        })
+                                        .ui(|ui| {
+                                            if let Some(dev) =
+                                                self.state.devices.get(&device_id)
+                                            {
+                                                panels::log_viewer::show(ui, dev, &self.state);
+                                            }
+                                        });
+                                    } else {
+                                        tui.style(Style {
+                                            flex_grow: 1.0,
+                                            ..Default::default()
+                                        })
+                                        .add_empty();
+                                    }
+
+                                    // Footer: cancel / close button, right-aligned.
+                                    tui.separator();
+                                    tui.style(Style {
+                                        display: Display::Flex,
+                                        flex_direction: FlexDirection::Row,
+                                        align_items: Some(AlignItems::Center),
+                                        flex_shrink: 0.0,
+                                        padding: length(4.0),
+                                        ..Default::default()
+                                    })
+                                    .add(|tui| {
+                                        tui.style(Style {
+                                            flex_grow: 1.0,
+                                            ..Default::default()
+                                        })
+                                        .add_empty();
+                                        let label =
+                                            if phase_terminal { "Close" } else { "Cancel" };
+                                        if tui.ui_add(egui::Button::new(label)).clicked() {
+                                            close = true;
+                                        }
+                                    });
+                                });
                         }
                     }
                 });
-
-            // Check for close signal from the flash steps close button.
-            let steps_close = ctx.memory(|mem| {
-                mem.data
-                    .get_temp::<bool>(egui::Id::new("flash_modal_close"))
-                    .unwrap_or(false)
-            });
-            if steps_close {
-                ctx.memory_mut(|mem| mem.data.remove::<bool>(egui::Id::new("flash_modal_close")));
-                close = true;
-            }
 
             if close {
                 self.state.flash_modal = None;
@@ -537,11 +648,12 @@ fn activity_button(
 /// Render the flash progress steps inside the modal.
 fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
     // Step index for the current phase.
-    let step = match phase {
-        FlashPhase::Resetting | FlashPhase::WaitingForReset => 0,
-        FlashPhase::Writing { .. } => 1,
-        FlashPhase::Booting => 2,
-        FlashPhase::Done | FlashPhase::Failed(_) => 3,
+    let (step, failed) = match phase {
+        FlashPhase::Resetting | FlashPhase::WaitingForReset => (0, false),
+        FlashPhase::Writing { .. } => (1, false),
+        FlashPhase::Booting => (2, false),
+        FlashPhase::Done => (3, false),
+        FlashPhase::Failed { at_step, .. } => (*at_step, true),
     };
 
     let step0_label = match phase {
@@ -556,6 +668,11 @@ fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
             ui.horizontal(|ui| {
                 ui.colored_label(theme::INFO, icon::CHECK_CIRCLE);
                 ui.colored_label(theme::INFO, *label);
+            });
+        } else if i == step && failed {
+            ui.horizontal(|ui| {
+                ui.colored_label(theme::ERROR, icon::X_CIRCLE);
+                ui.colored_label(theme::ERROR, *label);
             });
         } else if i == step {
             ui.horizontal(|ui| {
@@ -575,7 +692,7 @@ fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
             ui.horizontal(|ui| {
                 ui.add_space(24.0);
                 ui.colored_label(
-                    theme::TEXT_DIM,
+                    theme::ERROR,
                     "Couldn't auto-reset — please reset your device.",
                 );
             });
@@ -615,31 +732,10 @@ fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
             ui.add_space(4.0);
             ui.colored_label(theme::INFO, "Complete!");
         }
-        FlashPhase::Failed(err) => {
+        FlashPhase::Failed { message, .. } => {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.colored_label(theme::ERROR, icon::X_CIRCLE);
-                ui.colored_label(theme::ERROR, "Failed");
-            });
-            ui.add_space(4.0);
-            ui.colored_label(theme::ERROR, err);
+            ui.colored_label(theme::ERROR, message);
         }
         _ => {}
-    }
-
-    // Close button on terminal states.
-    if matches!(phase, FlashPhase::Done | FlashPhase::Failed(_)) {
-        ui.add_space(8.0);
-        // Can't close here directly (no &mut to flash_modal). We'll use
-        // a memory flag that the caller checks.
-        // Actually — we return and the caller handles close via the
-        // window's close button. But let's add an explicit button.
-        // We need to signal close to the caller. Use ui.memory.
-        if ui.button("Close").clicked() {
-            ui.memory_mut(|mem| {
-                mem.data
-                    .insert_temp(egui::Id::new("flash_modal_close"), true)
-            });
-        }
     }
 }

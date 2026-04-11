@@ -8,7 +8,9 @@ use syn::parse_macro_input;
 
 mod client;
 mod lease;
+mod metadata_json;
 mod parse;
+mod section;
 mod server;
 mod server_macro;
 mod transfer;
@@ -66,6 +68,9 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let constants = gen_constants(trait_name, &attrs);
     let wiring_macro = gen_wiring_macro(trait_name, &methods);
 
+    let meta_json = metadata_json::resource_record(trait_name, &methods, &attrs, false);
+    let meta_section = section::emit(&trait_name.to_string(), &meta_json);
+
     let output = quote! {
         #server_trait
         #op_enum
@@ -73,6 +78,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
         #client
         #constants
         #wiring_macro
+        #meta_section
     };
 
     output.into()
@@ -104,10 +110,14 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
     let op_enum = gen_operation_enum(trait_name, &methods, &attrs);
     let client = gen_dyn_client(trait_name, &methods, &attrs);
 
+    let meta_json = metadata_json::resource_record(trait_name, &methods, &attrs, true);
+    let meta_section = section::emit(&trait_name.to_string(), &meta_json);
+
     let output = quote! {
         #server_trait
         #op_enum
         #client
+        #meta_section
     };
 
     output.into()

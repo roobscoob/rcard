@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use crate::codegen::CodegenError;
 use crate::compile::CompileError;
 use crate::config::{AppConfig, ConfigError};
+use crate::ipc_metadata::IpcMetadataError;
 use crate::layout::{Layout, LayoutError};
 use crate::link::LinkError;
 use crate::linker::LinkerError;
@@ -22,6 +23,7 @@ pub enum Stage {
     Codegen,
     Compile,
     LogMetadata,
+    IpcMetadata,
     Link,
     Pack,
 }
@@ -43,6 +45,8 @@ pub struct MemSegment {
     pub memory: String,
     /// Owner task name, or "(unused)" for free space.
     pub owner: String,
+    /// Region name within the owner (e.g. "text", "data"). None for unused.
+    pub region: Option<String>,
     /// CPU base address.
     pub base: u64,
     /// Size in bytes.
@@ -119,6 +123,7 @@ pub fn build(
     let img_dir = work_dir.join("img");
     let meta_dir = work_dir.join("log_meta");
     let log_metadata_path = work_dir.join("log-metadata.json");
+    let ipc_metadata_path = work_dir.join("ipc-metadata.json");
     let config_json_path = work_dir.join("config.json");
 
     // 1. Config
@@ -170,6 +175,13 @@ pub fn build(
     crate::log_metadata::emit(&log_bundle, &log_metadata_path)
         .map_err(BuildError::Metadata)?;
 
+    // 6b. IPC metadata — scrape `.ipc_meta` sections from task ELFs.
+    emit(BuildEvent::StageStart { stage: Stage::IpcMetadata });
+    let ipc_bundle = crate::ipc_metadata::scrape(&artifacts)
+        .map_err(BuildError::IpcMetadata)?;
+    crate::ipc_metadata::emit(&ipc_bundle, &ipc_metadata_path)
+        .map_err(BuildError::IpcMetadata)?;
+
     // 7. Link
     emit(BuildEvent::StageStart { stage: Stage::Link });
     let final_bin = crate::link::link_image(&artifacts, &config, &layout, &img_dir)
@@ -206,6 +218,7 @@ pub fn build(
         &config, &artifacts, &final_bin,
         bootloader_bin.as_deref(),
         Some(&log_metadata_path),
+        Some(&ipc_metadata_path),
         Some(&build_meta),
         out_path,
     ).map_err(BuildError::Pack)?;
@@ -245,20 +258,21 @@ fn compute_segments(config: &AppConfig, layout: &Layout) -> Vec<MemSegment> {
         }
 
         // Collect allocations that fall within this place.
-        let mut allocs: Vec<(&str, &crate::layout::Allocation)> = layout
+        let mut allocs: Vec<(&str, &str, &crate::layout::Allocation)> = layout
             .placed
             .iter()
             .filter(|(_, a)| a.base >= cpu_base && a.base < cpu_end)
-            .map(|((owner, _region), a)| (owner.as_str(), a))
+            .map(|((owner, region), a)| (owner.as_str(), region.as_str(), a))
             .collect();
-        allocs.sort_by_key(|(_, a)| a.base);
+        allocs.sort_by_key(|(_, _, a)| a.base);
 
         let mut cursor = cpu_base;
-        for (owner, alloc) in &allocs {
+        for (owner, region, alloc) in &allocs {
             let lost = alloc.base - cursor;
             segments.push(MemSegment {
                 memory: place_name.clone(),
                 owner: owner.to_string(),
+                region: Some(region.to_string()),
                 base: alloc.base,
                 size: alloc.size,
                 lost,
@@ -272,6 +286,7 @@ fn compute_segments(config: &AppConfig, layout: &Layout) -> Vec<MemSegment> {
             segments.push(MemSegment {
                 memory: place_name.clone(),
                 owner: "(unused)".to_string(),
+                region: None,
                 base: cursor,
                 size: remaining,
                 lost: 0,
@@ -298,6 +313,8 @@ pub enum BuildError {
     Compile(#[from] CompileError),
     #[error("metadata: {0}")]
     Metadata(#[from] MetadataError),
+    #[error("ipc metadata: {0}")]
+    IpcMetadata(#[from] IpcMetadataError),
     #[error("link: {0}")]
     Link(#[from] LinkError),
     #[error("pack: {0}")]

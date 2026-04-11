@@ -2,6 +2,32 @@ pub mod error;
 pub mod fob_reader;
 pub mod ipc;
 
+use std::time::Duration;
+
+/// Poll for a USB device with the rcard VID/PID whose serial number
+/// matches `serial` (case-insensitive). Returns `true` on match, `false`
+/// on timeout. Polls every 200ms.
+pub async fn wait_for_serial(serial: &str, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(devices) = nusb::list_devices() {
+            let found = devices.into_iter().any(|d| {
+                d.vendor_id() == USB_VID
+                    && d.product_id() == USB_PID
+                    && d.serial_number()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(serial))
+            });
+            if found {
+                return true;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 

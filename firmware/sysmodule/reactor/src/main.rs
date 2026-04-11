@@ -147,17 +147,14 @@ fn gc(state: &mut State) {
 
 /// Post NOTIFICATION_BIT to all subscribers of a group via sys_post.
 ///
-/// TODO: This uses generation 0 to construct the TaskId. If a subscriber task
-/// has been restarted (generation incremented), sys_post will return TaskDeath
-/// and the notification will be silently lost. There is no kernel API to look up
-/// the current generation for a task index. To fix this properly, the subscriber
-/// registration should store the full TaskId (including generation) so that
-/// notify can use the correct generation, or the subscriber should re-register
-/// after restart.
+/// Starts at generation 0 and, on `TaskDeath`, retries once with the live
+/// generation the kernel handed back. One syscall in the happy path.
 fn notify_subscribers(group_id: u16) {
     for &task_idx in notifications::group_subscribers(group_id) {
         let tid = userlib::TaskId::gen0(task_idx);
-        let _ = userlib::sys_post(tid, NOTIFICATION_BIT);
+        if let Err(dead) = userlib::sys_post(tid, NOTIFICATION_BIT) {
+            let _ = userlib::sys_post(tid.with_generation(dead.new_generation()), NOTIFICATION_BIT);
+        }
     }
 }
 

@@ -198,6 +198,11 @@ pub struct Gen(u8);
 impl Gen {
     /// The starting generation for tasks, in `const` form.
     pub const DEFAULT: Self = Self(0);
+
+    /// The raw generation byte, as carried in the upper bits of a `TaskId`.
+    pub const fn as_u8(self) -> u8 {
+        self.0
+    }
 }
 
 /// A reference to memory being loaned to the recipient of an IPC.

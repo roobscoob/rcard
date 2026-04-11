@@ -30,6 +30,12 @@ pub struct AppConfig {
     pub notifications: BTreeMap<String, NotificationGroup>,
     #[serde(default)]
     pub filesystems: BTreeMap<String, FilesystemConfig>,
+    /// App-level ACL exception: tasks listed here are permitted to send to
+    /// any other task, independent of `depends_on` edges. Used for
+    /// privileged dispatchers whose call set cannot be expressed in the
+    /// dependency graph.
+    #[serde(default)]
+    pub trusted_senders: Vec<TaskConfig>,
 
     /// Boot config — where to write the ftab and firmware in the flash image.
     #[serde(default)]

@@ -27,14 +27,26 @@ fn main() {
         "boards/bentoboard.ncl",
         "layouts/ramboot.ncl",
         &stub_tfw,
-        Some(&|event| {
-            if let tfw::build::BuildEvent::CargoMessage(msg) = &event {
+        Some(&|event| match &event {
+            tfw::build::BuildEvent::CargoMessage(msg) => {
                 if let Ok(decoded) = msg.decode() {
                     if let escargot::format::Message::CompilerMessage(cm) = decoded {
-                        eprintln!("{}", cm.message.message);
+                        // Prefer the fully-rendered compiler output (with
+                        // file/line/span/help text) so build.rs panics
+                        // surface usable diagnostics. Fall back to the
+                        // short message if rendering is unavailable.
+                        if let Some(rendered) = &cm.message.rendered {
+                            eprint!("{rendered}");
+                        } else {
+                            eprintln!("{}", cm.message.message);
+                        }
                     }
                 }
             }
+            tfw::build::BuildEvent::RegionMeasured { task, region, size } => {
+                eprintln!("[size] {task}.{region} = {size} bytes");
+            }
+            _ => {}
         }),
         Some(&stub_work),
     )

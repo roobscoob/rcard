@@ -13,6 +13,8 @@ once-cell = { path = "../../modules/once_cell" }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_log_api = { path = "../log/api" }
+sysmodule_reactor_api = { path = "../reactor/api" }
+sysmodule_host_transport_api = { path = "../host_transport/api" }
 sysmodule_usb_api = { path = "../usb/api" }
 sysmodule_usb_protocol_api = { path = "../usb_protocol/api" }
 rcard-usb-proto = { path = "../../../shared/usb-proto" }

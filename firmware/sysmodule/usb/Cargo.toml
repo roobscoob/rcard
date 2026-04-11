@@ -15,6 +15,7 @@ sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
+sysmodule_reactor_api = { path = "../reactor/api" }
 sysmodule_usb_api = { path = "api" }
 usb-device = "0.3"
 userlib.workspace = true

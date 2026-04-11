@@ -1,6 +1,7 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
@@ -8,6 +9,40 @@ use tokio::sync::mpsc;
 
 use super::frame::Frame;
 use super::protocol::{Command, Error, Response};
+
+/// Writer adapter that counts bytes handed to `poll_write`.
+///
+/// Used to drive a fine-grained flash progress bar: the observer task
+/// samples the counter while a long `mem_write` is in flight.
+struct ProgressWriter<W> {
+    inner: W,
+    counter: Arc<AtomicU64>,
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for ProgressWriter<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &result {
+            this.counter.fetch_add(*n as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_shutdown(cx)
+    }
+}
 
 /// Control messages to the background read loop.
 enum TapControl {
@@ -30,6 +65,11 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let byte_counter = Arc::new(AtomicU64::new(0));
+    let writer = ProgressWriter {
+        inner: writer,
+        counter: byte_counter.clone(),
+    };
     let writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>> =
         Arc::new(tokio::sync::Mutex::new(Box::new(writer)));
     let (passthrough_tx, passthrough_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -42,6 +82,7 @@ where
         writer: writer.clone(),
         frame_rx: tokio::sync::Mutex::new(frame_rx),
         control_tx,
+        byte_counter,
     };
     let tap_reader = TapReader {
         rx: passthrough_rx,
@@ -204,6 +245,17 @@ pub struct DebugHandle {
     writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
     frame_rx: tokio::sync::Mutex<mpsc::Receiver<Frame>>,
     control_tx: mpsc::Sender<TapControl>,
+    byte_counter: Arc<AtomicU64>,
+}
+
+impl DebugHandle {
+    /// Shared atomic counter of bytes written to the underlying writer.
+    ///
+    /// Monotonically increasing; sample with `load(Ordering::Relaxed)` to
+    /// drive a fine-grained progress bar during long writes.
+    pub fn byte_counter(&self) -> Arc<AtomicU64> {
+        self.byte_counter.clone()
+    }
 }
 
 /// Send a command and wait for the response.
@@ -272,18 +324,29 @@ impl DebugHandle {
         Ok(())
     }
 
-    /// Put the tap into sentinel-resync mode.
+    /// Put the tap into sentinel-resync mode with a timeout.
     ///
     /// The tap discards frame parser state and starts forwarding every
     /// received byte as passthrough noise while matching a rolling window
-    /// against `sentinel`. Returns once the sentinel is found on the wire.
+    /// against `sentinel`. Returns Ok once the sentinel is found on the
+    /// wire, or `Error::Timeout` if `timeout` elapses first.
     ///
-    /// Any stale frames left in the receive channel are drained before
-    /// returning, so the next `request()` call sees a clean slate.
+    /// On timeout the tap is **left in resync mode** — when the sentinel
+    /// eventually arrives (e.g. user manually resets the device), the
+    /// sub-loop completes and the tap returns to normal framing on its
+    /// own. The bridge can keep reading bytes via the passthrough path
+    /// in the meantime.
+    ///
+    /// Either way, any stale frames in the receive channel are drained
+    /// before returning so the next `request()` call sees a clean slate.
     ///
     /// Use this after issuing a command that disrupts normal framing
     /// (e.g. a soft reset that cuts the device's response mid-frame).
-    pub async fn resync_on_sentinel(&self, sentinel: Vec<u8>) -> Result<(), Error> {
+    pub async fn resync_on_sentinel(
+        &self,
+        sentinel: Vec<u8>,
+        timeout: std::time::Duration,
+    ) -> Result<(), Error> {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         self.control_tx
             .send(TapControl::ResyncOnSentinel {
@@ -292,13 +355,24 @@ impl DebugHandle {
             })
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "tap closed"))?;
-        done_rx
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "tap closed"))?;
-        // Drain any stale frames that were routed before/during resync.
-        let mut rx = self.frame_rx.lock().await;
-        while rx.try_recv().is_ok() {}
-        Ok(())
+
+        let result = tokio::time::timeout(timeout, done_rx).await;
+
+        // Drain stale frames regardless of success/timeout. While the tap
+        // is in resync mode no new frames are routed, so this drain is
+        // safe even if the sentinel hasn't arrived yet.
+        {
+            let mut rx = self.frame_rx.lock().await;
+            while rx.try_recv().is_ok() {}
+        }
+
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "tap closed").into())
+            }
+            Err(_) => Err(Error::Timeout),
+        }
     }
 }
 

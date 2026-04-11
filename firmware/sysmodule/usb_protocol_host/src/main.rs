@@ -1,49 +1,69 @@
 #![no_std]
 #![no_main]
 
+use generated::notifications;
+use generated::peers::PEERS;
 use generated::slots::SLOTS;
-use once_cell::GlobalState;
-use rcard_log::{error, info, warn, ResultExt};
-use rcard_usb_proto::ipc_request::LeaseKind;
+use once_cell::{GlobalState, OnceCell};
+use rcard_log::{error, info, warn, OptionExt, ResultExt};
+use sysmodule_host_transport_api::*;
 use sysmodule_usb_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
-sysmodule_log_api::panic_handler!(to Log);
+sysmodule_log_api::panic_handler!(to Log; cleanup Reactor);
+sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
 sysmodule_usb_api::bind_usb_endpoint!(UsbEndpoint = SLOTS.sysmodule_usb);
 sysmodule_usb_protocol_api::bind_usb_protocol_manager!(
     UsbProtocolManager = SLOTS.sysmodule_usb_protocol
 );
 
-const LEASE_POOL_SIZE: usize = rcard_usb_proto::LEASE_POOL_SIZE;
-const MAX_MESSAGE: usize = 256;
-const MAX_LEASES: usize = 4;
+use sysmodule_reactor_api::OverflowStrategy;
+
+const MAX_FRAME: usize = 8704;
 
 // ---------------------------------------------------------------------------
-// Static buffers
+// Pending request staging
 //
-// The tunnel is synchronous — one IPC request at a time. These statics
-// are only accessed from handle_request(), which is never reentrant.
+// The host protocol is strictly synchronous request-response: the host
+// will not send request N+1 until it has received the reply to N. So we
+// only ever need one staged request at a time. `handle_usb_event` stashes
+// the next frame here and signals `host_proxy` via the `host_request`
+// notification group. `fetch_pending_request` copies it out, and
+// `deliver_reply` clears the slot.
 // ---------------------------------------------------------------------------
 
-/// Lease data pool. Before sys_send, Read/ReadWrite data is copied in.
-/// After sys_send, Write/ReadWrite regions contain the server's writeback.
-static POOL: GlobalState<[u8; LEASE_POOL_SIZE]> = GlobalState::new([0u8; LEASE_POOL_SIZE]);
+struct PendingRequest {
+    buf: [u8; MAX_FRAME],
+    len: usize,
+    /// `true` between stage() and deliver_reply()'s clear.
+    set: bool,
+}
 
-/// Staging area for the writeback data that the IpcReply encoder needs
-/// as a single contiguous slice.
-static WRITEBACK: GlobalState<[u8; LEASE_POOL_SIZE]> = GlobalState::new([0u8; LEASE_POOL_SIZE]);
+static PENDING: GlobalState<PendingRequest> = GlobalState::new(PendingRequest {
+    buf: [0u8; MAX_FRAME],
+    len: 0,
+    set: false,
+});
 
-/// Frame encoding buffer.
-/// Max frame: header(5) + rc(4) + reply_len(1) + return_value(256) + writeback(8192) = 8458.
-static FRAME_BUF: GlobalState<[u8; 8704]> = GlobalState::new([0u8; 8704]);
+// ---------------------------------------------------------------------------
+// Endpoints + frame reader
+// ---------------------------------------------------------------------------
+
+static EP_OUT: OnceCell<UsbEndpoint> = OnceCell::new();
+static EP_IN: OnceCell<UsbEndpoint> = OnceCell::new();
+
+/// Frame reader buffer. Persists across notification wakes so partial
+/// frames received in one wake can be completed in a later wake.
+static READER: GlobalState<rcard_usb_proto::FrameReader<4096>> =
+    GlobalState::new(rcard_usb_proto::FrameReader::new());
 
 // ---------------------------------------------------------------------------
 // USB write helper
 // ---------------------------------------------------------------------------
 
-fn write_usb(ep_in: &UsbEndpoint, data: &[u8]) {
+fn write_usb(ep_in: &UsbEndpoint, data: &[u8]) -> Result<(), HostTransportError> {
     let mut offset = 0;
     while offset < data.len() {
         let end = (offset + 64).min(data.len());
@@ -52,227 +72,219 @@ fn write_usb(ep_in: &UsbEndpoint, data: &[u8]) {
             Ok(Err(UsbError::EndpointBusy)) => continue,
             Ok(Err(e)) => {
                 error!("USB write: {}", e);
-                return;
+                return Err(HostTransportError::WireWriteFailed);
             }
             Err(e) => {
                 error!("USB IPC: {}", e);
-                return;
+                return Err(HostTransportError::WireWriteFailed);
             }
         }
     }
+    Ok(())
 }
 
-fn send_tunnel_error(seq: u16, code: rcard_usb_proto::messages::TunnelErrorCode, ep: &UsbEndpoint) {
+// ---------------------------------------------------------------------------
+// HostTransport server implementation
+// ---------------------------------------------------------------------------
+
+struct HostTransportImpl;
+
+impl HostTransport for HostTransportImpl {
+    fn fetch_pending_request(
+        _meta: ipc::Meta,
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
+    ) -> Result<u32, HostTransportError> {
+        PENDING
+            .with(|p| {
+                if !p.set {
+                    return Err(HostTransportError::NoPendingRequest);
+                }
+                if buf.len() < p.len {
+                    return Err(HostTransportError::LeaseTooSmall);
+                }
+                for (i, &b) in p.buf[..p.len].iter().enumerate() {
+                    let _ = buf.write(i, b);
+                }
+                Ok(p.len as u32)
+            })
+            .unwrap_or(Err(HostTransportError::NoPendingRequest))
+    }
+
+    fn deliver_reply(
+        _meta: ipc::Meta,
+        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+    ) -> Result<(), HostTransportError>
+    {
+        let Some(ep_in) = EP_IN.get() else {
+            return Err(HostTransportError::WireWriteFailed);
+        };
+
+        // Copy the read-lease into a local buffer. Bulk-read it in one
+        // shot to keep the ep.write() path outside the lease borrow.
+        let len = buf.len();
+        let mut local = [0u8; MAX_FRAME];
+        if len > local.len() {
+            return Err(HostTransportError::LeaseTooSmall);
+        }
+        let _ = buf.read_range(0, &mut local[..len]);
+
+        let result = write_usb(ep_in, &local[..len]);
+
+        // Always clear the pending slot even if USB write failed — the
+        // dispatch is complete from host_proxy's perspective.
+        PENDING
+            .with(|p| {
+                p.set = false;
+                p.len = 0;
+            })
+            .log_unwrap();
+
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Notification handler: drain USB, stage frames, wake host_proxy
+// ---------------------------------------------------------------------------
+
+/// True iff this firmware build includes a `sysmodule_host_proxy` task.
+/// When false, the transport accepts and drains USB OUT, but immediately
+/// replies with `NoHostForwarding` to any `IpcRequest` instead of staging
+/// it. Resolved at codegen time from the `peers` table — host_proxy is
+/// declared as a peer in this task's `task.ncl` purely for this check.
+const HOST_FORWARDING_AVAILABLE: bool = PEERS.sysmodule_host_proxy.is_some();
+
+/// Encode and write a `TunnelError` frame straight to EP IN. Used both for
+/// no-host-forwarding NACKs and for malformed-request rejects.
+fn write_tunnel_error(
+    ep_in: &UsbEndpoint,
+    seq: u16,
+    code: rcard_usb_proto::messages::TunnelErrorCode,
+) {
     let msg = rcard_usb_proto::messages::TunnelError { code };
     let mut buf = [0u8; 16];
     if let Some(n) = rcard_usb_proto::simple::encode_simple(&msg, &mut buf, seq) {
-        write_usb(ep, &buf[..n]);
+        let _ = write_usb(ep_in, &buf[..n]);
     }
 }
 
-// ---------------------------------------------------------------------------
-// IPC tunnel core
-// ---------------------------------------------------------------------------
+#[ipc::notification_handler(usb_event)]
+fn handle_usb_event(_sender: u16, _code: u32) {
+    let Some(ep_out) = EP_OUT.get() else { return };
 
-/// Per-lease bookkeeping — records where each lease lives in the pool
-/// so we can find it again after sys_send for writeback.
-struct LeaseSlot {
-    kind: LeaseKind,
-    offset: usize,
-    length: usize,
-}
-
-fn handle_request(
-    view: &rcard_usb_proto::IpcRequestView<'_>,
-    request_seq: u16,
-    ep_in: &UsbEndpoint,
-) {
-    let target = ipc::kern::TaskId::from(view.task_id);
-    let opcode = ipc::opcode(view.resource_kind, view.method);
-    let lease_count = view.lease_count().min(MAX_LEASES);
-
-    // ── 1. Copy args to stack ───────────────────────────────────────
-    //
-    // IPC args wire format:
-    //   Constructor/static: [param0][param1]...  (zerocopy, sequential)
-    //   Instance method:    [handle:u64][param0][param1]...
-    //
-    // The host constructs args in exactly this format. We forward
-    // verbatim — the target server's dispatcher deserializes them.
-
-    let mut args = [0u8; MAX_MESSAGE];
-    let args_data = view.args();
-    let args_len = args_data.len().min(MAX_MESSAGE);
-    args[..args_len].copy_from_slice(&args_data[..args_len]);
-
-    // ── 2. Populate lease pool ──────────────────────────────────────
-    //
-    // Walk the lease descriptors and record each lease's position.
-    // Copy Read/ReadWrite data from the USB frame into the pool.
-    // Write lease regions are zeroed (server fills them via sys_borrow_write).
-
-    let mut slots: [LeaseSlot; MAX_LEASES] = [
-        LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
-        LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
-        LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
-        LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
-    ];
-    let mut pool_end = 0usize;
-
-    let pool_ok = POOL.with(|pool| {
-        for i in 0..lease_count {
-            let Some(desc) = view.lease(i) else { return false };
-            let len = desc.length as usize;
-
-            if pool_end + len > LEASE_POOL_SIZE {
-                return false;
-            }
-
-            slots[i] = LeaseSlot {
-                kind: desc.kind,
-                offset: pool_end,
-                length: len,
-            };
-
-            if desc.kind.has_request_data() {
-                if let Some(data) = view.lease_data(i) {
-                    pool[pool_end..pool_end + data.len()].copy_from_slice(data);
-                }
-            } else {
-                // Zero the Write lease region.
-                for b in &mut pool[pool_end..pool_end + len] {
-                    *b = 0;
-                }
-            }
-
-            pool_end += len;
-        }
-        true
-    });
-
-    if pool_ok != Some(true) {
-        send_tunnel_error(request_seq, rcard_usb_proto::messages::TunnelErrorCode::LeasePoolFull, ep_in);
+    // If host_proxy hasn't consumed the previous request yet, don't drain
+    // further USB bytes into the reader. The protocol is synchronous so
+    // the host won't send more anyway, and this keeps backpressure clean.
+    let busy = PENDING.with(|p| p.set).unwrap_or(false);
+    if busy {
         return;
     }
 
-    // ── 3. Build leases and call sys_send ───────────────────────────
-    //
-    // The pool is split into non-overlapping regions via split_at_mut.
-    // Each region becomes a Lease with the correct access mode.
-    //
-    // The Lease<'a> lifetime ties to the pool borrow. After sys_send
-    // returns, leases go out of scope (end of the block), releasing
-    // the borrow. The pool can then be read for writeback.
-    //
-    // sys_send wire format:
-    //   target:    TaskId (packed u16: 10-bit index + 6-bit generation)
-    //   operation: u16 = (resource_kind << 8) | method
-    //   outgoing:  &[u8] — the args buffer
-    //   incoming:  &mut [u8] — reply buffer, kernel writes server's reply here
-    //   leases:    &mut [Lease] — memory regions the server can borrow
-    //
-    // Returns Ok((ResponseCode, reply_len)) or Err(TaskDeath).
-    //
-    // Reply body format (written by server into incoming buf):
-    //   [tag: u8]  0 = Ok, 1 = Err(ipc::Error)
-    //   [payload]  return value (Ok) or ipc::Error byte (Err)
-    //
-    // ResponseCode::SUCCESS (0) = normal reply.
-    // Non-zero rc (ACCESS_VIOLATION=2, MALFORMED_MESSAGE=1) = server
-    //   rejected the message. Reply body may be empty (len=0).
-
-    let mut reply_buf = [0u8; MAX_MESSAGE];
-
-    let send_result = POOL.with(|pool| {
-        let mut remaining = &mut pool[..pool_end];
-        let mut leases: [ipc::kern::Lease; MAX_LEASES] = [
-            ipc::kern::Lease::no_access(&[]),
-            ipc::kern::Lease::no_access(&[]),
-            ipc::kern::Lease::no_access(&[]),
-            ipc::kern::Lease::no_access(&[]),
-        ];
-
-        for i in 0..lease_count {
-            let len = slots[i].length;
-            let (region, rest) = remaining.split_at_mut(len);
-            remaining = rest;
-
-            leases[i] = match slots[i].kind {
-                LeaseKind::Read => ipc::kern::Lease::read_only(&*region),
-                LeaseKind::Write | LeaseKind::ReadWrite => {
-                    ipc::kern::Lease::read_write(region)
-                }
-            };
-        }
-
-        ipc::kern::sys_send(
-            target,
-            opcode,
-            &args[..args_len],
-            &mut reply_buf,
-            &mut leases[..lease_count],
-        )
-        // leases drop here, releasing pool borrows
-    });
-
-    let Some(send_result) = send_result else {
-        send_tunnel_error(request_seq, rcard_usb_proto::messages::TunnelErrorCode::Internal, ep_in);
-        return;
-    };
-
-    // ── 4. Encode reply ─────────────────────────────────────────────
-
-    match send_result {
-        Ok((rc, reply_len)) => {
-            // Collect writeback data from the pool into a contiguous
-            // buffer. Write/ReadWrite regions were modified in-place by
-            // the server via sys_borrow_write — the pool IS the writeback.
-            let wb_len = POOL.with(|pool| {
-                WRITEBACK.with(|wb| {
-                    let mut cursor = 0usize;
-                    for i in 0..lease_count {
-                        if slots[i].kind.has_reply_data() {
-                            let off = slots[i].offset;
-                            let len = slots[i].length;
-                            wb[cursor..cursor + len].copy_from_slice(&pool[off..off + len]);
-                            cursor += len;
-                        }
-                    }
-                    cursor
-                })
-            });
-
-            let Some(wb_len) = wb_len.flatten() else {
-                send_tunnel_error(request_seq, rcard_usb_proto::messages::TunnelErrorCode::Internal, ep_in);
+    // Drain everything currently buffered in EP OUT into the frame reader.
+    let mut usb_buf = [0u8; 64];
+    loop {
+        match ep_out.read(&mut usb_buf) {
+            Ok(Ok(n)) if n > 0 => {
+                READER
+                    .with(|r| r.push(&usb_buf[..n as usize]))
+                    .log_unwrap();
+            }
+            Ok(Err(UsbError::Disconnected)) => {
+                warn!("USB disconnected");
+                READER.with(|r| r.reset()).log_unwrap();
+                PENDING
+                    .with(|p| {
+                        p.set = false;
+                        p.len = 0;
+                    })
+                    .log_unwrap();
                 return;
-            };
+            }
+            _ => break,
+        }
+    }
 
-            // Ensure return_value is at least 1 byte for the wire encoding.
-            // reply_len is normally >= 1 (server sends at least the Ok/Err tag).
-            // For non-SUCCESS rc, reply_len may be 0 — pad with a zero byte.
-            let effective_reply_len = reply_len.max(1);
-
-            WRITEBACK.with(|wb| {
-                FRAME_BUF.with(|frame_buf| {
-                    let reply = rcard_usb_proto::IpcReply {
-                        rc: rc.0,
-                        return_value: &reply_buf[..effective_reply_len],
-                        lease_writeback: &wb[..wb_len],
-                    };
-
-                    if let Some(n) = reply.encode_into(frame_buf, request_seq) {
-                        write_usb(ep_in, &frame_buf[..n]);
+    // Walk the reader for the next complete frame and either stage it
+    // (if host forwarding is available) or NACK it (if not). Stop after
+    // one stage — subsequent frames wait for host_proxy to drain the
+    // current one. NACKs don't gate further frames since there's no
+    // pending state to maintain.
+    let mut staged = false;
+    READER
+        .with(|reader| loop {
+            match reader.next_frame() {
+                Ok(Some(frame)) => {
+                    let size = frame.header.frame_size();
+                    let seq = frame.header.seq;
+                    if frame.as_ipc_request().is_some() {
+                        if !HOST_FORWARDING_AVAILABLE {
+                            // No host_proxy in this build — NACK the request
+                            // immediately and keep draining.
+                            if let Some(ep_in) = EP_IN.get() {
+                                write_tunnel_error(
+                                    ep_in,
+                                    seq,
+                                    rcard_usb_proto::messages::TunnelErrorCode::NoHostForwarding,
+                                );
+                            }
+                            reader.consume(size);
+                            continue;
+                        }
+                        // Copy the frame bytes into PENDING before consuming.
+                        // host_proxy needs the wire-format frame (header
+                        // + payload) so it can re-parse via FrameReader.
+                        let payload_len = frame.payload.len();
+                        let total = rcard_usb_proto::header::HEADER_SIZE + payload_len;
+                        let ok = PENDING
+                            .with(|p| {
+                                if total > p.buf.len() {
+                                    return false;
+                                }
+                                let mut header_buf =
+                                    [0u8; rcard_usb_proto::header::HEADER_SIZE];
+                                frame.header.encode(&mut header_buf);
+                                p.buf[..rcard_usb_proto::header::HEADER_SIZE]
+                                    .copy_from_slice(&header_buf);
+                                p.buf[rcard_usb_proto::header::HEADER_SIZE..total]
+                                    .copy_from_slice(frame.payload);
+                                p.len = total;
+                                p.set = true;
+                                true
+                            })
+                            .unwrap_or(false);
+                        reader.consume(size);
+                        if ok {
+                            staged = true;
+                            return;
+                        }
+                    } else {
+                        warn!("Unexpected frame type on host channel");
+                        reader.consume(size);
                     }
-                });
-            });
-        }
-        Err(_task_death) => {
-            send_tunnel_error(
-                request_seq,
-                rcard_usb_proto::messages::TunnelErrorCode::TaskDead,
-                ep_in,
-            );
-        }
+                }
+                Ok(None) => return,
+                Err(rcard_usb_proto::ReaderError::Oversized { declared_size }) => {
+                    warn!("Oversized frame, skipping");
+                    reader.skip_frame(declared_size);
+                }
+                Err(rcard_usb_proto::ReaderError::Header(_)) => {
+                    error!("Bad frame header, resetting");
+                    reader.reset();
+                    return;
+                }
+            }
+        })
+        .log_unwrap();
+
+    if staged {
+        // Wake host_proxy. Reject strategy: if it somehow can't be queued,
+        // the next usb_event wake will re-push it.
+        let _ = Reactor::push(
+            notifications::GROUP_ID_HOST_REQUEST,
+            0,
+            20,
+            OverflowStrategy::Reject,
+        );
     }
 }
 
@@ -316,66 +328,13 @@ fn main() -> ! {
     .log_expect("EP IN IPC failed")
     .log_expect("EP IN open failed");
 
-    // Poll until USB is configured. Each bus_state() call drives one
-    // round of USB enumeration in the USB sysmodule.
-    info!("Waiting for USB configuration");
-    loop {
-        match UsbProtocolManager::bus_state() {
-            Ok(BusState::Configured) => break,
-            _ => {}
-        }
-    }
+    EP_OUT.set(ep_out).ok();
+    EP_IN.set(ep_in).ok();
 
-    info!("Host tunnel ready");
+    info!("Host tunnel ready, entering notification loop");
 
-    let mut reader = rcard_usb_proto::FrameReader::<4096>::new();
-    let mut usb_buf = [0u8; 64];
-
-    loop {
-        // Poll USB OUT. Each read() call also drives USB polling inside
-        // the USB sysmodule, keeping the bus alive.
-        match ep_out.read(&mut usb_buf) {
-            Ok(Ok(n)) if n > 0 => {
-                reader.push(&usb_buf[..n as usize]);
-            }
-            Ok(Err(UsbError::Disconnected)) => {
-                warn!("USB disconnected");
-                reader.reset();
-                loop {
-                    match UsbProtocolManager::bus_state() {
-                        Ok(BusState::Configured) => break,
-                        _ => {}
-                    }
-                }
-                info!("USB reconnected");
-                continue;
-            }
-            _ => continue,
-        }
-
-        // Drain complete frames.
-        loop {
-            match reader.next_frame() {
-                Ok(Some(frame)) => {
-                    let size = frame.header.frame_size();
-                    if let Some(req) = frame.as_ipc_request() {
-                        handle_request(&req, frame.header.seq, &ep_in);
-                    } else {
-                        warn!("Unexpected frame type on host channel");
-                    }
-                    reader.consume(size);
-                }
-                Ok(None) => break,
-                Err(rcard_usb_proto::ReaderError::Oversized { declared_size }) => {
-                    warn!("Oversized frame, skipping");
-                    reader.skip_frame(declared_size);
-                }
-                Err(rcard_usb_proto::ReaderError::Header(_)) => {
-                    error!("Bad frame header, resetting");
-                    reader.reset();
-                    break;
-                }
-            }
-        }
+    ipc::server! {
+        HostTransport: HostTransportImpl,
+        @notifications(Reactor) => handle_usb_event,
     }
 }

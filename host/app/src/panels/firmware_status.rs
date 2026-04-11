@@ -55,7 +55,11 @@ fn build_info_section(ui: &mut egui::Ui, fw: &FirmwareHandle) {
         ui.colored_label(theme::TEXT_SECONDARY, "No build metadata (older archive)");
     }
 
-    info_row(ui, icon::FILE, "File", &fw.path.display().to_string());
+    let file_label = match &fw.path {
+        Some(p) => p.display().to_string(),
+        None => "(builtin)".to_string(),
+    };
+    info_row(ui, icon::FILE, "File", &file_label);
 }
 
 // ── Place Usage ─────────────────────────────────────────────────────────

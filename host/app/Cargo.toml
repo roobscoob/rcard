@@ -10,6 +10,7 @@ egui_tiles = "0.12"
 egui_extras = "0.31"
 egui_ltreeview = "0.1.10"
 egui-phosphor = "0.9"
+egui_taffy = "0.7"
 escargot = "0.5"
 rfd = "0.15"
 crossbeam-channel = "0.5"
@@ -19,10 +20,16 @@ usb = { path = "../usb" }
 emulator = { path = "../emulator" }
 tfw = { path = "../tfw" }
 rcard-log = { path = "../../shared/log", features = ["alloc"] }
+rcard-usb-proto = { path = "../../shared/usb-proto" }
 rcard-places = { path = "../../shared/places", features = ["std"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+serialport = { version = "4", features = ["serde", "usbportinfo-interface"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+uuid = "1"
 
 [build-dependencies]
 tfw = { path = "../tfw" }

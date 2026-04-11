@@ -68,6 +68,7 @@ fn short(name: &str) -> &str {
 
 struct LayoutEntry {
     owner: String,
+    region: Option<String>,
     color: Rgb,
     left: usize,   // char column start
     right: usize,  // char column end (exclusive)
@@ -76,8 +77,13 @@ struct LayoutEntry {
     base: u64,
 }
 
+fn shade(c: Rgb) -> Rgb {
+    let f = |v: u8| ((v as f32) * 0.65) as u8;
+    (f(c.0), f(c.1), f(c.2))
+}
+
 fn compute_layout(
-    segs: &[(String, u64, u64, u64)], // (owner, base, size, lost)
+    segs: &[(String, Option<String>, u64, u64, u64)], // (owner, region, base, size, lost)
     colors: &BTreeMap<String, Rgb>,
     width: usize,
 ) -> Vec<LayoutEntry> {
@@ -86,7 +92,7 @@ fn compute_layout(
 
     let min_ch = 1usize;
     let remainder = width.saturating_sub(min_ch * n);
-    let sizes: Vec<u64> = segs.iter().map(|(_, _, sz, _)| *sz).collect();
+    let sizes: Vec<u64> = segs.iter().map(|(_, _, _, sz, _)| *sz).collect();
     let total: u64 = sizes.iter().sum();
 
     let extra: Vec<usize> = if total == 0 {
@@ -112,11 +118,14 @@ fn compute_layout(
 
     let mut result = Vec::with_capacity(n);
     let mut cursor = 0;
-    for (i, (owner, base, size, lost)) in segs.iter().enumerate() {
-        let c = colors.get(owner.as_str()).copied().unwrap_or((140, 140, 140));
+    for (i, (owner, region, base, size, lost)) in segs.iter().enumerate() {
+        let base_c = colors.get(owner.as_str()).copied().unwrap_or((140, 140, 140));
+        // Alternate light/dark shade so adjacent segments (especially same-owner) contrast.
+        let c = if owner == "(unused)" || i % 2 == 0 { base_c } else { shade(base_c) };
         let w = min_ch + extra[i];
         result.push(LayoutEntry {
             owner: owner.clone(),
+            region: region.clone(),
             color: c,
             left: cursor,
             right: cursor + w,
@@ -195,7 +204,10 @@ fn build_label_rows(layout: &[LayoutEntry], width: usize) -> Vec<String> {
     for &idx in &by_base {
         let entry = &layout[idx];
         let name = format!(" {}", short(&entry.owner));
-        let size_str = format!(" {}", fmt_size(entry.size));
+        let size_str = match &entry.region {
+            Some(r) => format!(" {} {}", r, fmt_size(entry.size)),
+            None => format!(" {}", fmt_size(entry.size)),
+        };
         let text_w = name.len().max(size_str.len());
         let padded_name = format!("{:<width$}", name, width = text_w);
         let padded_size = format!("{:<width$}", size_str, width = text_w);
@@ -287,14 +299,17 @@ fn addr_line(start: u64, end: u64, width: usize) -> String {
 // ── Top-level render ───────────────────────────────────────────────────
 
 fn rightmost_overflow(
-    segs: &[(String, u64, u64, u64)],
+    segs: &[(String, Option<String>, u64, u64, u64)],
     colors: &BTreeMap<String, Rgb>,
     w: usize,
 ) -> usize {
     let layout = compute_layout(segs, colors, w);
     if let Some(last) = layout.last() {
         let name = format!(" {}", short(&last.owner));
-        let sz = format!(" {}", fmt_size(last.size));
+        let sz = match &last.region {
+            Some(r) => format!(" {} {}", r, fmt_size(last.size)),
+            None => format!(" {}", fmt_size(last.size)),
+        };
         let text_w = name.len().max(sz.len());
         let col = last.left.saturating_sub(1);
         (col + text_w).saturating_sub(w)
@@ -310,14 +325,14 @@ pub fn render(segments: &[MemSegment]) {
 
     // Group by memory region, preserving order of first appearance.
     let mut region_order: Vec<String> = Vec::new();
-    let mut by_region: BTreeMap<String, Vec<(String, u64, u64, u64)>> = BTreeMap::new();
+    let mut by_region: BTreeMap<String, Vec<(String, Option<String>, u64, u64, u64)>> = BTreeMap::new();
     for seg in segments {
         if !by_region.contains_key(&seg.memory) {
             region_order.push(seg.memory.clone());
         }
         by_region.entry(seg.memory.clone())
             .or_default()
-            .push((seg.owner.clone(), seg.base, seg.size, seg.lost));
+            .push((seg.owner.clone(), seg.region.clone(), seg.base, seg.size, seg.lost));
     }
 
     let term_w = terminal_size::terminal_size()
@@ -343,9 +358,9 @@ pub fn render(segments: &[MemSegment]) {
     let bar_h = 3;
     for region in &region_order {
         let segs = &by_region[region];
-        let total_size: u64 = segs.iter().map(|(_, _, sz, _)| *sz).sum();
-        let region_start = segs.first().map(|(_, b, _, _)| *b).unwrap_or(0);
-        let region_end = segs.last().map(|(_, b, sz, _)| b + sz).unwrap_or(0);
+        let total_size: u64 = segs.iter().map(|(_, _, _, sz, _)| *sz).sum();
+        let region_start = segs.first().map(|(_, _, b, _, _)| *b).unwrap_or(0);
+        let region_end = segs.last().map(|(_, _, b, sz, _)| b + sz).unwrap_or(0);
 
         eprintln!(
             "  {}  {}  {}",
@@ -370,7 +385,7 @@ pub fn render(segments: &[MemSegment]) {
     let separator_w = w.min(50);
     eprintln!("  {}", dim(&"\u{2500}".repeat(separator_w))); // ─
     let lost_parts: Vec<String> = region_order.iter().map(|region| {
-        let total_lost: u64 = by_region[region].iter().map(|(_, _, _, l)| *l).sum();
+        let total_lost: u64 = by_region[region].iter().map(|(_, _, _, _, l)| *l).sum();
         format!("{} {total_lost} B", region.to_uppercase())
     }).collect();
     eprintln!(

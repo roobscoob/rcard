@@ -5,6 +5,7 @@ pub mod codegen;
 pub mod compile;
 pub mod config;
 pub mod elf_cache;
+pub mod ipc_metadata;
 pub mod layout;
 pub mod link;
 pub mod linker;

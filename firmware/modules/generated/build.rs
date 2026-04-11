@@ -29,6 +29,8 @@ struct Config {
     pin_assignments: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     peers: std::collections::BTreeMap<String, Option<usize>>,
+    #[serde(default)]
+    task_irqs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +81,7 @@ fn main() {
         write_slot_stubs(&out_dir);
         write_peer_stubs(&out_dir);
         write_acl_stubs(&out_dir);
+        write_irq_stubs(&out_dir);
         write_partitions_stubs(&out_dir);
         write_build_info_stubs(&out_dir);
         return;
@@ -92,6 +95,7 @@ fn main() {
     write_slots(&out_dir, &data);
     write_peers(&out_dir, &data);
     write_acl(&out_dir, &data);
+    write_irqs(&out_dir, &data);
     write_partitions(&out_dir, &data);
     write_build_info(&out_dir, &data);
 }
@@ -376,6 +380,42 @@ fn write_acl(out_dir: &PathBuf, config: &Config) {
     writeln!(f, "}}").unwrap();
 }
 
+fn write_irqs(out_dir: &PathBuf, config: &Config) {
+    let path = out_dir.join("irqs.rs");
+    let mut f = std::fs::File::create(&path).unwrap();
+
+    // Per-task IRQ constants. The current task picks its own constants by
+    // matching CARGO_PKG_NAME (mirroring how the acl_check macro resolves the
+    // current crate). Tasks without IRQs get an empty module.
+    writeln!(f, "#[macro_export]").unwrap();
+    writeln!(f, "macro_rules! irq_bit {{").unwrap();
+    for (task_name, irqs) in &config.task_irqs {
+        let arm_name = task_name.replace('-', "_");
+        for (irq_name, bit) in irqs {
+            writeln!(
+                f,
+                "    ({arm_name}, {irq_name}) => {{ {bit}u32 }};"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        f,
+        "    ($pkg:ident, $irq:ident) => {{ compile_error!(concat!(\"unknown IRQ `\", stringify!($irq), \"` for task `\", stringify!($pkg), \"`\")) }};"
+    )
+    .unwrap();
+    writeln!(f, "}}").unwrap();
+}
+
+fn write_irq_stubs(out_dir: &PathBuf) {
+    let path = out_dir.join("irqs.rs");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "#[macro_export]").unwrap();
+    writeln!(f, "macro_rules! irq_bit {{").unwrap();
+    writeln!(f, "    ($pkg:ident, $irq:ident) => {{ 0u32 }};").unwrap();
+    writeln!(f, "}}").unwrap();
+}
+
 fn write_acl_stubs(out_dir: &PathBuf) {
     let path = out_dir.join("acl.rs");
     let mut f = std::fs::File::create(&path).unwrap();
@@ -481,8 +521,14 @@ fn write_build_info(out_dir: &PathBuf, config: &Config) {
     let build_id = config.build_id.as_deref().unwrap_or("unknown");
     let version = config.version.as_deref().unwrap_or("0.0.0");
 
+    let build_id_bytes = uuid::Uuid::parse_str(build_id)
+        .map(|u| *u.as_bytes())
+        .unwrap_or([0u8; 16]);
+    let bytes_literal = format_bytes_array(&build_id_bytes);
+
     writeln!(f, "pub const BUILD_ID: &str = \"{build_id}\";").unwrap();
     writeln!(f, "pub const VERSION: &str = \"{version}\";").unwrap();
+    writeln!(f, "pub const BUILD_ID_BYTES: [u8; 16] = {bytes_literal};").unwrap();
 }
 
 fn write_build_info_stubs(out_dir: &PathBuf) {
@@ -490,4 +536,17 @@ fn write_build_info_stubs(out_dir: &PathBuf) {
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(f, "pub const BUILD_ID: &str = \"unknown\";").unwrap();
     writeln!(f, "pub const VERSION: &str = \"0.0.0\";").unwrap();
+    writeln!(f, "pub const BUILD_ID_BYTES: [u8; 16] = [0; 16];").unwrap();
+}
+
+fn format_bytes_array(bytes: &[u8; 16]) -> String {
+    let mut s = String::from("[");
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&format!("0x{b:02x}"));
+    }
+    s.push(']');
+    s
 }

@@ -1,0 +1,6343 @@
+{
+  "name": "rcard",
+  "version": "0.1.0",
+  "target": "thumbv8m.main-none-eabihf",
+  "vector_table_size": 460,
+  "memory": {
+    "mpi1": {
+      "size": 8388608,
+      "block_size": 1,
+      "mappings": [
+        {
+          "address": 268435456,
+          "size": 8388608,
+          "read": true,
+          "write": true,
+          "execute": true
+        },
+        {
+          "address": 1610612736,
+          "size": 8388608,
+          "read": true,
+          "write": true,
+          "execute": false
+        }
+      ],
+      "offset": null
+    },
+    "mpi2": {
+      "size": 4194304,
+      "block_size": 4096,
+      "mappings": [
+        {
+          "address": 301989888,
+          "size": 234881024,
+          "read": true,
+          "write": false,
+          "execute": true
+        },
+        {
+          "address": 1644167168,
+          "size": 1040187392,
+          "read": true,
+          "write": false,
+          "execute": false
+        }
+      ],
+      "offset": null
+    },
+    "sram_bulk": {
+      "size": 262144,
+      "block_size": null,
+      "mappings": [
+        {
+          "address": 537133056,
+          "size": 262144,
+          "read": true,
+          "write": true,
+          "execute": true
+        }
+      ],
+      "offset": null
+    },
+    "sram_fast": {
+      "size": 131072,
+      "block_size": null,
+      "mappings": [
+        {
+          "address": 537001984,
+          "size": 131072,
+          "read": true,
+          "write": true,
+          "execute": true
+        }
+      ],
+      "offset": null
+    },
+    "sram_fast_dctm": {
+      "size": 131072,
+      "block_size": null,
+      "mappings": [
+        {
+          "address": 536870912,
+          "size": 131072,
+          "read": true,
+          "write": true,
+          "execute": true
+        }
+      ],
+      "offset": null
+    }
+  },
+  "places": {
+    "bootloader": {
+      "size": 16384,
+      "block_size": 4096,
+      "mappings": [
+        {
+          "address": 301989888,
+          "size": 234881024,
+          "read": true,
+          "write": false,
+          "execute": true
+        },
+        {
+          "address": 1644167168,
+          "size": 1040187392,
+          "read": true,
+          "write": false,
+          "execute": false
+        }
+      ],
+      "offset": 20480,
+      "unmapped": false
+    },
+    "framebuf": {
+      "size": 8388608,
+      "block_size": 1,
+      "mappings": [
+        {
+          "address": 268435456,
+          "size": 8388608,
+          "read": true,
+          "write": true,
+          "execute": true
+        },
+        {
+          "address": 1610612736,
+          "size": 8388608,
+          "read": true,
+          "write": true,
+          "execute": false
+        }
+      ],
+      "offset": null,
+      "unmapped": false
+    },
+    "fs_main": {
+      "size": 1048576,
+      "block_size": 4096,
+      "mappings": [
+        {
+          "address": 301989888,
+          "size": 234881024,
+          "read": true,
+          "write": false,
+          "execute": true
+        },
+        {
+          "address": 1644167168,
+          "size": 1040187392,
+          "read": true,
+          "write": false,
+          "execute": false
+        }
+      ],
+      "offset": 1462272,
+      "unmapped": true
+    },
+    "image": {
+      "size": 262144,
+      "block_size": null,
+      "mappings": [
+        {
+          "address": 537133056,
+          "size": 262144,
+          "read": true,
+          "write": true,
+          "execute": true
+        }
+      ],
+      "offset": null,
+      "unmapped": false
+    },
+    "kernel_ram": {
+      "size": 131072,
+      "block_size": null,
+      "mappings": [
+        {
+          "address": 537001984,
+          "size": 131072,
+          "read": true,
+          "write": true,
+          "execute": true
+        }
+      ],
+      "offset": null,
+      "unmapped": false
+    },
+    "logs": {
+      "size": 1048576,
+      "block_size": 4096,
+      "mappings": [
+        {
+          "address": 301989888,
+          "size": 234881024,
+          "read": true,
+          "write": false,
+          "execute": true
+        },
+        {
+          "address": 1644167168,
+          "size": 1040187392,
+          "read": true,
+          "write": false,
+          "execute": false
+        }
+      ],
+      "offset": 413696,
+      "unmapped": true
+    },
+    "sec_config": {
+      "size": 20480,
+      "block_size": 4096,
+      "mappings": [
+        {
+          "address": 301989888,
+          "size": 234881024,
+          "read": true,
+          "write": false,
+          "execute": true
+        },
+        {
+          "address": 1644167168,
+          "size": 1040187392,
+          "read": true,
+          "write": false,
+          "execute": false
+        }
+      ],
+      "offset": 0,
+      "unmapped": false
+    },
+    "task_ram": {
+      "size": 131072,
+      "block_size": null,
+      "mappings": [
+        {
+          "address": 537001984,
+          "size": 131072,
+          "read": true,
+          "write": true,
+          "execute": true
+        }
+      ],
+      "offset": null,
+      "unmapped": false
+    }
+  },
+  "peripheral_map": {
+    "aon_syscon": {
+      "base": 1342963712,
+      "size": 4096,
+      "irqs": {},
+      "renode": {
+        "model": "Miscellaneous.SF32LB52_HPSYS_AON",
+        "properties": {}
+      }
+    },
+    "gpios": {
+      "base": 1342832640,
+      "size": 4096,
+      "irqs": {
+        "irq": 84
+      },
+      "renode": null
+    },
+    "lcdc": {
+      "base": 1342210048,
+      "size": 296,
+      "irqs": {},
+      "renode": {
+        "model": "Display.SF32LB52_LCDC",
+        "properties": {}
+      }
+    },
+    "mpi1": {
+      "base": 1342443520,
+      "size": 4096,
+      "irqs": {},
+      "renode": {
+        "model": "SPI.SF32LB52_MPI",
+        "properties": {}
+      }
+    },
+    "mpi2": {
+      "base": 1342447616,
+      "size": 4096,
+      "irqs": {},
+      "renode": {
+        "model": "SPI.SF32LB52_MPI",
+        "properties": {}
+      }
+    },
+    "pinctrl": {
+      "base": 1342189568,
+      "size": 4096,
+      "irqs": {},
+      "renode": null
+    },
+    "pmuc_syscon": {
+      "base": 1343004672,
+      "size": 4096,
+      "irqs": {},
+      "renode": null
+    },
+    "rcc": {
+      "base": 1342177280,
+      "size": 4096,
+      "irqs": {},
+      "renode": {
+        "model": "Miscellaneous.SF32LB52_HPSYS_RCC",
+        "properties": {}
+      }
+    },
+    "rtc": {
+      "base": 1343008768,
+      "size": 120,
+      "irqs": {},
+      "renode": {
+        "model": "Timers.SF32LB52_RTC",
+        "properties": {}
+      }
+    },
+    "sdmmc1": {
+      "base": 1342459904,
+      "size": 1024,
+      "irqs": {
+        "irq": 57
+      },
+      "renode": null
+    },
+    "syscon": {
+      "base": 1342222336,
+      "size": 4096,
+      "irqs": {},
+      "renode": null
+    },
+    "usart1": {
+      "base": 1342717952,
+      "size": 4096,
+      "irqs": {
+        "irq": 59
+      },
+      "renode": {
+        "model": "UART.STM32F7_USART",
+        "properties": {
+          "frequency": 240000000
+        }
+      }
+    },
+    "usart2": {
+      "base": 1342722048,
+      "size": 4096,
+      "irqs": {
+        "irq": 74
+      },
+      "renode": {
+        "model": "UART.STM32F7_USART",
+        "properties": {
+          "frequency": 240000000
+        }
+      }
+    },
+    "usart3": {
+      "base": 1342726144,
+      "size": 4096,
+      "irqs": {
+        "irq": 95
+      },
+      "renode": {
+        "model": "UART.STM32F7_USART",
+        "properties": {
+          "frequency": 240000000
+        }
+      }
+    },
+    "usbc": {
+      "base": 1342468096,
+      "size": 4096,
+      "irqs": {
+        "irq": 92
+      },
+      "renode": null
+    }
+  },
+  "pins": {
+    "PA00": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "rstb"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "rstb"
+          ]
+        }
+      ]
+    },
+    "PA01": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        }
+      ]
+    },
+    "PA02": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "te"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "mclk"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "b2"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "te"
+          ]
+        }
+      ]
+    },
+    "PA03": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "cs"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "sdo"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "b1"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "cs"
+          ]
+        }
+      ]
+    },
+    "PA04": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "clk"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "sdi"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "g1"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "wr"
+          ]
+        }
+      ]
+    },
+    "PA05": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "dio0"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "bck"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "r1"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "rd"
+          ]
+        }
+      ]
+    },
+    "PA06": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "dio1"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "lrck"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "hst"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dc"
+          ]
+        }
+      ]
+    },
+    "PA07": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "dio2"
+          ]
+        },
+        {
+          "kind": "pdm",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "clk"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "enb"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio0"
+          ]
+        }
+      ]
+    },
+    "PA08": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "spi",
+          "signals": [
+            "dio3"
+          ]
+        },
+        {
+          "kind": "pdm",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "data"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "vst"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio1"
+          ]
+        }
+      ]
+    },
+    "PA09": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        }
+      ]
+    },
+    "PA10": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        }
+      ]
+    },
+    "PA11": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        }
+      ]
+    },
+    "PA12": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "mpi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "cs"
+          ]
+        },
+        {
+          "kind": "sd",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "dio2"
+          ]
+        }
+      ]
+    },
+    "PA13": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "mpi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "dio1"
+          ]
+        },
+        {
+          "kind": "sd",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "dio3"
+          ]
+        }
+      ]
+    },
+    "PA14": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "mpi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "dio2"
+          ]
+        },
+        {
+          "kind": "sd",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "clk"
+          ]
+        }
+      ]
+    },
+    "PA15": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "mpi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "dio0"
+          ]
+        },
+        {
+          "kind": "sd",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "cmd"
+          ]
+        }
+      ]
+    },
+    "PA16": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "mpi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "clk"
+          ]
+        },
+        {
+          "kind": "sd",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "dio0"
+          ]
+        }
+      ]
+    },
+    "PA17": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "mpi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "dio3"
+          ]
+        },
+        {
+          "kind": "sd",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "dio1"
+          ]
+        }
+      ]
+    },
+    "PA18": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "swd",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "dio"
+          ]
+        }
+      ]
+    },
+    "PA19": {
+      "default_pull": "none",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "swd",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "clk"
+          ]
+        }
+      ]
+    },
+    "PA20": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        }
+      ]
+    },
+    "PA21": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        }
+      ]
+    },
+    "PA22": {
+      "default_pull": "none",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "pdm",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "clk"
+          ]
+        },
+        {
+          "kind": "xtal32k",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "xi"
+          ]
+        }
+      ]
+    },
+    "PA23": {
+      "default_pull": "none",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "pdm",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "data"
+          ]
+        },
+        {
+          "kind": "xtal32k",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "xo"
+          ]
+        }
+      ]
+    },
+    "PA24": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "dio"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "mclk"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin0"
+          ]
+        }
+      ]
+    },
+    "PA25": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "di"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "sdo"
+          ]
+        },
+        {
+          "kind": "xtal32k",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ext"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin1"
+          ]
+        }
+      ]
+    },
+    "PA26": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin2"
+          ]
+        }
+      ]
+    },
+    "PA27": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin3"
+          ]
+        }
+      ]
+    },
+    "PA28": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "clk"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "sdi"
+          ]
+        },
+        {
+          "kind": "gpadc",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch0"
+          ]
+        }
+      ]
+    },
+    "PA29": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "cs"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "bck"
+          ]
+        },
+        {
+          "kind": "gpadc",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1"
+          ]
+        }
+      ]
+    },
+    "PA30": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "efuse",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pwr"
+          ]
+        },
+        {
+          "kind": "i2s",
+          "instance": 1,
+          "mode": null,
+          "signals": [
+            "lrck"
+          ]
+        },
+        {
+          "kind": "gpadc",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch2"
+          ]
+        }
+      ]
+    },
+    "PA31": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "gpadc",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch3"
+          ]
+        }
+      ]
+    },
+    "PA32": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "gpadc",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch4"
+          ]
+        }
+      ]
+    },
+    "PA33": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "gpadc",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch5"
+          ]
+        }
+      ]
+    },
+    "PA34": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "gpadc",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch6"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin10"
+          ]
+        }
+      ]
+    },
+    "PA35": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "usb11",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "dp"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin11"
+          ]
+        }
+      ]
+    },
+    "PA36": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "usb11",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "dm"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin12"
+          ]
+        }
+      ]
+    },
+    "PA37": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "dio"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio2"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin13"
+          ]
+        }
+      ]
+    },
+    "PA38": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "di"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin14"
+          ]
+        }
+      ]
+    },
+    "PA39": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "clk"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "vck"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio3"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin15"
+          ]
+        }
+      ]
+    },
+    "PA40": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "spi",
+          "instance": 2,
+          "mode": null,
+          "signals": [
+            "cs"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "xrst"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio4"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin16"
+          ]
+        }
+      ]
+    },
+    "PA41": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "hck"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio5"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin17"
+          ]
+        }
+      ]
+    },
+    "PA42": {
+      "default_pull": "up",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "r2"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio6"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin18"
+          ]
+        }
+      ]
+    },
+    "PA43": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "jdi",
+          "signals": [
+            "g2"
+          ]
+        },
+        {
+          "kind": "lcdc",
+          "instance": null,
+          "mode": "8080",
+          "signals": [
+            "dio7"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin19"
+          ]
+        }
+      ]
+    },
+    "PA44": {
+      "default_pull": "down",
+      "supports": [
+        {
+          "kind": "gpio",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "any"
+          ]
+        },
+        {
+          "kind": "usart",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "tx",
+            "rx",
+            "cts",
+            "rts"
+          ]
+        },
+        {
+          "kind": "i2c",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "sda",
+            "scl"
+          ]
+        },
+        {
+          "kind": "gptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "etr"
+          ]
+        },
+        {
+          "kind": "lptim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "in",
+            "out",
+            "etr"
+          ]
+        },
+        {
+          "kind": "atim",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "ch1",
+            "ch2",
+            "ch3",
+            "ch4",
+            "ch1n",
+            "ch2n",
+            "ch3n",
+            "bk",
+            "bk2",
+            "etr"
+          ]
+        },
+        {
+          "kind": "wkup",
+          "instance": null,
+          "mode": null,
+          "signals": [
+            "pin20"
+          ]
+        }
+      ]
+    }
+  },
+  "pin_assignments": {
+    "accel_int": {
+      "direction": "in",
+      "pin": "PA43"
+    },
+    "atim1": {
+      "ch1": "PA07"
+    },
+    "display_en": {
+      "direction": "out",
+      "pin": "PA02"
+    },
+    "haptic_en": {
+      "direction": "out",
+      "pin": "PA08"
+    },
+    "i2c1": {
+      "scl": "PA41",
+      "sda": "PA42"
+    },
+    "i2c2": {
+      "scl": "PA33",
+      "sda": "PA32"
+    },
+    "i2c3": {
+      "scl": "PA31",
+      "sda": "PA30"
+    },
+    "i2s1": {
+      "sdo": "PA25"
+    },
+    "lcdc": {
+      "clk": "PA04",
+      "cs": "PA03",
+      "dio0": "PA05",
+      "dio1": "PA06",
+      "rstb": "PA00"
+    },
+    "mpi2": {
+      "clk": "PA16",
+      "cs": "PA12",
+      "dio0": "PA15",
+      "dio1": "PA13",
+      "dio2": "PA14",
+      "dio3": "PA17"
+    },
+    "nfc_int": {
+      "direction": "in",
+      "pin": "PA44"
+    },
+    "ovp_fault": {
+      "direction": "in",
+      "pin": "PA01"
+    },
+    "rfid_wake": {
+      "direction": "in",
+      "pin": "PA26"
+    },
+    "spi1": {
+      "dio": "PA24"
+    },
+    "spi2": {
+      "clk": "PA39",
+      "cs": "PA40",
+      "di": "PA38",
+      "dio": "PA37"
+    },
+    "touch_int": {
+      "direction": "in",
+      "pin": "PA27"
+    },
+    "usart1": {
+      "rx": "PA18",
+      "tx": "PA19"
+    },
+    "usart2": {
+      "rx": "PA10",
+      "tx": "PA09"
+    },
+    "usb": {
+      "dm": "PA36",
+      "dp": "PA35"
+    },
+    "ws2812_en": {
+      "direction": "out",
+      "pin": "PA28"
+    }
+  },
+  "notifications": {
+    "host_request": {
+      "min_priority": 20,
+      "max_priority": 20
+    },
+    "logs": {
+      "min_priority": 0,
+      "max_priority": 10
+    },
+    "present": {
+      "min_priority": 25,
+      "max_priority": 25
+    },
+    "usart_event": {
+      "min_priority": 15,
+      "max_priority": 15
+    },
+    "usb_event": {
+      "min_priority": 15,
+      "max_priority": 15
+    }
+  },
+  "filesystems": {},
+  "trusted_senders": [
+    {
+      "crate_info": {
+        "package": {
+          "name": "sysmodule_host_proxy",
+          "version": "0.1.0"
+        }
+      },
+      "priority": 1,
+      "regions": {
+        "code": {
+          "place": {
+            "size": 262144,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537133056,
+                "size": 262144,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "data": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "stack": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": 8192,
+          "align": null,
+          "shared": false
+        }
+      },
+      "supervisor": false,
+      "depends_on": [
+        {
+          "crate_info": {
+            "package": {
+              "name": "sysmodule_log",
+              "version": "0.1.0"
+            }
+          },
+          "priority": 1,
+          "regions": {
+            "code": {
+              "place": {
+                "size": 262144,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537133056,
+                    "size": 262144,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "data": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "stack": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": 16384,
+              "align": null,
+              "shared": false
+            }
+          },
+          "supervisor": false,
+          "depends_on": [
+            {
+              "crate_info": {
+                "package": {
+                  "name": "sysmodule_usart",
+                  "version": "0.1.0"
+                }
+              },
+              "priority": 1,
+              "regions": {
+                "code": {
+                  "place": {
+                    "size": 262144,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537133056,
+                        "size": 262144,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "data": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "stack": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": 2048,
+                  "align": null,
+                  "shared": false
+                }
+              },
+              "supervisor": false,
+              "depends_on": [
+                {
+                  "crate_info": {
+                    "package": {
+                      "name": "sysmodule_reactor",
+                      "version": "0.1.0"
+                    }
+                  },
+                  "priority": 1,
+                  "regions": {
+                    "code": {
+                      "place": {
+                        "size": 262144,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537133056,
+                            "size": 262144,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "data": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "stack": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": 2048,
+                      "align": null,
+                      "shared": false
+                    }
+                  },
+                  "supervisor": false,
+                  "depends_on": [],
+                  "peers": [],
+                  "uses_peripherals": [],
+                  "uses_partitions": [],
+                  "pushes_notifications": [],
+                  "uses_notifications": [],
+                  "features": []
+                }
+              ],
+              "peers": [],
+              "uses_peripherals": [
+                "usart2",
+                "usart3"
+              ],
+              "uses_partitions": [],
+              "pushes_notifications": [
+                "usart_event"
+              ],
+              "uses_notifications": [],
+              "features": []
+            },
+            {
+              "crate_info": {
+                "package": {
+                  "name": "sysmodule_reactor",
+                  "version": "0.1.0"
+                }
+              },
+              "priority": 1,
+              "regions": {
+                "code": {
+                  "place": {
+                    "size": 262144,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537133056,
+                        "size": 262144,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "data": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "stack": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": 2048,
+                  "align": null,
+                  "shared": false
+                }
+              },
+              "supervisor": false,
+              "depends_on": [],
+              "peers": [],
+              "uses_peripherals": [],
+              "uses_partitions": [],
+              "pushes_notifications": [],
+              "uses_notifications": [],
+              "features": []
+            }
+          ],
+          "peers": [
+            "sysmodule_host_proxy"
+          ],
+          "uses_peripherals": [],
+          "uses_partitions": [],
+          "pushes_notifications": [
+            "logs",
+            "host_request"
+          ],
+          "uses_notifications": [
+            "usart_event"
+          ],
+          "features": []
+        },
+        {
+          "crate_info": {
+            "package": {
+              "name": "sysmodule_reactor",
+              "version": "0.1.0"
+            }
+          },
+          "priority": 1,
+          "regions": {
+            "code": {
+              "place": {
+                "size": 262144,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537133056,
+                    "size": 262144,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "data": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "stack": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": 2048,
+              "align": null,
+              "shared": false
+            }
+          },
+          "supervisor": false,
+          "depends_on": [],
+          "peers": [],
+          "uses_peripherals": [],
+          "uses_partitions": [],
+          "pushes_notifications": [],
+          "uses_notifications": [],
+          "features": []
+        }
+      ],
+      "peers": [
+        "sysmodule_usb_protocol_host",
+        "sysmodule_log"
+      ],
+      "uses_peripherals": [],
+      "uses_partitions": [],
+      "pushes_notifications": [],
+      "uses_notifications": [
+        "host_request"
+      ],
+      "features": []
+    }
+  ],
+  "boot": {
+    "ftab": {
+      "size": 20480,
+      "block_size": 4096,
+      "mappings": [
+        {
+          "address": 301989888,
+          "size": 234881024,
+          "read": true,
+          "write": false,
+          "execute": true
+        },
+        {
+          "address": 1644167168,
+          "size": 1040187392,
+          "read": true,
+          "write": false,
+          "execute": false
+        }
+      ],
+      "offset": 0,
+      "unmapped": false
+    },
+    "loader": {
+      "size": 16384,
+      "block_size": 4096,
+      "mappings": [
+        {
+          "address": 301989888,
+          "size": 234881024,
+          "read": true,
+          "write": false,
+          "execute": true
+        },
+        {
+          "address": 1644167168,
+          "size": 1040187392,
+          "read": true,
+          "write": false,
+          "execute": false
+        }
+      ],
+      "offset": 20480,
+      "unmapped": false
+    }
+  },
+  "bootloader": {
+    "crate_info": {
+      "package": {
+        "name": "bootloader-sf32lb52",
+        "version": "0.1.0"
+      }
+    },
+    "regions": {
+      "code": {
+        "place": {
+          "size": 16384,
+          "block_size": 4096,
+          "mappings": [
+            {
+              "address": 301989888,
+              "size": 234881024,
+              "read": true,
+              "write": false,
+              "execute": true
+            },
+            {
+              "address": 1644167168,
+              "size": 1040187392,
+              "read": true,
+              "write": false,
+              "execute": false
+            }
+          ],
+          "offset": 20480,
+          "unmapped": false
+        },
+        "size": null,
+        "align": null,
+        "shared": false
+      },
+      "stack": {
+        "place": {
+          "size": 131072,
+          "block_size": null,
+          "mappings": [
+            {
+              "address": 537001984,
+              "size": 131072,
+              "read": true,
+              "write": true,
+              "execute": true
+            }
+          ],
+          "offset": null,
+          "unmapped": false
+        },
+        "size": 256,
+        "align": null,
+        "shared": false
+      }
+    }
+  },
+  "kernel": {
+    "crate_info": {
+      "package": {
+        "name": "kernel-sf32lb52",
+        "version": "0.1.0"
+      }
+    },
+    "regions": {
+      "code": {
+        "place": {
+          "size": 262144,
+          "block_size": null,
+          "mappings": [
+            {
+              "address": 537133056,
+              "size": 262144,
+              "read": true,
+              "write": true,
+              "execute": true
+            }
+          ],
+          "offset": null,
+          "unmapped": false
+        },
+        "size": null,
+        "align": 512,
+        "shared": false
+      },
+      "data": {
+        "place": {
+          "size": 131072,
+          "block_size": null,
+          "mappings": [
+            {
+              "address": 537001984,
+              "size": 131072,
+              "read": true,
+              "write": true,
+              "execute": true
+            }
+          ],
+          "offset": null,
+          "unmapped": false
+        },
+        "size": null,
+        "align": null,
+        "shared": false
+      },
+      "stack": {
+        "place": {
+          "size": 131072,
+          "block_size": null,
+          "mappings": [
+            {
+              "address": 537001984,
+              "size": 131072,
+              "read": true,
+              "write": true,
+              "execute": true
+            }
+          ],
+          "offset": null,
+          "unmapped": false
+        },
+        "size": 1024,
+        "align": null,
+        "shared": false
+      }
+    }
+  },
+  "entries": [
+    {
+      "crate_info": {
+        "package": {
+          "name": "supervisor",
+          "version": "0.1.0"
+        }
+      },
+      "priority": 0,
+      "regions": {
+        "code": {
+          "place": {
+            "size": 262144,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537133056,
+                "size": 262144,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "data": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "stack": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": 8192,
+          "align": null,
+          "shared": false
+        }
+      },
+      "supervisor": true,
+      "depends_on": [],
+      "peers": [],
+      "uses_peripherals": [
+        "usart1"
+      ],
+      "uses_partitions": [],
+      "pushes_notifications": [],
+      "uses_notifications": [],
+      "features": []
+    },
+    {
+      "crate_info": {
+        "package": {
+          "name": "idle",
+          "version": "0.1.0"
+        }
+      },
+      "priority": 4,
+      "regions": {
+        "code": {
+          "place": {
+            "size": 262144,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537133056,
+                "size": 262144,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "data": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "stack": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": 256,
+          "align": null,
+          "shared": false
+        }
+      },
+      "supervisor": false,
+      "depends_on": [],
+      "peers": [],
+      "uses_peripherals": [],
+      "uses_partitions": [],
+      "pushes_notifications": [],
+      "uses_notifications": [],
+      "features": [
+        "insomniac"
+      ]
+    },
+    {
+      "crate_info": {
+        "package": {
+          "name": "stub",
+          "version": "0.1.0"
+        }
+      },
+      "priority": 3,
+      "regions": {
+        "code": {
+          "place": {
+            "size": 262144,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537133056,
+                "size": 262144,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "data": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": null,
+          "align": null,
+          "shared": false
+        },
+        "stack": {
+          "place": {
+            "size": 131072,
+            "block_size": null,
+            "mappings": [
+              {
+                "address": 537001984,
+                "size": 131072,
+                "read": true,
+                "write": true,
+                "execute": true
+              }
+            ],
+            "offset": null,
+            "unmapped": false
+          },
+          "size": 8192,
+          "align": null,
+          "shared": false
+        }
+      },
+      "supervisor": false,
+      "depends_on": [
+        {
+          "crate_info": {
+            "package": {
+              "name": "sysmodule_log",
+              "version": "0.1.0"
+            }
+          },
+          "priority": 1,
+          "regions": {
+            "code": {
+              "place": {
+                "size": 262144,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537133056,
+                    "size": 262144,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "data": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "stack": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": 16384,
+              "align": null,
+              "shared": false
+            }
+          },
+          "supervisor": false,
+          "depends_on": [
+            {
+              "crate_info": {
+                "package": {
+                  "name": "sysmodule_usart",
+                  "version": "0.1.0"
+                }
+              },
+              "priority": 1,
+              "regions": {
+                "code": {
+                  "place": {
+                    "size": 262144,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537133056,
+                        "size": 262144,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "data": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "stack": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": 2048,
+                  "align": null,
+                  "shared": false
+                }
+              },
+              "supervisor": false,
+              "depends_on": [
+                {
+                  "crate_info": {
+                    "package": {
+                      "name": "sysmodule_reactor",
+                      "version": "0.1.0"
+                    }
+                  },
+                  "priority": 1,
+                  "regions": {
+                    "code": {
+                      "place": {
+                        "size": 262144,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537133056,
+                            "size": 262144,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "data": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "stack": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": 2048,
+                      "align": null,
+                      "shared": false
+                    }
+                  },
+                  "supervisor": false,
+                  "depends_on": [],
+                  "peers": [],
+                  "uses_peripherals": [],
+                  "uses_partitions": [],
+                  "pushes_notifications": [],
+                  "uses_notifications": [],
+                  "features": []
+                }
+              ],
+              "peers": [],
+              "uses_peripherals": [
+                "usart2",
+                "usart3"
+              ],
+              "uses_partitions": [],
+              "pushes_notifications": [
+                "usart_event"
+              ],
+              "uses_notifications": [],
+              "features": []
+            },
+            {
+              "crate_info": {
+                "package": {
+                  "name": "sysmodule_reactor",
+                  "version": "0.1.0"
+                }
+              },
+              "priority": 1,
+              "regions": {
+                "code": {
+                  "place": {
+                    "size": 262144,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537133056,
+                        "size": 262144,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "data": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "stack": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": 2048,
+                  "align": null,
+                  "shared": false
+                }
+              },
+              "supervisor": false,
+              "depends_on": [],
+              "peers": [],
+              "uses_peripherals": [],
+              "uses_partitions": [],
+              "pushes_notifications": [],
+              "uses_notifications": [],
+              "features": []
+            }
+          ],
+          "peers": [
+            "sysmodule_host_proxy"
+          ],
+          "uses_peripherals": [],
+          "uses_partitions": [],
+          "pushes_notifications": [
+            "logs",
+            "host_request"
+          ],
+          "uses_notifications": [
+            "usart_event"
+          ],
+          "features": []
+        },
+        {
+          "crate_info": {
+            "package": {
+              "name": "sysmodule_usb",
+              "version": "0.1.0"
+            }
+          },
+          "priority": 2,
+          "regions": {
+            "code": {
+              "place": {
+                "size": 262144,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537133056,
+                    "size": 262144,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "data": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "stack": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": 8192,
+              "align": null,
+              "shared": false
+            }
+          },
+          "supervisor": false,
+          "depends_on": [
+            {
+              "crate_info": {
+                "package": {
+                  "name": "sysmodule_log",
+                  "version": "0.1.0"
+                }
+              },
+              "priority": 1,
+              "regions": {
+                "code": {
+                  "place": {
+                    "size": 262144,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537133056,
+                        "size": 262144,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "data": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "stack": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": 16384,
+                  "align": null,
+                  "shared": false
+                }
+              },
+              "supervisor": false,
+              "depends_on": [
+                {
+                  "crate_info": {
+                    "package": {
+                      "name": "sysmodule_usart",
+                      "version": "0.1.0"
+                    }
+                  },
+                  "priority": 1,
+                  "regions": {
+                    "code": {
+                      "place": {
+                        "size": 262144,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537133056,
+                            "size": 262144,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "data": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "stack": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": 2048,
+                      "align": null,
+                      "shared": false
+                    }
+                  },
+                  "supervisor": false,
+                  "depends_on": [
+                    {
+                      "crate_info": {
+                        "package": {
+                          "name": "sysmodule_reactor",
+                          "version": "0.1.0"
+                        }
+                      },
+                      "priority": 1,
+                      "regions": {
+                        "code": {
+                          "place": {
+                            "size": 262144,
+                            "block_size": null,
+                            "mappings": [
+                              {
+                                "address": 537133056,
+                                "size": 262144,
+                                "read": true,
+                                "write": true,
+                                "execute": true
+                              }
+                            ],
+                            "offset": null,
+                            "unmapped": false
+                          },
+                          "size": null,
+                          "align": null,
+                          "shared": false
+                        },
+                        "data": {
+                          "place": {
+                            "size": 131072,
+                            "block_size": null,
+                            "mappings": [
+                              {
+                                "address": 537001984,
+                                "size": 131072,
+                                "read": true,
+                                "write": true,
+                                "execute": true
+                              }
+                            ],
+                            "offset": null,
+                            "unmapped": false
+                          },
+                          "size": null,
+                          "align": null,
+                          "shared": false
+                        },
+                        "stack": {
+                          "place": {
+                            "size": 131072,
+                            "block_size": null,
+                            "mappings": [
+                              {
+                                "address": 537001984,
+                                "size": 131072,
+                                "read": true,
+                                "write": true,
+                                "execute": true
+                              }
+                            ],
+                            "offset": null,
+                            "unmapped": false
+                          },
+                          "size": 2048,
+                          "align": null,
+                          "shared": false
+                        }
+                      },
+                      "supervisor": false,
+                      "depends_on": [],
+                      "peers": [],
+                      "uses_peripherals": [],
+                      "uses_partitions": [],
+                      "pushes_notifications": [],
+                      "uses_notifications": [],
+                      "features": []
+                    }
+                  ],
+                  "peers": [],
+                  "uses_peripherals": [
+                    "usart2",
+                    "usart3"
+                  ],
+                  "uses_partitions": [],
+                  "pushes_notifications": [
+                    "usart_event"
+                  ],
+                  "uses_notifications": [],
+                  "features": []
+                },
+                {
+                  "crate_info": {
+                    "package": {
+                      "name": "sysmodule_reactor",
+                      "version": "0.1.0"
+                    }
+                  },
+                  "priority": 1,
+                  "regions": {
+                    "code": {
+                      "place": {
+                        "size": 262144,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537133056,
+                            "size": 262144,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "data": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": null,
+                      "align": null,
+                      "shared": false
+                    },
+                    "stack": {
+                      "place": {
+                        "size": 131072,
+                        "block_size": null,
+                        "mappings": [
+                          {
+                            "address": 537001984,
+                            "size": 131072,
+                            "read": true,
+                            "write": true,
+                            "execute": true
+                          }
+                        ],
+                        "offset": null,
+                        "unmapped": false
+                      },
+                      "size": 2048,
+                      "align": null,
+                      "shared": false
+                    }
+                  },
+                  "supervisor": false,
+                  "depends_on": [],
+                  "peers": [],
+                  "uses_peripherals": [],
+                  "uses_partitions": [],
+                  "pushes_notifications": [],
+                  "uses_notifications": [],
+                  "features": []
+                }
+              ],
+              "peers": [
+                "sysmodule_host_proxy"
+              ],
+              "uses_peripherals": [],
+              "uses_partitions": [],
+              "pushes_notifications": [
+                "logs",
+                "host_request"
+              ],
+              "uses_notifications": [
+                "usart_event"
+              ],
+              "features": []
+            },
+            {
+              "crate_info": {
+                "package": {
+                  "name": "sysmodule_reactor",
+                  "version": "0.1.0"
+                }
+              },
+              "priority": 1,
+              "regions": {
+                "code": {
+                  "place": {
+                    "size": 262144,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537133056,
+                        "size": 262144,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "data": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": null,
+                  "align": null,
+                  "shared": false
+                },
+                "stack": {
+                  "place": {
+                    "size": 131072,
+                    "block_size": null,
+                    "mappings": [
+                      {
+                        "address": 537001984,
+                        "size": 131072,
+                        "read": true,
+                        "write": true,
+                        "execute": true
+                      }
+                    ],
+                    "offset": null,
+                    "unmapped": false
+                  },
+                  "size": 2048,
+                  "align": null,
+                  "shared": false
+                }
+              },
+              "supervisor": false,
+              "depends_on": [],
+              "peers": [],
+              "uses_peripherals": [],
+              "uses_partitions": [],
+              "pushes_notifications": [],
+              "uses_notifications": [],
+              "features": []
+            }
+          ],
+          "peers": [],
+          "uses_peripherals": [
+            "pinctrl",
+            "rcc",
+            "syscon",
+            "usbc"
+          ],
+          "uses_partitions": [],
+          "pushes_notifications": [
+            "usb_event"
+          ],
+          "uses_notifications": [],
+          "features": []
+        },
+        {
+          "crate_info": {
+            "package": {
+              "name": "sysmodule_reactor",
+              "version": "0.1.0"
+            }
+          },
+          "priority": 1,
+          "regions": {
+            "code": {
+              "place": {
+                "size": 262144,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537133056,
+                    "size": 262144,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "data": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": null,
+              "align": null,
+              "shared": false
+            },
+            "stack": {
+              "place": {
+                "size": 131072,
+                "block_size": null,
+                "mappings": [
+                  {
+                    "address": 537001984,
+                    "size": 131072,
+                    "read": true,
+                    "write": true,
+                    "execute": true
+                  }
+                ],
+                "offset": null,
+                "unmapped": false
+              },
+              "size": 2048,
+              "align": null,
+              "shared": false
+            }
+          },
+          "supervisor": false,
+          "depends_on": [],
+          "peers": [],
+          "uses_peripherals": [],
+          "uses_partitions": [],
+          "pushes_notifications": [],
+          "uses_notifications": [],
+          "features": []
+        }
+      ],
+      "peers": [],
+      "uses_peripherals": [],
+      "uses_partitions": [],
+      "pushes_notifications": [],
+      "uses_notifications": [
+        "usb_event"
+      ],
+      "features": []
+    }
+  ]
+}

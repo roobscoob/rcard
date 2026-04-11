@@ -44,6 +44,11 @@ pub trait MusbInstance: 'static + Send + Sync {
     fn regs() -> regs::Usb;
 }
 
+/// TEMP: set to `true` the first time the patched word-wide FIFO write loop
+/// runs. sysmodule_usb reads this to verify the patch is compiled in.
+pub static WORD_WRITE_LOOP_REACHED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 
 // In fact, only the function name `on_interrupt` conflicts.
 // However, it is unlikely that anyone would use both at the same time.

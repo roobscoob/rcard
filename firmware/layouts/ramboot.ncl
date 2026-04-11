@@ -10,8 +10,8 @@ fun memory =>
   ] in
 
   {
-    kernel_ram = memory.sram_bulk,
-    task_ram   = memory.sram_bulk,
+    kernel_ram = memory.sram_fast,
+    task_ram   = memory.sram_fast,
     image      = memory.sram_bulk,
     sec_config = flash.sec_config,
     bootloader = flash.bootloader,

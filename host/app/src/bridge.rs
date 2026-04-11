@@ -109,6 +109,31 @@ pub enum Event {
         index: SerialPortIndex,
         status: SerialPortStatus,
     },
+    /// A line of raw text was read from a serial port (USART1).
+    SerialRawLine {
+        index: SerialPortIndex,
+        line: String,
+    },
+    /// A structured log entry was decoded on a serial port (USART2).
+    SerialStructuredLog {
+        index: SerialPortIndex,
+        entry: device::logs::LogEntry,
+    },
+    /// A non-log control event (IPC reply, tunnel error) was decoded on a
+    /// serial port (USART2).
+    SerialControlEvent {
+        index: SerialPortIndex,
+        event: device::logs::ControlEvent,
+    },
+    /// A device self-reported its firmware build id (via the Awake
+    /// simple-frame on USART2). The state handler parses the bytes as
+    /// a UUIDv4 and, if a matching `.tfw` archive is loaded, sets
+    /// `DeviceHandle.firmware_id` so the log viewer can resolve
+    /// species / type metadata.
+    DeviceReportedBuildId {
+        device_id: DeviceId,
+        build_id_bytes: [u8; 16],
+    },
 }
 
 /// Phase of a flash operation, driven by the bridge.
@@ -123,8 +148,12 @@ pub enum FlashPhase {
     Booting,
     /// Flash finished successfully.
     Done,
-    /// Flash failed.
-    Failed(String),
+    /// Flash failed at the step that was in progress.
+    ///
+    /// `at_step` is the step index (0 = reset, 1 = writing, 2 = booting) so
+    /// the modal can render a red X next to the failed task and leave any
+    /// subsequent tasks as "not started".
+    Failed { at_step: usize, message: String },
 }
 
 // ── Bridge state ───────────────────────────────────────────────────────
@@ -449,7 +478,16 @@ async fn serial_connect_loop(
             .await;
         }
         SerialAdapterType::Usart2 => {
-            usart2_connect_loop(index, port, tx, ctx, cancel).await;
+            usart2_connect_loop(
+                index,
+                port,
+                tx,
+                ctx,
+                cancel,
+                persistent_devices,
+                next_device_id,
+            )
+            .await;
         }
     }
 }
@@ -476,7 +514,7 @@ async fn usart1_connect_loop(
         });
         ctx.request_repaint();
 
-        let mut conn = match serial::Usart1Connection::open(&port) {
+        let conn = match serial::Usart1Connection::open(&port) {
             Ok(c) => c,
             Err(_) => {
                 let _ = tx.send(Event::SerialStatus {
@@ -492,6 +530,11 @@ async fn usart1_connect_loop(
             }
         };
 
+        // Destructure into the line reader (owned by the parallel reader
+        // task) and the shared SifliDebug handle (used for discovery and
+        // flash operations from this main loop).
+        let serial::Usart1Connection { mut reader, sifli_debug } = conn;
+
         let _ = tx.send(Event::AdapterCreated {
             adapter_id,
             display_name: format!("USART1 ({})", port),
@@ -502,14 +545,68 @@ async fn usart1_connect_loop(
         });
         ctx.request_repaint();
 
-        // Current device attached to this adapter, if any.
-        let mut current_device: Option<DeviceId> = None;
+        // Parallel line reader. Runs concurrently with `try_discover_usart1`
+        // so the boot-time text backlog (SFBL, kernel Awake, etc.) gets
+        // timestamped at real byte-arrival time — otherwise we'd block on
+        // discovery for ~1s and every buffered line would land in the
+        // channel *after* any USART2 logs that raced ahead.
+        let (line_tx, mut line_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(std::time::Instant, String)>();
+        let reader_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut line = String::new();
+            let mut line_start: Option<std::time::Instant> = None;
+            let mut buf = [0u8; 256];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        for &byte in &buf[..n] {
+                            if byte == b'\n' {
+                                let text = std::mem::take(&mut line);
+                                let start = line_start
+                                    .take()
+                                    .unwrap_or_else(std::time::Instant::now);
+                                if line_tx.send((start, text)).is_err() {
+                                    return;
+                                }
+                            } else {
+                                if line_start.is_none() {
+                                    line_start = Some(std::time::Instant::now());
+                                }
+                                line.push(byte as char);
+                            }
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
 
-        let mut line_buf = String::new();
+        // Discovery handshake: try to identify a device already attached to
+        // this port. Mirrors the shape of the SFBL bootrom-entry flow but
+        // skips the stability wait (we weren't the ones who caused a reset).
+        let outcome = try_discover_usart1(&sifli_debug, &port).await;
+        let mut current_device: Option<DeviceId> = register_from_discovery(
+            outcome,
+            &port,
+            adapter_id,
+            &tx,
+            &persistent_devices,
+            &next_device_id,
+            &ctx,
+        );
+        if current_device.is_some() {
+            let _ = tx.send(Event::SerialStatus {
+                index,
+                status: SerialPortStatus::DeviceDetected,
+            });
+        }
+
         loop {
-            line_buf.clear();
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    reader_task.abort();
                     let _ = tx.send(Event::AdapterRemoved { adapter_id });
                     ctx.request_repaint();
                     return;
@@ -520,7 +617,7 @@ async fn usart1_connect_loop(
                     // take over. If we can't enter debug, fall back to
                     // asking the user to reset the device manually.
                     eprintln!("[usart1:{port}] flash requested — attempting auto-reset");
-                    match conn.sifli_debug.try_acquire().await {
+                    match sifli_debug.try_acquire().await {
                         Some(session) => {
                             // AIRCR: VECTKEY (0x05FA) | SYSRESETREQ (bit 2)
                             let _ = session
@@ -536,15 +633,38 @@ async fn usart1_connect_loop(
                             // it forwards every byte (including any garbled
                             // tail of the truncated ACK) as passthrough noise
                             // until the bootrom's "SFBL\n" marker arrives.
-                            if let Err(e) = conn
-                                .sifli_debug
-                                .resync_on_sentinel(b"SFBL\n".to_vec())
+                            //
+                            // 1s timeout: if SFBL doesn't show up by then,
+                            // the auto-reset probably didn't take. Fall back
+                            // to asking the user to reset manually. The tap
+                            // stays in resync mode in the background, so when
+                            // the user does press reset and SFBL arrives, the
+                            // existing line-based handler picks it up.
+                            match sifli_debug
+                                .resync_on_sentinel(
+                                    b"SFBL\n".to_vec(),
+                                    std::time::Duration::from_secs(1),
+                                )
                                 .await
                             {
-                                eprintln!("[usart1:{port}] resync_on_sentinel failed: {e}");
-                                break;
+                                Ok(()) => {
+                                    eprintln!("[usart1:{port}] tap resync complete");
+                                }
+                                Err(serial::sifli_debug::Error::Timeout) => {
+                                    eprintln!("[usart1:{port}] auto-reset didn't trigger SFBL within 1s — asking user to reset manually");
+                                    if let Some(dev_id) = current_device {
+                                        let _ = tx.send(Event::FlashProgress {
+                                            device_id: dev_id,
+                                            phase: FlashPhase::WaitingForReset,
+                                        });
+                                        ctx.request_repaint();
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[usart1:{port}] resync_on_sentinel failed: {e}");
+                                    break;
+                                }
                             }
-                            eprintln!("[usart1:{port}] tap resync complete");
                         }
                         None => {
                             eprintln!("[usart1:{port}] auto-reset failed — asking user to reset manually");
@@ -559,13 +679,19 @@ async fn usart1_connect_loop(
                     }
                     continue;
                 }
-                result = conn.read_line(&mut line_buf) => {
-                    if result.is_none() {
-                        // Port closed / error.
+                item = line_rx.recv() => {
+                    let Some((line_received_at, raw_line)) = item else {
+                        // Reader task ended → port closed / error.
                         break;
-                    }
+                    };
 
-                    let line = line_buf.trim_end_matches('\r').to_string();
+                    let line = raw_line.trim_end_matches('\r').to_string();
+
+                    // Forward the raw line to the serial adapter terminal.
+                    let _ = tx.send(Event::SerialRawLine {
+                        index,
+                        line: line.clone(),
+                    });
 
                     // ── Sentinel: SFBL — bootrom entered ───────────
                     // `ends_with` rather than equality: after a tap resync,
@@ -609,9 +735,9 @@ async fn usart1_connect_loop(
                         // the timer each time and only proceed once stable.
                         let stability_delay = std::time::Duration::from_secs(1);
                         loop {
-                            let mut sfbl_buf = String::new();
                             tokio::select! {
                                 _ = cancel.cancelled() => {
+                                    reader_task.abort();
                                     let _ = tx.send(Event::AdapterRemoved { adapter_id });
                                     ctx.request_repaint();
                                     return;
@@ -620,10 +746,10 @@ async fn usart1_connect_loop(
                                     // 1s with no SFBL — power is stable.
                                     break;
                                 }
-                                result = conn.read_line(&mut sfbl_buf) => {
-                                    if result.is_none() {
+                                item = line_rx.recv() => {
+                                    let Some((_, sfbl_buf)) = item else {
                                         break; // port closed
-                                    }
+                                    };
                                     let l = sfbl_buf.trim_end_matches('\r');
                                     if l.ends_with("SFBL") {
                                         eprintln!("[usart1:{port}] SFBL again (power unstable), resetting timer");
@@ -646,7 +772,7 @@ async fn usart1_connect_loop(
 
                         // Enter SifliDebug and read the chip UID from eFuse bank 0.
                         let t0 = std::time::Instant::now();
-                        if let Some(session) = conn.sifli_debug.try_acquire().await {
+                        if let Some(session) = sifli_debug.try_acquire().await {
                             eprintln!("[usart1:{port}] entered debug in {:?}", t0.elapsed());
                             match efuse_read_uid(&session).await {
                                 Ok(uid) => {
@@ -688,20 +814,43 @@ async fn usart1_connect_loop(
 
                                         match flash_stub_via_debug(&session, &tx, persistent_id, &ctx).await {
                                             Ok(()) => {
-                                                eprintln!("[usart1:{port}] stub written, booting");
-                                                let _ = tx.send(Event::FlashProgress {
-                                                    device_id: persistent_id,
-                                                    phase: FlashPhase::Booting,
-                                                });
+                                                eprintln!("[usart1:{port}] stub written, waiting for USB");
+                                                // Wait for the stub's USB device to appear. The
+                                                // stub reports serial = hex of the chip UID,
+                                                // so we match against that to make sure it's
+                                                // the device we just flashed, not a stale peer.
+                                                let serial_hex = format!("{uid}");
+                                                let found = usb::wait_for_serial(
+                                                    &serial_hex,
+                                                    std::time::Duration::from_secs(10),
+                                                )
+                                                .await;
+                                                if found {
+                                                    eprintln!("[usart1:{port}] stub USB up, flash done");
+                                                    let _ = tx.send(Event::FlashProgress {
+                                                        device_id: persistent_id,
+                                                        phase: FlashPhase::Done,
+                                                    });
+                                                } else {
+                                                    eprintln!("[usart1:{port}] stub USB never appeared");
+                                                    let _ = tx.send(Event::FlashProgress {
+                                                        device_id: persistent_id,
+                                                        phase: FlashPhase::Failed {
+                                                            at_step: 2,
+                                                            message: "stub USB device did not appear within 10s".into(),
+                                                        },
+                                                    });
+                                                }
                                                 ctx.request_repaint();
-                                                // Device will reboot into stub.
-                                                // TODO: connect via USB and flash real firmware.
                                             }
                                             Err(e) => {
                                                 eprintln!("[usart1:{port}] stub flash failed: {e}");
                                                 let _ = tx.send(Event::FlashProgress {
                                                     device_id: persistent_id,
-                                                    phase: FlashPhase::Failed(e),
+                                                    phase: FlashPhase::Failed {
+                                                        at_step: 1,
+                                                        message: e,
+                                                    },
                                                 });
                                                 ctx.request_repaint();
                                             }
@@ -741,13 +890,17 @@ async fn usart1_connect_loop(
                         }
                     }
 
-                    // Forward all lines as text logs.
+                    // Forward all lines as text logs. The received_at is
+                    // the first-byte-of-line timestamp captured by the
+                    // parallel reader task, so ordering in the device
+                    // viewer reflects real arrival time.
                     if let Some(dev_id) = current_device {
                         let _ = tx.send(Event::Log {
                             device: dev_id,
                             log: device::logs::Log {
                                 adapter: adapter_id,
                                 contents: device::logs::LogContents::Text(line),
+                                received_at: line_received_at,
                             },
                         });
                         ctx.request_repaint();
@@ -759,6 +912,7 @@ async fn usart1_connect_loop(
         // Port lost — remove adapter. Ephemeral devices auto-clean via
         // the 0-adapter rule. Persistent devices just go disconnected.
         current_device.take();
+        reader_task.abort();
         let _ = tx.send(Event::AdapterRemoved { adapter_id });
         ctx.request_repaint();
 
@@ -769,14 +923,20 @@ async fn usart1_connect_loop(
     }
 }
 
-/// USART2 connection loop — opens the port but does not create devices.
-/// Device attachment will happen when USART2 detection is implemented.
+/// USART2 connection loop — opens the port and binds a device when the
+/// firmware's `Awake` control message arrives (carrying the chip UID).
+///
+/// Analogue of USART1's SFBL path, but simpler: the Awake payload *is*
+/// the identification, so there's no ephemeral → persistent dance. Every
+/// Awake goes straight to the persistent-device registry.
 async fn usart2_connect_loop(
     index: SerialPortIndex,
     port: String,
     tx: crossbeam_channel::Sender<Event>,
     ctx: egui::Context,
     cancel: tokio_util::sync::CancellationToken,
+    persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
+    next_device_id: Arc<AtomicU64>,
 ) {
     let adapter_id = device::adapter::AdapterId(index as u64 + 500_000);
 
@@ -787,12 +947,12 @@ async fn usart2_connect_loop(
         });
         ctx.request_repaint();
 
-        let connect_result = serial::Usart2::connect(&port, adapter_id, {
-            // USART2 needs a LogSink but we don't have a device yet.
-            // Create a dummy PhysicalDevice just for the sink.
-            let mut dev = device::physical::PhysicalDevice::new();
-            dev.log_sink(adapter_id)
-        });
+        // Create a PhysicalDevice that owns the log sink. We subscribe to
+        // its broadcast so structured logs decoded off USART2 can be
+        // forwarded to the serial adapter panel.
+        let mut dev = device::physical::PhysicalDevice::new();
+        let mut rx = dev.subscribe();
+        let connect_result = serial::Usart2::connect(&port, adapter_id, dev.log_sink(adapter_id));
 
         match connect_result {
             Ok(_adapter) => {
@@ -806,8 +966,78 @@ async fn usart2_connect_loop(
                 });
                 ctx.request_repaint();
 
-                // Keep alive until cancelled.
-                cancel.cancelled().await;
+                let mut current_device: Option<DeviceId> = None;
+
+                // Forward decoded events to the panel until cancelled.
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        evt = rx.recv() => {
+                            match evt {
+                                Ok(device::device::DeviceEvent::Log(log)) => {
+                                    // Serial panel view: always forward so
+                                    // pre-Awake logs are visible in the
+                                    // USART2 Logs sub-pane even before a
+                                    // device has been bound.
+                                    if let device::logs::LogContents::Structured(ref entry) =
+                                        log.contents
+                                    {
+                                        let _ = tx.send(Event::SerialStructuredLog {
+                                            index,
+                                            entry: entry.clone(),
+                                        });
+                                    }
+                                    // Device log viewer: route to the bound
+                                    // device once one exists.
+                                    if let Some(dev_id) = current_device {
+                                        let _ = tx.send(Event::Log {
+                                            device: dev_id,
+                                            log,
+                                        });
+                                    }
+                                    ctx.request_repaint();
+                                }
+                                Ok(device::device::DeviceEvent::Control { event, .. }) => {
+                                    // Awake is the device-attached signal on
+                                    // USART2. Bind (or re-bind on reboot) the
+                                    // persistent device before forwarding.
+                                    if let device::logs::ControlEvent::Awake {
+                                        uid,
+                                        firmware_id,
+                                        ..
+                                    } = &event
+                                    {
+                                        let chip_uid = ChipUid(*uid);
+                                        handle_usart2_awake(
+                                            index,
+                                            adapter_id,
+                                            &port,
+                                            chip_uid,
+                                            *firmware_id,
+                                            &mut current_device,
+                                            &tx,
+                                            &persistent_devices,
+                                            &next_device_id,
+                                            &ctx,
+                                        );
+                                    }
+
+                                    let _ = tx.send(Event::SerialControlEvent { index, event });
+                                    ctx.request_repaint();
+                                }
+                                Ok(_) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }
+                }
+
+                // Port loop ended. Ephemeral devices auto-clean via the
+                // 0-adapter rule in state.rs; persistent devices go
+                // disconnected. Mirrors the USART1 teardown.
+                current_device.take();
+                drop(dev);
                 let _ = tx.send(Event::AdapterRemoved { adapter_id });
                 ctx.request_repaint();
                 return;
@@ -828,7 +1058,170 @@ async fn usart2_connect_loop(
     }
 }
 
+/// Handle an `Awake` control event on a USART2 adapter. Looks up or
+/// mints a persistent device for `uid`, emits the binding events, and
+/// updates `current_device`.
+///
+/// If `current_device` was already set (device rebooted mid-session),
+/// the adapter is torn down and re-announced first — same shape as the
+/// USART1 SFBL re-bind.
+#[allow(clippy::too_many_arguments)]
+fn handle_usart2_awake(
+    index: SerialPortIndex,
+    adapter_id: device::adapter::AdapterId,
+    port: &str,
+    uid: ChipUid,
+    build_id_bytes: [u8; 16],
+    current_device: &mut Option<DeviceId>,
+    tx: &crossbeam_channel::Sender<Event>,
+    persistent_devices: &Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
+    next_device_id: &Arc<AtomicU64>,
+    ctx: &egui::Context,
+) {
+    // Reboot during session: detach and re-announce the adapter.
+    if current_device.take().is_some() {
+        eprintln!("[usart2:{port}] awake during session — device rebooted, re-binding");
+        let _ = tx.send(Event::AdapterRemoved { adapter_id });
+        let _ = tx.send(Event::AdapterCreated {
+            adapter_id,
+            display_name: format!("USART2 ({})", port),
+        });
+    }
+
+    // Get-or-create the persistent DeviceId for this chip UID.
+    let persistent_id = {
+        let mut registry = persistent_devices.lock().unwrap();
+        *registry
+            .entry(uid)
+            .or_insert_with(|| DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed)))
+    };
+
+    eprintln!("[usart2:{port}] awake: bound device {uid} ({persistent_id:?})");
+
+    let _ = tx.send(Event::DeviceCreated {
+        device_id: persistent_id,
+        name: format!("Device {uid}"),
+        kind: DeviceKind::Persistent,
+        adapter_ids: vec![adapter_id],
+        capabilities: vec![KnownCapability::Ipc],
+        firmware_id: None,
+    });
+    // Awake also carries the firmware image's build id. Forward it so
+    // state.rs can resolve it against the loaded .tfw archives and
+    // bind firmware metadata to the device.
+    let _ = tx.send(Event::DeviceReportedBuildId {
+        device_id: persistent_id,
+        build_id_bytes,
+    });
+    // Awake fires from sysmodule_log::main, which only runs once the
+    // kernel has started all tasks — so the device is unambiguously
+    // past bootloader by the time we see this.
+    let _ = tx.send(Event::DevicePhaseChanged {
+        device_id: persistent_id,
+        phase: DevicePhase::Kernel,
+    });
+    let _ = tx.send(Event::SerialStatus {
+        index,
+        status: SerialPortStatus::DeviceDetected,
+    });
+
+    *current_device = Some(persistent_id);
+    ctx.request_repaint();
+}
+
 // ── Stub flash via SifliDebug ───────────────────────────────────────────
+
+/// One contiguous region to write to device RAM.
+///
+/// `flash_stub_via_debug` collates every data segment + BSS zero-fill from
+/// the stub image into a flat list of these, sorts them smallest-first,
+/// then writes them in that order. Smallest-first lets the smaller writes
+/// finish quickly so the bar moves visibly before the long tail of the
+/// largest write.
+struct PendingWrite {
+    addr: u32,
+    data: Vec<u32>,
+}
+
+/// Wire bytes of overhead per `MemWrite` command, independent of payload.
+///
+/// Breakdown:
+/// - frame start marker (2)
+/// - frame length field (2)
+/// - frame channel + crc (2)
+/// - MemWrite opcode (2)
+/// - destination address (4)
+/// - word count (2)
+///
+/// Total: 14 bytes on the wire before the first data byte of the chunk.
+const MEM_WRITE_WIRE_OVERHEAD: u64 = 14;
+
+/// Perform a single `mem_write` with a byte-counter-driven progress bar.
+///
+/// Runs the write and a periodic sampler in the same task via `select!`.
+/// Every 50 ms the sampler reads the underlying writer's byte counter and
+/// emits a `FlashProgress` event. When the write completes, we take the
+/// completion branch, do one last sample (with the counter now at its
+/// final value for this chunk), and emit the authoritative final event.
+///
+/// For each sample:
+///
+/// ```text
+/// wire_delta    = counter - counter_at_chunk_start
+/// payload_bytes = max(0, wire_delta - MEM_WRITE_WIRE_OVERHEAD)
+///                 clamped to chunk_payload_bytes
+/// ```
+///
+/// The header overhead is subtracted so the bar reflects actual user
+/// data transmitted, not framing overhead.
+async fn write_chunk_with_progress(
+    session: &serial::DebugSession,
+    addr: u32,
+    chunk: &[u32],
+    completed_payload_before: u32,
+    bytes_total: u32,
+    device_id: DeviceId,
+    tx: &crossbeam_channel::Sender<Event>,
+    ctx: &egui::Context,
+) -> Result<(), String> {
+    let counter = session.byte_counter();
+    let chunk_start = counter.load(Ordering::Relaxed);
+    let chunk_payload_bytes = (chunk.len() * 4) as u32;
+
+    let emit = |wire_delta: u64| {
+        let payload_this_chunk = wire_delta
+            .saturating_sub(MEM_WRITE_WIRE_OVERHEAD)
+            .min(chunk_payload_bytes as u64) as u32;
+        let bytes_written = completed_payload_before + payload_this_chunk;
+        let _ = tx.send(Event::FlashProgress {
+            device_id,
+            phase: FlashPhase::Writing {
+                bytes_written,
+                bytes_total,
+            },
+        });
+        ctx.request_repaint();
+    };
+
+    let write = session.mem_write(addr, chunk);
+    tokio::pin!(write);
+
+    loop {
+        tokio::select! {
+            result = &mut write => {
+                // Final authoritative sample — counter is fully up-to-date
+                // since mem_write has completed (including flush).
+                let wire_delta = counter.load(Ordering::Relaxed).saturating_sub(chunk_start);
+                emit(wire_delta);
+                return result.map_err(|e| format!("mem_write at {addr:#x}: {e}"));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                let wire_delta = counter.load(Ordering::Relaxed).saturating_sub(chunk_start);
+                emit(wire_delta);
+            }
+        }
+    }
+}
 
 /// Write the embedded stub firmware to device RAM via SifliDebug,
 /// set VTOR to the stub's entry point, and soft reset.
@@ -862,12 +1255,41 @@ async fn flash_stub_via_debug(
 
     let entry_point = image.entry_point();
 
-    // Calculate total bytes for progress reporting.
-    let bytes_total: u32 = image.segments().map(|s| {
-        let data_len = (s.data().len() + 3) & !3; // padded to 4-byte alignment
-        let bss_len = (s.zero_fill() as usize + 3) & !3;
-        (data_len + bss_len) as u32
-    }).sum();
+    // Collate every region we need to write into a flat list, then sort
+    // smallest-first. Smallest-first lets quick wins (BSS zero-fills, tiny
+    // segments) finish early so the bar visibly moves before the long
+    // tail of the largest write.
+    let mut writes: Vec<PendingWrite> = Vec::new();
+    for seg in image.segments() {
+        // Pad data to 4-byte alignment.
+        let mut padded = seg.data().to_vec();
+        while padded.len() % 4 != 0 {
+            padded.push(0);
+        }
+        let words: Vec<u32> = padded
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        writes.push(PendingWrite {
+            addr: seg.dest(),
+            data: words,
+        });
+
+        if seg.zero_fill() > 0 {
+            let n_words = (seg.zero_fill() as usize + 3) / 4;
+            writes.push(PendingWrite {
+                addr: seg.dest() + seg.file_size(),
+                data: vec![0u32; n_words],
+            });
+        }
+    }
+    writes.sort_by_key(|w| w.data.len());
+
+    let bytes_total: u32 = writes.iter().map(|w| (w.data.len() * 4) as u32).sum();
+    eprintln!("[flash] {} write(s) totaling {bytes_total} bytes:", writes.len());
+    for w in &writes {
+        eprintln!("[flash]   addr={:#x} bytes={}", w.addr, w.data.len() * 4);
+    }
 
     let _ = tx.send(Event::FlashProgress {
         device_id,
@@ -882,67 +1304,116 @@ async fn flash_stub_via_debug(
         .await
         .map_err(|e| format!("halt core: {e}"))?;
 
-    // Write each segment to RAM.
-    let chunk_size = 2048; // words per write (~8KB)
+    // Chunk size is deliberately large so the host→device transmission
+    // time dominates the per-chunk ACK roundtrip. The progress bar is
+    // driven by a byte counter on the underlying writer rather than by
+    // chunk completion, so a big chunk still shows smooth progress.
+    let chunk_size: usize = 262144; // 1 MiB per write (words)
     let mut bytes_written: u32 = 0;
-    for seg in image.segments() {
-        let dest = seg.dest();
-        let data = seg.data();
-
-        // Pad to 4-byte alignment.
-        let mut padded = data.to_vec();
-        while padded.len() % 4 != 0 {
-            padded.push(0);
-        }
-
-        let words: Vec<u32> = padded
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-
-        for (i, chunk) in words.chunks(chunk_size).enumerate() {
-            let addr = dest + (i * chunk_size * 4) as u32;
-            session
-                .mem_write(addr, chunk)
-                .await
-                .map_err(|e| format!("mem_write at {addr:#x}: {e}"))?;
-
+    for write in &writes {
+        for (i, chunk) in write.data.chunks(chunk_size).enumerate() {
+            let addr = write.addr + (i * chunk_size * 4) as u32;
+            write_chunk_with_progress(
+                session, addr, chunk, bytes_written, bytes_total, device_id, tx, ctx,
+            )
+            .await?;
             bytes_written += (chunk.len() * 4) as u32;
-            let _ = tx.send(Event::FlashProgress {
-                device_id,
-                phase: FlashPhase::Writing { bytes_written, bytes_total },
-            });
-            ctx.request_repaint();
-        }
-
-        // Zero-fill BSS.
-        if seg.zero_fill() > 0 {
-            let bss_addr = dest + seg.file_size();
-            let zero_words = vec![0u32; (seg.zero_fill() as usize + 3) / 4];
-            for (i, chunk) in zero_words.chunks(chunk_size).enumerate() {
-                let addr = bss_addr + (i * chunk_size * 4) as u32;
-                session
-                    .mem_write(addr, chunk)
-                    .await
-                    .map_err(|e| format!("bss zero at {addr:#x}: {e}"))?;
-
-                bytes_written += (chunk.len() * 4) as u32;
-                let _ = tx.send(Event::FlashProgress {
-                    device_id,
-                    phase: FlashPhase::Writing { bytes_written, bytes_total },
-                });
-                ctx.request_repaint();
-            }
         }
     }
 
-    // Read the stub's vector table: [initial_sp, reset_vector].
-    let vtor = session
-        .mem_read(entry_point, 2)
-        .await
-        .map_err(|e| format!("read vector table: {e}"))?;
-    let initial_sp = vtor[0];
-    let reset_vector = vtor[1];
+    // Verify every byte we just wrote by reading it back over the wire
+    // and diffing. This catches RAM bit flips, partial writes, and any
+    // protocol-level corruption between host and device. Reads in
+    // 1024-word (4 KiB) chunks to stay well under any per-frame size
+    // limit on the SifliDebug protocol.
+    eprintln!("[flash] verifying {} write(s)...", writes.len());
+    for (write_idx, write) in writes.iter().enumerate() {
+        const VERIFY_CHUNK_WORDS: usize = 1024;
+        let mut word_offset = 0usize;
+        while word_offset < write.data.len() {
+            let want = &write.data[word_offset
+                ..(word_offset + VERIFY_CHUNK_WORDS).min(write.data.len())];
+            let addr = write.addr + (word_offset * 4) as u32;
+            let got = session
+                .mem_read(addr, want.len() as u16)
+                .await
+                .map_err(|e| format!("verify mem_read at {addr:#x}: {e}"))?;
+            if got.len() != want.len() {
+                return Err(format!(
+                    "verify: addr={addr:#x} length mismatch: expected {} words, got {}",
+                    want.len(),
+                    got.len()
+                ));
+            }
+            for (i, (&w, &g)) in want.iter().zip(got.iter()).enumerate() {
+                if w != g {
+                    let bad_addr = addr + (i * 4) as u32;
+                    eprintln!(
+                        "[flash] VERIFY MISMATCH write {} addr {:#x}: expected {:#010x} got {:#010x}",
+                        write_idx, bad_addr, w, g
+                    );
+                    // Show a window of context.
+                    let lo = i.saturating_sub(4);
+                    let hi = (i + 4).min(want.len());
+                    for j in lo..hi {
+                        let mark = if j == i { "  <-- HERE" } else { "" };
+                        eprintln!(
+                            "[flash]   {:#010x}: want {:#010x}  got {:#010x}{}",
+                            addr + (j * 4) as u32,
+                            want[j],
+                            got[j],
+                            mark
+                        );
+                    }
+                    return Err(format!(
+                        "verify failed at {bad_addr:#x}: expected {w:#010x} got {g:#010x}"
+                    ));
+                }
+            }
+            word_offset += VERIFY_CHUNK_WORDS;
+        }
+    }
+    eprintln!("[flash] verify OK ({} bytes)", bytes_total);
+
+    // All RAM writes done — transition the modal to "Booting" before we
+    // start poking debug registers (SP, PC, resume).
+    let _ = tx.send(Event::FlashProgress {
+        device_id,
+        phase: FlashPhase::Booting,
+    });
+    ctx.request_repaint();
+
+    // Pull the vector table out of the in-memory image — we just wrote
+    // these bytes ourselves, no point reading them back over the wire.
+    // The entry point may be at any offset inside one of the writes, not
+    // necessarily at the start.
+    let (initial_sp, reset_vector) = {
+        let entry_write = writes
+            .iter()
+            .find(|w| {
+                let start = w.addr;
+                let end = w.addr.wrapping_add((w.data.len() * 4) as u32);
+                entry_point >= start && entry_point < end
+            })
+            .ok_or_else(|| format!("no segment contains entry point {entry_point:#x}"))?;
+        let byte_offset = (entry_point - entry_write.addr) as usize;
+        if byte_offset % 4 != 0 {
+            return Err(format!(
+                "entry point {entry_point:#x} not 4-byte aligned within segment"
+            ));
+        }
+        let word_offset = byte_offset / 4;
+        if word_offset + 2 > entry_write.data.len() {
+            return Err(format!(
+                "segment at {:#x} too short for vector table at {entry_point:#x}",
+                entry_write.addr
+            ));
+        }
+        (
+            entry_write.data[word_offset],
+            entry_write.data[word_offset + 1],
+        )
+    };
 
     // Write SP (register 13) via debug registers.
     // DCRDR = value, DCRSR = REGWnR (bit 16) | register number
@@ -1028,6 +1499,104 @@ async fn efuse_read_uid(session: &serial::DebugSession) -> Result<ChipUid, Strin
     let _ = session.mem_write(SR, &[0x01]).await;
 
     Ok(ChipUid(uid))
+}
+
+// ── Discovery handshake ────────────────────────────────────────────────
+
+/// Outcome of a SifliDebug discovery attempt on a USART1 adapter.
+enum DiscoveryOutcome {
+    /// Enter SifliDebug failed — no device present, or device unresponsive.
+    NotAttached,
+    /// Enter succeeded but UID read failed — something is there but we
+    /// can't identify it.
+    Unidentified { session: serial::DebugSession },
+    /// Enter and UID read both succeeded.
+    Identified {
+        session: serial::DebugSession,
+        uid: ChipUid,
+    },
+}
+
+/// Attempt to identify the device on a USART1 connection via SifliDebug.
+async fn try_discover_usart1(
+    sifli_debug: &serial::SifliDebug,
+    port: &str,
+) -> DiscoveryOutcome {
+    eprintln!("[usart1:{port}] discovery: probing for SifliDebug");
+    let t0 = std::time::Instant::now();
+    let Some(session) = sifli_debug.try_acquire().await else {
+        eprintln!("[usart1:{port}] discovery: no SifliDebug response (no device attached)");
+        return DiscoveryOutcome::NotAttached;
+    };
+    eprintln!(
+        "[usart1:{port}] discovery: entered debug in {:?}",
+        t0.elapsed()
+    );
+    match efuse_read_uid(&session).await {
+        Ok(uid) => {
+            eprintln!("[usart1:{port}] discovery: identified device {uid}");
+            DiscoveryOutcome::Identified { session, uid }
+        }
+        Err(e) => {
+            eprintln!("[usart1:{port}] discovery: UID read failed ({e}), keeping as ephemeral");
+            DiscoveryOutcome::Unidentified { session }
+        }
+    }
+}
+
+/// Translate a discovery outcome into a newly-registered device.
+///
+/// Emits the appropriate `DeviceCreated` event and returns the resulting
+/// `DeviceId`. The caller becomes the current-device for its adapter.
+///
+/// The passed-in session is held until this function returns, then dropped
+/// (exiting debug mode and letting the chip resume execution).
+fn register_from_discovery(
+    outcome: DiscoveryOutcome,
+    port: &str,
+    adapter_id: device::adapter::AdapterId,
+    tx: &crossbeam_channel::Sender<Event>,
+    persistent_devices: &Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
+    next_device_id: &Arc<AtomicU64>,
+    ctx: &egui::Context,
+) -> Option<DeviceId> {
+    match outcome {
+        DiscoveryOutcome::NotAttached => None,
+        DiscoveryOutcome::Unidentified { session: _session } => {
+            let id = DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed));
+            let _ = tx.send(Event::DeviceCreated {
+                device_id: id,
+                name: format!("{} (USART1)", port),
+                kind: DeviceKind::Ephemeral,
+                adapter_ids: vec![adapter_id],
+                capabilities: vec![KnownCapability::SifliDebug],
+                firmware_id: None,
+            });
+            ctx.request_repaint();
+            Some(id)
+        }
+        DiscoveryOutcome::Identified {
+            session: _session,
+            uid,
+        } => {
+            let id = {
+                let mut registry = persistent_devices.lock().unwrap();
+                *registry.entry(uid).or_insert_with(|| {
+                    DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed))
+                })
+            };
+            let _ = tx.send(Event::DeviceCreated {
+                device_id: id,
+                name: format!("Device {uid}"),
+                kind: DeviceKind::Persistent,
+                adapter_ids: vec![adapter_id],
+                capabilities: vec![KnownCapability::SifliDebug],
+                firmware_id: None,
+            });
+            ctx.request_repaint();
+            Some(id)
+        }
+    }
 }
 
 // ── Null device placeholder ────────────────────────────────────────────

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use crate::sifli_debug::{DebugHandle, Error};
@@ -19,10 +20,17 @@ impl SifliDebug {
     /// Put the underlying tap into sentinel-resync mode.
     ///
     /// Forwards every byte as passthrough noise until the sentinel is found
-    /// on the wire, then returns the tap to normal framing. Use after any
-    /// command that may cut the wire mid-frame (e.g. a soft reset).
-    pub async fn resync_on_sentinel(&self, sentinel: Vec<u8>) -> Result<(), Error> {
-        self.handle.resync_on_sentinel(sentinel).await
+    /// on the wire, then returns the tap to normal framing. Returns
+    /// `Error::Timeout` if `timeout` elapses before the sentinel arrives;
+    /// the tap is left in resync mode in that case and will recover on its
+    /// own when the sentinel finally appears. Use after any command that
+    /// may cut the wire mid-frame (e.g. a soft reset).
+    pub async fn resync_on_sentinel(
+        &self,
+        sentinel: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        self.handle.resync_on_sentinel(sentinel, timeout).await
     }
 
     /// Try to enter debug mode. Returns a session guard if the device
@@ -56,8 +64,15 @@ impl DebugSession {
     }
 
     /// Write 32-bit words to `addr`.
+    ///
+    /// The timeout scales with payload size: 2 s base plus 1 s per ~50 KB
+    /// (half of the 1 Mbaud wire speed, conservatively). This lets a
+    /// multi-MB chunk complete without the fixed 1 s ceiling that applies
+    /// to other commands.
     pub async fn mem_write(&self, addr: u32, data: &[u32]) -> Result<(), Error> {
-        tokio::time::timeout(Duration::from_secs(1), self.handle.mem_write(addr, data))
+        let payload_bytes = (data.len() * 4) as u64;
+        let timeout = Duration::from_secs(2) + Duration::from_millis(payload_bytes / 50);
+        tokio::time::timeout(timeout, self.handle.mem_write(addr, data))
             .await
             .map_err(|_| Error::Timeout)?
     }
@@ -66,6 +81,14 @@ impl DebugSession {
     /// Use for operations that kill the connection (e.g. soft reset).
     pub async fn mem_write_no_response(&self, addr: u32, data: &[u32]) -> Result<(), Error> {
         self.handle.mem_write_no_response(addr, data).await
+    }
+
+    /// Shared atomic counter of bytes written to the underlying writer.
+    ///
+    /// Use to drive a fine-grained progress bar: sample while a long
+    /// `mem_write` is in flight.
+    pub fn byte_counter(&self) -> Arc<AtomicU64> {
+        self.handle.byte_counter()
     }
 
     /// Consume the session without sending `Exit`.

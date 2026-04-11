@@ -61,6 +61,10 @@ use usb_device::endpoint::{EndpointAddress, EndpointIn, EndpointOut};
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
+sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
+
+use generated::notifications;
+use sysmodule_reactor_api::OverflowStrategy;
 
 // ---------------------------------------------------------------------------
 // Single-threaded cell (Hubris sysmodules process one IPC message at a time)
@@ -95,10 +99,9 @@ struct VendorClass<'a, B: usb_device::bus::UsbBus> {
     ifaces: [Option<usb_device::bus::InterfaceNumber>; 7],
     ep_in: [Option<EndpointIn<'a, B>>; 7],
     ep_out: [Option<EndpointOut<'a, B>>; 7],
-    /// Pre-built MSOS 2.0 platform capability (25 bytes) and descriptor set (30 bytes).
-    msos_platform_capability: [u8; 25],
-    msos_descriptor_set: [u8; 30],
-    msos_vendor_code: u8,
+    /// Identity blob reborrowed from `UsbGlobal` with `'static` lifetime.
+    /// Walked on each BOS / vendor-request enumeration.
+    identity: DeviceBlob<'static>,
 }
 
 impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
@@ -106,15 +109,13 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
         alloc: &'a UsbBusAllocator<UsbdBus<UsbInstance>>,
         endpoints_in: &[Option<EndpointConfig>; 7],
         endpoints_out: &[Option<EndpointConfig>; 7],
-        identity: &DeviceIdentity,
+        identity: DeviceBlob<'static>,
     ) -> Self {
         let mut class = VendorClass {
             ifaces: [const { None }; 7],
             ep_in: [const { None }; 7],
             ep_out: [const { None }; 7],
-            msos_platform_capability: identity.msos_platform_capability,
-            msos_descriptor_set: identity.msos_descriptor_set,
-            msos_vendor_code: identity.msos_vendor_code,
+            identity,
         };
 
         for idx in 0..7 {
@@ -135,10 +136,8 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
 
             if let Some(config) = &endpoints_in[idx] {
                 let ep_type = transfer_type(config.transfer_type);
-                let addr = EndpointAddress::from_parts(
-                    ep_num as usize,
-                    usb_device::UsbDirection::In,
-                );
+                let addr =
+                    EndpointAddress::from_parts(ep_num as usize, usb_device::UsbDirection::In);
                 class.ep_in[idx] = Some(
                     alloc
                         .alloc(Some(addr), ep_type, config.max_packet_size, config.interval)
@@ -149,10 +148,8 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
 
             if let Some(config) = &endpoints_out[idx] {
                 let ep_type = transfer_type(config.transfer_type);
-                let addr = EndpointAddress::from_parts(
-                    ep_num as usize,
-                    usb_device::UsbDirection::Out,
-                );
+                let addr =
+                    EndpointAddress::from_parts(ep_num as usize, usb_device::UsbDirection::Out);
                 class.ep_out[idx] = Some(
                     alloc
                         .alloc(Some(addr), ep_type, config.max_packet_size, config.interval)
@@ -202,21 +199,18 @@ impl<B: usb_device::bus::UsbBus> UsbClass<B> for VendorClass<'_, B> {
         &self,
         writer: &mut usb_device::descriptor::BosWriter,
     ) -> usb_device::Result<()> {
-        if self.msos_platform_capability[1] != 0 {
-            // Platform capability type = 0x05
-            writer.capability(0x05, &self.msos_platform_capability)?;
+        for (cap_type, payload) in self.identity.bos_capabilities() {
+            writer.capability(cap_type, payload)?;
         }
         Ok(())
     }
 
     fn control_in(&mut self, xfer: usb_device::class::ControlIn<B>) {
         let req = xfer.request();
-        if self.msos_vendor_code != 0
-            && req.request_type == usb_device::control::RequestType::Vendor
-            && req.request == self.msos_vendor_code
-            && req.index == 0x07
-        {
-            let _ = xfer.accept_with(&self.msos_descriptor_set);
+        if req.request_type == usb_device::control::RequestType::Vendor {
+            if let Some(response) = self.identity.vendor_request(req.request, req.index) {
+                let _ = xfer.accept_with(response);
+            }
         }
     }
 }
@@ -225,8 +219,16 @@ impl<B: usb_device::bus::UsbBus> UsbClass<B> for VendorClass<'_, B> {
 // Global sysmodule state
 // ---------------------------------------------------------------------------
 
+/// Maximum size of the identity blob copied out of the `UsbBus::take` lease.
+/// Sized to fit strings + a couple of BOS capabilities + vendor request
+/// responses without being wasteful. A basic MSOS-enabled device uses ~130
+/// bytes; 2 KiB leaves headroom for WebUSB and future additions.
+const IDENTITY_BLOB_SIZE: usize = 2048;
+
 struct UsbGlobal {
-    identity: DeviceIdentity,
+    config: FixedDeviceConfig,
+    identity_blob: [u8; IDENTITY_BLOB_SIZE],
+    identity_len: usize,
     endpoint_count: u8,
 
     // Endpoint tracking (index 0 = EP1, index 6 = EP7).
@@ -249,20 +251,16 @@ struct UsbGlobal {
 impl UsbGlobal {
     const fn new() -> Self {
         Self {
-            identity: DeviceIdentity {
+            config: FixedDeviceConfig {
                 vendor_id: 0,
                 product_id: 0,
                 device_class: 0,
                 device_subclass: 0,
                 device_protocol: 0,
                 bcd_device: 0,
-                manufacturer: [0; 32],
-                product: [0; 32],
-                serial: [0; 32],
-                msos_platform_capability: [0; 25],
-                msos_descriptor_set: [0; 30],
-                msos_vendor_code: 0,
             },
+            identity_blob: [0; IDENTITY_BLOB_SIZE],
+            identity_len: 0,
             endpoint_count: 0,
             endpoints_in: [None; 7],
             endpoints_out: [None; 7],
@@ -273,6 +271,17 @@ impl UsbGlobal {
             handles_consumed: 0,
             endpoints_opened: 0,
         }
+    }
+
+    /// Reborrow the identity blob with `'static` lifetime. Sound because
+    /// `UsbGlobal` lives in `static USB` and is never moved; the blob is
+    /// treated as immutable for the duration of the bus session, and
+    /// `reset()` only runs after `self.class`/`self.device` (the holders)
+    /// have been dropped.
+    fn identity_static(&self) -> DeviceBlob<'static> {
+        let slice =
+            unsafe { core::slice::from_raw_parts(self.identity_blob.as_ptr(), self.identity_len) };
+        DeviceBlob(slice)
     }
 
     /// Build the usb-device stack and attach to the bus.
@@ -293,34 +302,35 @@ impl UsbGlobal {
         let power_before = UsbInstance::regs().power().read();
         debug!("MUSB power before activate: {}", power_before.0);
 
-        // Create our class (allocates endpoints from usb-device)
-        let class = VendorClass::new(alloc, &self.endpoints_in, &self.endpoints_out, &self.identity);
+        // Reborrow the identity blob as `'static` — sound because UsbGlobal
+        // lives in a `static`. This replaces the earlier `addr_of!(self.identity)`
+        // hack and sidesteps borrow-checker conflicts with `self.poll()` below.
+        let identity = self.identity_static();
 
-        // SAFETY: UsbGlobal only exists inside `static USB`, so self.identity
-        // has 'static lifetime. We reborrow through a pointer to decouple
-        // from &mut self, which we need for self.poll() below.
-        // note from rose hall: i hate this.
-        //                      claude pressured me into adding it, and honestly i don't see a better solution since it really wants a pointer
-        //                      but it still makes me queasy. if you have suggestions, please let me know.
-        #[allow(clippy::deref_addrof)]
-        let id: &'static DeviceIdentity = unsafe { &*(core::ptr::addr_of!(self.identity)) };
+        // Create our class (allocates endpoints from usb-device)
+        let class = VendorClass::new(alloc, &self.endpoints_in, &self.endpoints_out, identity);
 
         let mut strings = usb_device::device::StringDescriptors::default();
-        let mfr = id.manufacturer_str();
-        if !mfr.is_empty() {
-            strings = strings.manufacturer(mfr);
+        if let Some(m) = identity.manufacturer() {
+            strings = strings.manufacturer(m);
         }
-        let prod = id.product_str();
-        if !prod.is_empty() {
-            strings = strings.product(prod);
+        if let Some(p) = identity.product() {
+            strings = strings.product(p);
         }
-        let ser = id.serial_str();
-        if !ser.is_empty() {
-            strings = strings.serial_number(ser);
+        if let Some(s) = identity.serial() {
+            strings = strings.serial_number(s);
         }
 
-        let device = UsbDeviceBuilder::new(alloc, UsbVidPid(id.vendor_id, id.product_id))
-            .usb_rev(if id.has_msos() {
+        // Packed-struct fields require copies before use.
+        let vid = self.config.vendor_id;
+        let pid = self.config.product_id;
+        let dev_class = self.config.device_class;
+        let dev_subclass = self.config.device_subclass;
+        let dev_protocol = self.config.device_protocol;
+        let bcd = self.config.bcd_device;
+
+        let device = UsbDeviceBuilder::new(alloc, UsbVidPid(vid, pid))
+            .usb_rev(if identity.has_bos() {
                 UsbRev::Usb210
             } else {
                 UsbRev::Usb200
@@ -328,10 +338,10 @@ impl UsbGlobal {
             .strings(&[strings])
             .map_err(BuilderErr::from)
             .log_expect("string descriptors failed")
-            .device_class(id.device_class)
-            .device_sub_class(id.device_subclass)
-            .device_protocol(id.device_protocol)
-            .device_release(id.bcd_device)
+            .device_class(dev_class)
+            .device_sub_class(dev_subclass)
+            .device_protocol(dev_protocol)
+            .device_release(bcd)
             .self_powered(false)
             .max_packet_size_0(64)
             .map_err(BuilderErr::from)
@@ -344,6 +354,16 @@ impl UsbGlobal {
         // Enable MUSB interrupt status registers (required for on_interrupt
         // to see bus events — intrusb/intrtx/intrrx are gated by these)
         musb::common_impl::bus_init::<UsbInstance>();
+
+        // Disable Double Packet Buffering on every non-EP0 endpoint, mirroring
+        // SiFli's CherryUSB glue (port/musb/usb_glue_sifli.c, gated `#ifndef
+        // SOC_SF32LB55X`). The 52X/56X/58X family ships with broken DPB
+        // hardware and the vendor explicitly turns it off at init. The musb
+        // crate has these helpers but never calls them. Passing `0` means
+        // "no endpoints have DPB enabled" — the helper inverts and masks to
+        // write 0xFFE to dpktbufdis (bits 1..11), preserving EP0.
+        musb::common_impl::endpoints_set_tx_dualpacket_enabled::<UsbInstance>(0);
+        musb::common_impl::endpoints_set_rx_dualpacket_enabled::<UsbInstance>(0);
 
         // Run the first poll to trigger usb-device's bus.enable(),
         // THEN attach — otherwise the host sees us before EP0 is ready
@@ -374,6 +394,7 @@ impl UsbGlobal {
             devctl.host_mode()
         );
         debug!("USB device built and attached");
+        info!("{} {}", "usb: activate state", self.bus_state());
     }
 
     /// Poll USB hardware — captures interrupts and drives usb-device.
@@ -429,13 +450,43 @@ static USB: SyncCell<UsbGlobal> = SyncCell::new(UsbGlobal::new());
 struct UsbBusResource;
 
 impl UsbBus for UsbBusResource {
-    fn take(_meta: ipc::Meta, identity: DeviceIdentity, endpoints: u8) -> Result<Self, UsbError> {
+    fn take(
+        _meta: ipc::Meta,
+        config: FixedDeviceConfig,
+        blob: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+        endpoints: u8,
+    ) -> Result<Self, UsbError> {
         let usb = USB.get();
         if usb.bus_taken {
             return Err(UsbError::AlreadyTaken);
         }
+
+        // Copy the identity blob into our arena in small chunks.
+        let blob_len = blob.len();
+        if blob_len > usb.identity_blob.len() {
+            return Err(UsbError::BufferOverflow);
+        }
+        {
+            let mut tmp = [0u8; 64];
+            let mut off = 0;
+            while off < blob_len {
+                let n = (blob_len - off).min(tmp.len());
+                let _ = blob.read_range(off, &mut tmp[..n]);
+                usb.identity_blob[off..off + n].copy_from_slice(&tmp[..n]);
+                off += n;
+            }
+        }
+        usb.identity_len = blob_len;
+
+        // Reject malformed blobs up-front so the server never serves a
+        // truncated TLV entry during enumeration.
+        if !DeviceBlob(&usb.identity_blob[..usb.identity_len]).validate() {
+            usb.identity_len = 0;
+            return Err(UsbError::MalformedIdentity);
+        }
+
         usb.bus_taken = true;
-        usb.identity = identity;
+        usb.config = config;
         usb.endpoint_count = endpoints;
 
         // Enable the USB peripheral clock
@@ -480,8 +531,8 @@ impl UsbBus for UsbBusResource {
         // Create the musb bus and usb-device allocator
         *USB_ALLOC.get() = Some(UsbBusAllocator::new(UsbdBus::<UsbInstance>::new()));
 
-        let vid = identity.vendor_id;
-        let pid = identity.product_id;
+        let vid = config.vendor_id;
+        let pid = config.product_id;
         debug!(
             "USB bus taken: vendor={} product={}, {} endpoints",
             vid, pid, endpoints
@@ -491,9 +542,8 @@ impl UsbBus for UsbBusResource {
     }
 
     fn state(&mut self, _meta: ipc::Meta) -> BusState {
-        let usb = USB.get();
-        usb.poll();
-        usb.bus_state()
+        // No need to poll here — the @irq handler drives the stack.
+        USB.get().bus_state()
     }
 
     fn take_endpoint_handle(&mut self, _meta: ipc::Meta) -> Option<EndpointHandle> {
@@ -593,7 +643,6 @@ impl UsbEndpoint for UsbEndpointResource {
         }
 
         let usb = USB.get();
-        usb.poll();
 
         if usb.bus_state() != BusState::Configured {
             return Err(UsbError::Disconnected);
@@ -603,14 +652,30 @@ impl UsbEndpoint for UsbEndpointResource {
         let idx = (self.config.number - 1) as usize;
         let ep = class.ep_in[idx].as_ref().ok_or(UsbError::InvalidEndpoint)?;
 
-        // Copy lease data into a stack buffer (max 64 bytes per packet)
+        // Copy lease data into a stack buffer (max 64 bytes per packet).
+        // Use a single bulk borrow_read syscall instead of `len` per-byte
+        // syscalls — both faster and avoids the corruption-prone byte loop.
         let len = data.len().min(self.config.max_packet_size as usize);
         let mut buf = [0u8; 64];
-        for (i, byte) in buf.iter_mut().enumerate().take(len) {
-            *byte = data.read(i).unwrap_or(0);
+        let _ = data.read_range(0, &mut buf[..len]);
+
+        let result = ep.write(&buf[..len]);
+
+        // TEMP: log once after the first write call to verify the patched
+        // musb word-wide FIFO write loop is actually compiled and reached.
+        {
+            use core::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                if musb::WORD_WRITE_LOOP_REACHED.load(Ordering::Relaxed) {
+                    info!("{}", "musb: word-wide FIFO patch active");
+                } else {
+                    info!("{}", "musb: word-wide FIFO patch NOT REACHED");
+                }
+            }
         }
 
-        match ep.write(&buf[..len]) {
+        match result {
             Ok(n) => Ok(n as u16),
             Err(usb_device::UsbError::WouldBlock) => Err(UsbError::EndpointBusy),
             Err(_) => Err(UsbError::Disconnected),
@@ -627,7 +692,6 @@ impl UsbEndpoint for UsbEndpointResource {
         }
 
         let usb = USB.get();
-        usb.poll();
 
         if usb.bus_state() != BusState::Configured {
             return Err(UsbError::Disconnected);
@@ -642,10 +706,10 @@ impl UsbEndpoint for UsbEndpointResource {
         let mut buf = [0u8; 64];
         match ep.read(&mut buf) {
             Ok(n) => {
+                // Single bulk borrow_write syscall instead of `n` per-byte
+                // syscalls — same rationale as the bulk read in `write()`.
                 let to_copy = n.min(buf_lease.len());
-                for (i, &byte) in buf.iter().enumerate().take(to_copy) {
-                    let _ = buf_lease.write(i, byte);
-                }
+                let _ = buf_lease.write_range(0, &buf[..to_copy]);
                 Ok(to_copy as u16)
             }
             Err(usb_device::UsbError::WouldBlock) => Err(UsbError::EndpointBusy),
@@ -679,7 +743,7 @@ impl Drop for UsbEndpointResource {
             Direction::In => usb.endpoints_in[idx] = None,
             Direction::Out => usb.endpoints_out[idx] = None,
         }
-        usb.endpoints_opened -= 1;
+        usb.endpoints_opened = usb.endpoints_opened.saturating_sub(1);
     }
 }
 
@@ -694,5 +758,17 @@ fn main() -> ! {
     ipc::server! {
         UsbBus: UsbBusResource,
         UsbEndpoint: UsbEndpointResource,
+        @irq(usbc_irq) => || {
+            USB.get().poll();
+            // Wake any task subscribed to usb_event so it can drain
+            // endpoints or re-query bus state. `refresh` coalesces
+            // repeated IRQs into a single pending notification.
+            let _ = Reactor::refresh(
+                notifications::GROUP_ID_USB_EVENT,
+                0,
+                15,
+                OverflowStrategy::DropOldest,
+            );
+        },
     }
 }

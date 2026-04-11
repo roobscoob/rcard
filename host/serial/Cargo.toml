@@ -7,6 +7,7 @@ edition = "2024"
 cobs = "0.3"
 device = { path = "../device" }
 rcard-log = { path = "../../shared/log", features = ["alloc"] }
+rcard-usb-proto = { path = "../../shared/usb-proto" }
 serialport = "4"
 tokio = { version = "1", features = ["sync", "rt", "macros", "io-util", "time"] }
 tokio-serial = "5"

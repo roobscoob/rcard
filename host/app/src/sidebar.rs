@@ -3,6 +3,8 @@ use crate::state::*;
 use crate::theme;
 use egui_phosphor::regular as icon;
 use egui_ltreeview::{Action, TreeView};
+use egui_taffy::taffy::prelude::*;
+use egui_taffy::{tui as taffy_tui, TuiBuilderLogic};
 
 /// Render the sidebar content based on the active section.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
@@ -204,18 +206,99 @@ fn firmware_list_section(ui: &mut egui::Ui, state: &mut AppState) {
 // ── Adapters ────────────────────────────────────────────────────────────
 
 fn adapters_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading(format!("{} Serial Adapters", icon::PLUG));
-    ui.separator();
+    // Snapshot the unconfigured ports for the dropdown.
+    let unconfigured: Vec<crate::port_registry::AvailablePort> = state
+        .unconfigured_available_ports()
+        .into_iter()
+        .cloned()
+        .collect();
 
-    // Add form.
+    if let Some(idx) = state.new_port_selection {
+        if idx >= unconfigured.len() {
+            state.new_port_selection = None;
+        }
+    }
+
+    taffy_tui(ui, egui::Id::new("adapters_panel_root"))
+        .reserve_available_space()
+        .style(Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            align_items: Some(AlignItems::Stretch),
+            size: Size { width: percent(1.0), height: percent(1.0) },
+            gap: length(4.0),
+            ..Default::default()
+        })
+        .show(|tui| {
+            // Heading and form.
+            tui.style(Style {
+                flex_shrink: 0.0,
+                ..Default::default()
+            })
+            .ui(|ui| {
+                ui.heading(format!("{} Serial Adapters", icon::PLUG));
+                ui.separator();
+                adapter_add_form(ui, state, &unconfigured);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+            });
+
+            // Port list fills remaining space.
+            tui.style(Style {
+                flex_grow: 1.0,
+                min_size: Size { width: auto(), height: length(0.0) },
+                ..Default::default()
+            })
+            .ui(|ui| {
+                adapter_list(ui, state);
+            });
+        });
+}
+
+fn adapter_add_form(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    unconfigured: &[crate::port_registry::AvailablePort],
+) {
     ui.horizontal(|ui| {
         ui.colored_label(theme::TEXT_SECONDARY, format!("{}", icon::PLUGS));
         ui.label("Port");
-        ui.add(
-            egui::TextEdit::singleline(&mut state.new_port_name)
-                .desired_width(80.0)
-                .hint_text("COM1"),
-        );
+
+        let selected_text = match state.new_port_selection {
+            Some(i) => unconfigured
+                .get(i)
+                .map(|p| p.label.clone())
+                .unwrap_or_else(|| "—".to_string()),
+            None => {
+                if unconfigured.is_empty() {
+                    "No USB ports available".to_string()
+                } else {
+                    "Select port…".to_string()
+                }
+            }
+        };
+
+        egui::ComboBox::from_id_salt("new_port_selection")
+            .width(180.0)
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                for (i, port) in unconfigured.iter().enumerate() {
+                    ui.selectable_value(
+                        &mut state.new_port_selection,
+                        Some(i),
+                        port.label.clone(),
+                    );
+                }
+            });
+
+        if ui
+            .small_button(icon::ARROWS_CLOCKWISE)
+            .on_hover_text("Rescan USB serial ports")
+            .clicked()
+        {
+            state.refresh_available_ports();
+        }
     });
     ui.horizontal(|ui| {
         ui.colored_label(theme::TEXT_SECONDARY, format!("{}", icon::TAG));
@@ -242,17 +325,37 @@ fn adapters_panel(ui: &mut egui::Ui, state: &mut AppState) {
 
     let add_btn = egui::Button::new(format!("{} Add", icon::PLUS));
     if ui
-        .add_enabled(!state.new_port_name.trim().is_empty(), add_btn)
+        .add_enabled(state.new_port_selection.is_some(), add_btn)
         .clicked()
     {
         state.register_serial();
     }
+}
 
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(4.0);
+/// Sidebar tree node IDs for the adapter list.
+///
+/// Bit 63 clear = port dir (USART2 only); the low bits hold the port index.
+/// Bit 63 set = pane leaf; bits 0..2 encode the pane kind, bits 3..62 encode
+/// the port index. USART1 ports are rendered as a leaf with id 0 (port dir).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct AdapterNodeId(u64);
 
-    // Port list.
+impl AdapterNodeId {
+    fn port(idx: usize) -> Self {
+        AdapterNodeId(idx as u64)
+    }
+    fn pane(idx: usize, kind: u64) -> Self {
+        AdapterNodeId((1 << 63) | ((idx as u64) << 3) | kind)
+    }
+    fn logs(idx: usize) -> Self {
+        Self::pane(idx, 0)
+    }
+    fn control(idx: usize) -> Self {
+        Self::pane(idx, 1)
+    }
+}
+
+fn adapter_list(ui: &mut egui::Ui, state: &mut AppState) {
     if state.serial_ports.is_empty() {
         ui.colored_label(theme::TEXT_DIM, "No serial adapters configured");
         return;
@@ -283,15 +386,45 @@ fn adapters_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 };
                 let label_text = format!("{status_icon} {port} [{type_label}]");
                 let label = egui::RichText::new(label_text).color(color);
-                builder.leaf(*i, label);
+
+                match adapter_type {
+                    SerialAdapterType::Usart1 => {
+                        builder.leaf(AdapterNodeId::port(*i), label);
+                    }
+                    SerialAdapterType::Usart2 => {
+                        builder.dir(AdapterNodeId::port(*i), label);
+                        builder.leaf(
+                            AdapterNodeId::logs(*i),
+                            format!("{} Logs", icon::SCROLL),
+                        );
+                        builder.leaf(
+                            AdapterNodeId::control(*i),
+                            format!("{} Control", icon::TREE_STRUCTURE),
+                        );
+                        builder.close_dir();
+                    }
+                }
             }
         });
 
     for action in actions {
         if let Action::SetSelected(selected) = action {
             for node in selected {
-                if node < state.serial_ports.len() {
-                    state.open_device_pane(Pane::SerialAdapter(node));
+                for (i, _, adapter_type, _) in &entries {
+                    if node == AdapterNodeId::port(*i) {
+                        match adapter_type {
+                            SerialAdapterType::Usart1 => {
+                                state.open_device_pane(Pane::SerialAdapter(*i));
+                            }
+                            SerialAdapterType::Usart2 => {
+                                state.open_serial_port(*i);
+                            }
+                        }
+                    } else if node == AdapterNodeId::logs(*i) {
+                        state.open_device_pane(Pane::SerialAdapterLogs(*i));
+                    } else if node == AdapterNodeId::control(*i) {
+                        state.open_device_pane(Pane::SerialAdapterControl(*i));
+                    }
                 }
             }
         }
@@ -325,9 +458,38 @@ impl TreeNodeId {
 }
 
 fn devices_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading(format!("{} Devices", icon::CPU));
-    ui.separator();
+    taffy_tui(ui, egui::Id::new("devices_panel_root"))
+        .reserve_available_space()
+        .style(Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            align_items: Some(AlignItems::Stretch),
+            size: Size { width: percent(1.0), height: percent(1.0) },
+            gap: length(4.0),
+            ..Default::default()
+        })
+        .show(|tui| {
+            tui.style(Style {
+                flex_shrink: 0.0,
+                ..Default::default()
+            })
+            .ui(|ui| {
+                ui.heading(format!("{} Devices", icon::CPU));
+                ui.separator();
+            });
 
+            tui.style(Style {
+                flex_grow: 1.0,
+                min_size: Size { width: auto(), height: length(0.0) },
+                ..Default::default()
+            })
+            .ui(|ui| {
+                devices_panel_body(ui, state);
+            });
+        });
+}
+
+fn devices_panel_body(ui: &mut egui::Ui, state: &mut AppState) {
     if state.devices.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(12.0);

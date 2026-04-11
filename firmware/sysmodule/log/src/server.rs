@@ -43,29 +43,45 @@ fn notify_logs(level: LogLevel) {
 /// Maximum size for inline log messages in the ring buffer.
 const MAX_INLINE_LOG_SIZE: usize = 128;
 
-/// Max raw chunk: 8 (stream_id) + 1 (length) + 255 (data) = 264 bytes.
-const MAX_RAW_CHUNK: usize = 9 + 255;
+/// Max raw chunk: 1 (type) + 8 (stream_id) + 1 (length) + 255 (data) = 265 bytes.
+const MAX_RAW_CHUNK: usize = 1 + 9 + 255;
+const MAX_ENCODED_CHUNK: usize = cobs::max_encoding_length(MAX_RAW_CHUNK) + 1;
 
-/// Send a COBS-framed chunk over USART.
+// Scratch buffers parked in BSS. `send_frame` is on the hot dispatch
+// path from `LogDispatcher::dispatch` → `LogResource::{log,start,write}`,
+// so keeping these ~540 bytes off the stack matters for the tight
+// sysmodule_log stack budget.
+static FRAME_RAW: GlobalState<[u8; MAX_RAW_CHUNK]> =
+    GlobalState::new([0u8; MAX_RAW_CHUNK]);
+static FRAME_ENCODED: GlobalState<[u8; MAX_ENCODED_CHUNK]> =
+    GlobalState::new([0u8; MAX_ENCODED_CHUNK]);
+
+/// Send a COBS-framed log-fragment chunk over USART.
 ///
-/// Each chunk is: COBS([stream_id LE][length][data...]) + 0x00 delimiter.
+/// Wire layout after COBS-decoding + before the 0x00 delimiter:
+/// ```text
+///   [type = TYPE_LOG_FRAGMENT][stream_id: u64 LE][length: u8][data: length bytes]
+/// ```
+/// The type byte distinguishes log fragments from IPC-reply / tunnel-error
+/// chunks on the same USART.
 fn send_frame(stream_id: u64, data: &[u8]) {
     let mut offset = 0;
     while offset < data.len() {
         let chunk_len = (data.len() - offset).min(255);
+        let raw_len = 1 + 9 + chunk_len;
 
-        // Build raw chunk: [stream_id: 8][length: 1][data: chunk_len]
-        let raw_len = 9 + chunk_len;
-        let mut raw = [0u8; MAX_RAW_CHUNK];
-        raw[..8].copy_from_slice(&stream_id.to_le_bytes());
-        raw[8] = chunk_len as u8;
-        raw[9..raw_len].copy_from_slice(&data[offset..offset + chunk_len]);
+        FRAME_RAW.with(|raw| {
+            raw[0] = rcard_log::wire::TYPE_LOG_FRAGMENT;
+            raw[1..9].copy_from_slice(&stream_id.to_le_bytes());
+            raw[9] = chunk_len as u8;
+            raw[10..raw_len].copy_from_slice(&data[offset..offset + chunk_len]);
 
-        // COBS-encode and append 0x00 delimiter
-        let mut encoded = [0u8; cobs::max_encoding_length(MAX_RAW_CHUNK) + 1];
-        let enc_len = cobs::encode(&raw[..raw_len], &mut encoded);
-        encoded[enc_len] = 0x00;
-        usart_write(&encoded[..enc_len + 1]);
+            FRAME_ENCODED.with(|encoded| {
+                let enc_len = cobs::encode(&raw[..raw_len], encoded);
+                encoded[enc_len] = 0x00;
+                usart_write(&encoded[..enc_len + 1]);
+            });
+        });
 
         offset += chunk_len;
     }
@@ -103,6 +119,15 @@ impl LogState {
 
 static LOG_STATE: GlobalState<LogState> = GlobalState::new(LogState::new());
 
+/// Shared method scratch buffer. Used by `LogResource::log` (metadata +
+/// inline payload) and `LogResource::write` (streaming chunk). The
+/// ipc::server dispatch is sequential so these methods never overlap,
+/// and parking the buffer in BSS cuts ~150 bytes off `LogDispatcher::dispatch`'s
+/// stack frame.
+const METHOD_BUF_SIZE: usize = core::mem::size_of::<LogMetadata>() + MAX_INLINE_LOG_SIZE;
+static METHOD_BUF: GlobalState<[u8; METHOD_BUF_SIZE]> =
+    GlobalState::new([0u8; METHOD_BUF_SIZE]);
+
 // --- LogResource ---
 
 pub struct LogResource {
@@ -119,6 +144,7 @@ impl sysmodule_log_api::Log for LogResource {
         data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) {
         let task_index = meta.sender.task_index() as usize;
+        let generation = meta.sender.generation().as_u8() as u16;
 
         LOG_STATE.with(|s| {
             let stream_id = s.alloc_stream_id();
@@ -128,29 +154,27 @@ impl sysmodule_log_api::Log for LogResource {
                 level,
                 timestamp: get_timestamp(),
                 source: task_index as u16,
-                generation: 0,
+                generation,
                 log_id,
                 log_species: species,
             };
 
-            // Send over USART
             const META_SIZE: usize = core::mem::size_of::<LogMetadata>();
-            let mut buf = [0u8; META_SIZE + MAX_INLINE_LOG_SIZE];
-            let meta_bytes = zerocopy::IntoBytes::as_bytes(&metadata);
-            buf[..META_SIZE].copy_from_slice(meta_bytes);
-            let meta_len = META_SIZE;
-            let data_len = data.len().min(buf.len() - meta_len);
-            let _ = data.read_range(0, &mut buf[meta_len..meta_len + data_len]);
-            send_frame(stream_id, &buf[..meta_len + data_len]);
-
-            // Push to ring
-            s.ring.push(log_id, 0, &buf[..meta_len + data_len]);
+            METHOD_BUF.with(|buf| {
+                let meta_bytes = zerocopy::IntoBytes::as_bytes(&metadata);
+                buf[..META_SIZE].copy_from_slice(meta_bytes);
+                let data_len = data.len().min(buf.len() - META_SIZE);
+                let _ = data.read_range(0, &mut buf[META_SIZE..META_SIZE + data_len]);
+                send_frame(stream_id, &buf[..META_SIZE + data_len]);
+                s.ring.push(log_id, 0, &buf[..META_SIZE + data_len]);
+            });
         });
         notify_logs(level);
     }
 
     fn start(meta: Meta, level: LogLevel, species: u64) -> Option<Self> {
         let task_index = meta.sender.task_index() as usize;
+        let generation = meta.sender.generation().as_u8() as u16;
 
         LOG_STATE
             .with(|s| {
@@ -161,7 +185,7 @@ impl sysmodule_log_api::Log for LogResource {
                     level,
                     timestamp: get_timestamp(),
                     source: task_index as u16,
-                    generation: 0,
+                    generation,
                     log_id,
                     log_species: species,
                 };
@@ -183,14 +207,14 @@ impl sysmodule_log_api::Log for LogResource {
     }
 
     fn write(&mut self, _meta: Meta, data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>) {
-        let mut buf = [0u8; MAX_INLINE_LOG_SIZE];
-        let len = data.len().min(buf.len());
-        let _ = data.read_range(0, &mut buf[..len]);
-        send_frame(self.stream_id, &buf[..len]);
-
-        LOG_STATE.with(|s| {
-            s.ring.push(self.metadata.log_id, self.idx, &buf[..len]);
-            self.idx = self.idx.saturating_add(1);
+        METHOD_BUF.with(|buf| {
+            let len = data.len().min(MAX_INLINE_LOG_SIZE);
+            let _ = data.read_range(0, &mut buf[..len]);
+            send_frame(self.stream_id, &buf[..len]);
+            LOG_STATE.with(|s| {
+                s.ring.push(self.metadata.log_id, self.idx, &buf[..len]);
+                self.idx = self.idx.saturating_add(1);
+            });
         });
     }
 

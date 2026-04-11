@@ -1,0 +1,36 @@
+# sysmodule_host_proxy — the tunneled-IPC dispatcher.
+#
+# NOTE: there is deliberately NO `api/` sibling crate for this task. The
+# absence is load-bearing: with no `#[ipc::resource]` trait declared for
+# `host_proxy`, no other task can import a typed client stub, so no message
+# can ever be formed that names `host_proxy` as a target. That structurally
+# enforces host_proxy's in-degree-zero property in the IPC send graph.
+# Adding an api crate here would silently break that invariant.
+[package]
+name = "sysmodule_host_proxy"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bare-panics = []
+panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
+
+[dependencies]
+ipc = { path = "../../modules/ipc" }
+once-cell = { path = "../../modules/once_cell" }
+rcard-log = { path = "../../../shared/log", features = ["writer"] }
+rcard-log-macros = { path = "../../../shared/log/macros" }
+rcard-usb-proto = { path = "../../../shared/usb-proto" }
+sysmodule_host_transport_api = { path = "../host_transport/api" }
+sysmodule_log_api = { path = "../log/api" }
+sysmodule_reactor_api = { path = "../reactor/api" }
+userlib.workspace = true
+generated = { path = "../../modules/generated" }
+
+[[bin]]
+name = "sysmodule_host_proxy"
+test = false
+bench = false
+
+[lints]
+workspace = true

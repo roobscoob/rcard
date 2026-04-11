@@ -8,6 +8,7 @@ bare-panics = []
 
 [dependencies]
 ipc = { path = "../../../modules/ipc" }
+rcard-log = { path = "../../../../shared/log" }
 userlib.workspace = true
 zerocopy = "0.8"
 

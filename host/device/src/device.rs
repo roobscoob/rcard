@@ -1,10 +1,11 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::broadcast;
 
 use crate::adapter::{Adapter, AdapterId};
-use crate::logs::{Log, LogContents, LogEntry};
+use crate::logs::{ControlEvent, Log, LogContents, LogEntry};
 
 /// Events emitted by a device — adapter lifecycle changes, logs, and errors.
 #[derive(Clone, Debug)]
@@ -12,6 +13,12 @@ pub enum DeviceEvent {
     AdapterConnected(AdapterId),
     AdapterDisconnected(AdapterId),
     Log(Log),
+    /// A non-log control event observed on an adapter (e.g. an IPC reply
+    /// or tunnel error seen on the USART2 channel).
+    Control {
+        adapter: AdapterId,
+        event: ControlEvent,
+    },
     Error(AdapterError),
 }
 
@@ -41,35 +48,70 @@ impl LogSink {
     }
 
     /// Send a structured log entry (from a binary stream like USART2).
+    ///
+    /// Stamped with the current instant; use [`structured_at`] to preserve
+    /// the first-byte-received time from an earlier point in the pipeline.
     pub fn structured(&self, entry: LogEntry) {
+        self.structured_at(entry, Instant::now());
+    }
+
+    /// Send a structured log entry with an explicit `received_at` stamp.
+    pub fn structured_at(&self, entry: LogEntry, received_at: Instant) {
         let _ = self.tx.send(DeviceEvent::Log(Log {
             adapter: self.adapter,
             contents: LogContents::Structured(entry),
+            received_at,
         }));
     }
 
     /// Send a text log line (from a text stream like USART1).
     pub fn text(&self, text: String) {
+        self.text_at(text, Instant::now());
+    }
+
+    /// Send a text log line with an explicit `received_at` stamp.
+    pub fn text_at(&self, text: String, received_at: Instant) {
         let _ = self.tx.send(DeviceEvent::Log(Log {
             adapter: self.adapter,
             contents: LogContents::Text(text),
+            received_at,
         }));
     }
 
     /// Send a named auxiliary text log (e.g. "renode").
     pub fn auxiliary(&self, name: String, text: String) {
+        self.auxiliary_at(name, text, Instant::now());
+    }
+
+    /// Send a named auxiliary text log with an explicit `received_at` stamp.
+    pub fn auxiliary_at(&self, name: String, text: String, received_at: Instant) {
         let _ = self.tx.send(DeviceEvent::Log(Log {
             adapter: self.adapter,
             contents: LogContents::Auxiliary { name, text },
+            received_at,
         }));
     }
 
     /// Send a Renode emulator log with a parsed level and message.
     pub fn renode(&self, level: rcard_log::LogLevel, message: String) {
+        self.renode_at(level, message, Instant::now());
+    }
+
+    /// Send a Renode emulator log with an explicit `received_at` stamp.
+    pub fn renode_at(&self, level: rcard_log::LogLevel, message: String, received_at: Instant) {
         let _ = self.tx.send(DeviceEvent::Log(Log {
             adapter: self.adapter,
             contents: LogContents::Renode { level, message },
+            received_at,
         }));
+    }
+
+    /// Send a non-log control event (e.g. an IPC reply decoded off USART2).
+    pub fn control(&self, event: ControlEvent) {
+        let _ = self.tx.send(DeviceEvent::Control {
+            adapter: self.adapter,
+            event,
+        });
     }
 
     /// Report an adapter error.

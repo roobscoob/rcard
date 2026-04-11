@@ -3,6 +3,9 @@ pub mod device_renode;
 pub mod firmware_status;
 pub mod log_viewer;
 pub mod placeholder;
+pub mod raw_logs;
+pub mod raw_terminal;
+pub mod serial_control;
 
 pub mod serial_adapter;
 
@@ -22,8 +25,12 @@ pub enum Pane {
     FirmwareStatus(FirmwareId),
     /// Build output / progress view.
     Build(BuildId),
-    /// Serial adapter management view.
+    /// USART1 serial adapter management view (raw terminal).
     SerialAdapter(SerialPortIndex),
+    /// USART2 Logs sub-pane — decoded structured log entries.
+    SerialAdapterLogs(SerialPortIndex),
+    /// USART2 Control sub-pane — decoded IPC replies / tunnel errors.
+    SerialAdapterControl(SerialPortIndex),
 }
 
 impl Pane {
@@ -71,6 +78,16 @@ impl Pane {
                 .get(*idx)
                 .map(|cfg| format!("{} {}", icon::PLUG, cfg.port))
                 .unwrap_or_else(|| format!("{} Adapter", icon::PLUG)),
+            Pane::SerialAdapterLogs(idx) => state
+                .serial_ports
+                .get(*idx)
+                .map(|cfg| format!("{} {} — Logs", icon::PLUG, cfg.port))
+                .unwrap_or_else(|| format!("{} Logs", icon::PLUG)),
+            Pane::SerialAdapterControl(idx) => state
+                .serial_ports
+                .get(*idx)
+                .map(|cfg| format!("{} {} — Control", icon::PLUG, cfg.port))
+                .unwrap_or_else(|| format!("{} Control", icon::PLUG)),
         }
     }
 }
@@ -143,6 +160,32 @@ impl<'a> egui_tiles::Behavior<Pane> for PaneBehavior<'a> {
                 let idx = *idx;
                 if let Some(cfg) = self.state.serial_ports.get(idx) {
                     match serial_adapter::show(ui, cfg) {
+                        serial_adapter::SerialAdapterAction::Detach => {
+                            self.state.unregister_serial(idx);
+                        }
+                        serial_adapter::SerialAdapterAction::None => {}
+                    }
+                } else {
+                    ui.label("Adapter not found");
+                }
+            }
+            Pane::SerialAdapterLogs(idx) => {
+                let idx = *idx;
+                if let Some(cfg) = self.state.serial_ports.get(idx) {
+                    match serial_adapter::show_logs(ui, cfg) {
+                        serial_adapter::SerialAdapterAction::Detach => {
+                            self.state.unregister_serial(idx);
+                        }
+                        serial_adapter::SerialAdapterAction::None => {}
+                    }
+                } else {
+                    ui.label("Adapter not found");
+                }
+            }
+            Pane::SerialAdapterControl(idx) => {
+                let idx = *idx;
+                if let Some(cfg) = self.state.serial_ports.get(idx) {
+                    match serial_adapter::show_control(ui, cfg) {
                         serial_adapter::SerialAdapterAction::Detach => {
                             self.state.unregister_serial(idx);
                         }

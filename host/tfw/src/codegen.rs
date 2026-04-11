@@ -45,6 +45,13 @@ pub struct GeneratedConfig {
     /// Collected from all tasks' `peers` fields. A peer that isn't in the
     /// build gets `null` so the generated code can use `Option<TaskId>`.
     pub peers: BTreeMap<String, Option<usize>>,
+
+    /// Per-task IRQ name → notification bit mapping.
+    /// Outer key: task crate name. Inner key: `{peripheral}_{irq_name}` from
+    /// the peripheral_map. Value: the notification bit the kernel posts when
+    /// the IRQ fires (matches what tfw's compile.rs already wires into the
+    /// kernel's IRQ-to-task table).
+    pub task_irqs: BTreeMap<String, BTreeMap<String, u32>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,8 +189,10 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
         }
     }
 
-    // IPC ACL — derived from dependency graph.
-    // If task A depends on task B (directly), A is allowed to call B.
+    // IPC ACL — derived from the dependency graph.
+    // If task A depends on task B, A is allowed to call B. Strictly one-way:
+    // `peers` does NOT grant ACL (only TaskId visibility), to avoid
+    // accidentally handing out reverse-direction call rights.
     let mut ipc_acl: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (client_name, task) in &all_tasks {
         if let Some(&client_idx) = task_indices.get(*client_name) {
@@ -194,21 +203,26 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
                     .or_default()
                     .push(client_idx);
             }
-            // Peers are bidirectional
-            for peer_name in &task.peers {
-                if let Some(&peer_idx) = task_indices.get(peer_name.as_str()) {
-                    ipc_acl
-                        .entry(client_name.to_string())
-                        .or_default()
-                        .push(peer_idx);
-                    ipc_acl
-                        .entry(peer_name.clone())
-                        .or_default()
-                        .push(client_idx);
-                }
+        }
+    }
+
+    // App-level trusted_senders: tasks listed in the app's .ncl file are
+    // permitted to send to any other task, independent of `depends_on`
+    // edges. Each trusted sender's index is added to every task's allowlist.
+    let trusted_indices: Vec<usize> = config
+        .trusted_senders
+        .iter()
+        .filter_map(|t| task_indices.get(&t.crate_info.package.name).copied())
+        .collect();
+    if !trusted_indices.is_empty() {
+        for receiver_name in &tasks {
+            let entry = ipc_acl.entry(receiver_name.clone()).or_default();
+            for &idx in &trusted_indices {
+                entry.push(idx);
             }
         }
     }
+
     // Deduplicate
     for list in ipc_acl.values_mut() {
         list.sort_unstable();
@@ -221,6 +235,27 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
         for peer_name in &task.peers {
             let idx = task_indices.get(peer_name.as_str()).copied();
             peers.insert(peer_name.clone(), idx);
+        }
+    }
+
+    // Per-task IRQ map. Mirrors tfw/compile.rs's IRQ-to-task wiring: every
+    // peripheral a task lists in `uses_peripherals` contributes its
+    // peripheral_map IRQs, with the same `1 << (irq_num % 32)` bit assignment.
+    // Names are qualified `{peripheral}_{irq_name}` to avoid collisions when
+    // a task uses multiple peripherals that happen to share inner IRQ names.
+    let mut task_irqs: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+    for (crate_name, task) in &all_tasks {
+        let mut entries: BTreeMap<String, u32> = BTreeMap::new();
+        for periph_name in &task.uses_peripherals {
+            if let Some(periph) = config.peripheral_map.get(periph_name) {
+                for (irq_name, &irq_num) in &periph.irqs {
+                    let qualified = format!("{periph_name}_{irq_name}");
+                    entries.insert(qualified, 1u32 << (irq_num % 32));
+                }
+            }
+        }
+        if !entries.is_empty() {
+            task_irqs.insert(crate_name.to_string(), entries);
         }
     }
 
@@ -238,6 +273,7 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
         pin_assignments: config.pin_assignments.clone(),
         ipc_acl,
         peers,
+        task_irqs,
     }
 }
 

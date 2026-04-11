@@ -1,6 +1,7 @@
 mod app;
 mod bridge;
 mod panels;
+mod port_registry;
 mod sidebar;
 mod state;
 mod stub;
@@ -30,6 +31,23 @@ fn main() -> eframe::Result<()> {
             let mut fonts = egui::FontDefinitions::default();
             egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
             ctx.set_fonts(fonts);
+
+            // egui_taffy prerequisites (see its README):
+            //
+            // 1. Multi-pass layout is required so taffy-measured leaves
+            //    can settle across passes. Without this, first-frame sizes
+            //    are wrong (often zero-width) and text wraps at every
+            //    space, growing vertically.
+            // 2. Default text wrap mode must be Extend so labels inside
+            //    taffy leaves compute their natural (single-line) width.
+            //    With Wrap, egui labels ask for the smallest possible
+            //    width, which collapses taffy flex children to zero.
+            ctx.options_mut(|o| {
+                o.max_passes = std::num::NonZeroUsize::new(3).unwrap();
+            });
+            ctx.style_mut(|s| {
+                s.wrap_mode = Some(egui::TextWrapMode::Extend);
+            });
 
             // Spawn the bridge before moving the runtime into the app.
             let handle = runtime.handle().clone();

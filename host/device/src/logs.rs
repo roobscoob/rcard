@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use rcard_log::{LogLevel, OwnedValue};
 
 use crate::adapter::AdapterId;
@@ -7,6 +9,13 @@ use crate::adapter::AdapterId;
 pub struct Log {
     pub adapter: AdapterId,
     pub contents: LogContents,
+    /// Host wall-clock at which the *first byte* of this log was
+    /// observed on the adapter's wire. Used by the host to order logs
+    /// from multiple adapters into a single coherent stream — arrival
+    /// time at the main-thread event handler is *not* sufficient,
+    /// since different adapters have different decode latencies and
+    /// may be gated behind discovery probes.
+    pub received_at: Instant,
 }
 
 /// The content of a log event.
@@ -20,6 +29,39 @@ pub enum LogContents {
     Auxiliary { name: String, text: String },
     /// Renode emulator log with a parsed level and message.
     Renode { level: LogLevel, message: String },
+}
+
+/// A non-log event decoded off a control channel (e.g. USART2 IPC replies).
+///
+/// These flow on the same wire as structured logs but aren't logs — they
+/// represent protocol-level messages (tunnel errors, IPC responses).
+#[derive(Clone, Debug)]
+pub enum ControlEvent {
+    /// `sysmodule_log` announced itself on startup, carrying the chip
+    /// UID and the firmware image's build id.
+    Awake {
+        seq: u16,
+        uid: [u8; rcard_usb_proto::messages::AWAKE_FIELD_SIZE],
+        firmware_id: [u8; rcard_usb_proto::messages::AWAKE_FIELD_SIZE],
+    },
+    /// A tunnel-level error frame from the device.
+    TunnelError {
+        code: rcard_usb_proto::messages::TunnelErrorCode,
+        seq: u16,
+    },
+    /// A simple frame with an opcode we don't yet decode.
+    UnknownSimple {
+        seq: u16,
+        opcode: u8,
+        payload: Vec<u8>,
+    },
+    /// An IPC reply frame — decoding of the reply body is deferred.
+    IpcReply {
+        seq: u16,
+        payload: Vec<u8>,
+    },
+    /// A malformed frame on the control channel.
+    FrameError(String),
 }
 
 /// A decoded structured log entry from a binary stream.

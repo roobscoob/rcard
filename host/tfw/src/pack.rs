@@ -92,12 +92,14 @@ fn build_ftab_from_config(config: &AppConfig, bootloader_bin_size: u32) -> Optio
 /// - `config.json` — full app config for host tools
 /// - `elf/kernel`, `elf/bootloader`, `elf/task/*` — ELFs for debugging
 /// - `log-metadata.json` — log metadata for structured log decoding
+/// - `ipc-metadata.json` — IPC resource / interface / server definitions
 pub fn pack(
     config: &AppConfig,
     artifacts: &[CompileArtifact],
     places_bin: &Path,
     bootloader_bin: Option<&Path>,
     log_metadata: Option<&Path>,
+    ipc_metadata: Option<&Path>,
     build_metadata: Option<&BuildMetadata>,
     out_path: &Path,
 ) -> Result<PathBuf, PackError> {
@@ -159,6 +161,15 @@ pub fn pack(
         if meta_path.exists() {
             let data = std::fs::read(meta_path).map_err(PackError::Io)?;
             zip.start_file("log-metadata.json", opts).map_err(PackError::Zip)?;
+            zip.write_all(&data).map_err(PackError::Io)?;
+        }
+    }
+
+    // IPC metadata
+    if let Some(meta_path) = ipc_metadata {
+        if meta_path.exists() {
+            let data = std::fs::read(meta_path).map_err(PackError::Io)?;
+            zip.start_file("ipc-metadata.json", opts).map_err(PackError::Zip)?;
             zip.write_all(&data).map_err(PackError::Io)?;
         }
     }
