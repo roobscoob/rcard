@@ -72,7 +72,7 @@ pub enum MessageTransferCloneError {
 // ── Static message family (4) ──────────────────────────
 
 /// Static message (no handle params).
-#[derive(Debug)]
+#[derive(Debug, Format)]
 pub enum StaticMessageError {
     ServerDied,
 }

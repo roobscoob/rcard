@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use once_cell::{GlobalState, OnceCell};
 use rcard_log::{OptionExt, ResultExt};
 use sysmodule_storage_api::{partitions, ring::RingWriter};
@@ -11,10 +11,6 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log; cleanup Reactor, Partition);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 sysmodule_storage_api::bind_partition!(Partition = SLOTS.sysmodule_storage);
-
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/notifications.rs"));
-}
 
 /// Last seen log entry ID for `consume_since`.
 static LAST_ID: GlobalState<u64> = GlobalState::new(0);

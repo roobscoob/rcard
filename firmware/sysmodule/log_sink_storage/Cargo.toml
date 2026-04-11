@@ -8,8 +8,6 @@ bare-panics = []
 panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 
 [dependencies]
-hubris-task-slots.workspace = true
-idyll_runtime.workspace = true
 ipc = { path = "../../modules/ipc" }
 once-cell = { path = "../../modules/once_cell" }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
@@ -19,9 +17,7 @@ sysmodule_reactor_api = { path = "../reactor/api" }
 sysmodule_storage_api = { path = "../storage/api" }
 storage_api = { path = "../../modules/storage_api" }
 userlib.workspace = true
-
-[build-dependencies]
-serde_json = "1"
+generated = { path = "../../modules/generated" }
 
 [[bin]]
 name = "sysmodule_log_sink_storage"

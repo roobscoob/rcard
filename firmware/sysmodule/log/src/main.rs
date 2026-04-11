@@ -2,7 +2,7 @@
 #![no_main]
 #![allow(clippy::unwrap_used)]
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use once_cell::OnceCell;
 use sysmodule_log_api::*;
 
@@ -11,12 +11,6 @@ mod server;
 
 sysmodule_usart_api::bind_usart!(Usart = SLOTS.sysmodule_usart);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
-
-#[allow(dead_code)]
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/task_names.rs"));
-    include!(concat!(env!("OUT_DIR"), "/notifications.rs"));
-}
 
 static USART: OnceCell<Usart> = OnceCell::new();
 

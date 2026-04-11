@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);

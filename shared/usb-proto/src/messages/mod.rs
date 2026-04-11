@@ -1,6 +1,6 @@
 mod message;
+pub mod log_entry;
+pub mod tunnel_error;
 
 pub use message::Message;
-
-pub mod ping;
-pub mod version;
+pub use tunnel_error::{TunnelError, TunnelErrorCode, OP_TUNNEL_ERROR};

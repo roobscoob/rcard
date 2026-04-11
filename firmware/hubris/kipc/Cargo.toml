@@ -1,0 +1,16 @@
+[package]
+name = "kipc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+abi = { path = "../abi" }
+userlib = { path = "../userlib" }
+ssmarshal = { version = "1.0.0", default-features = false }
+
+[lib]
+test = false
+bench = false
+
+[lints.rust]
+warnings = "deny"

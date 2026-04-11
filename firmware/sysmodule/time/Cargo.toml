@@ -8,8 +8,8 @@ default = ["bare-panics"]
 bare-panics = []
 
 [dependencies]
-idyll_runtime.workspace = true
 ipc = { path = "../../modules/ipc" }
+generated = { path = "../../modules/generated" }
 sysmodule_time_api = { path = "api", features = ["bare-panics"] }
 userlib.workspace = true
 

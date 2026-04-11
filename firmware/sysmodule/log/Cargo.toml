@@ -9,9 +9,8 @@ bare-panics = []
 panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 
 [dependencies]
-idyll_runtime.workspace = true
+cobs = { version = "0.3", default-features = false }
 ipc = { path = "../../modules/ipc" }
-hubris-task-slots.workspace = true
 rcard-log = { path = "../../../shared/log" }
 sysmodule_log_api = { path = "api", features = ["bare-panics"] }
 sysmodule_usart_api = { path = "../usart/api", features = ["bare-panics"] }
@@ -19,9 +18,7 @@ sysmodule_reactor_api = { path = "../reactor/api", features = ["bare-panics"] }
 once-cell = { path = "../../modules/once_cell" }
 userlib.workspace = true
 zerocopy = "0.8"
-
-[build-dependencies]
-serde_json = "1"
+generated = { path = "../../modules/generated" }
 
 [[bin]]
 name = "sysmodule_log"

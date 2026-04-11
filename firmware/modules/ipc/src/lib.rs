@@ -61,10 +61,7 @@ mod dyn_handle;
 pub mod errors;
 mod handle;
 mod server;
-mod task_count {
-    include!(concat!(env!("OUT_DIR"), "/task_count.rs"));
-}
-pub use task_count::TASK_COUNT;
+pub use generated::tasks::TASK_COUNT;
 
 pub use arena::{AllocError, Arena, CloneError, SharedArena};
 pub use dyn_handle::DynHandle;

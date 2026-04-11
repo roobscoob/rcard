@@ -1,0 +1,29 @@
+[package]
+name = "sysmodule_usb_protocol_fob"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bare-panics = []
+panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
+
+[dependencies]
+ipc = { path = "../../modules/ipc" }
+once-cell = { path = "../../modules/once_cell" }
+rcard-log = { path = "../../../shared/log", features = ["writer"] }
+rcard-log-macros = { path = "../../../shared/log/macros" }
+sysmodule_log_api = { path = "../log/api" }
+sysmodule_usb_api = { path = "../usb/api" }
+sysmodule_usb_protocol_api = { path = "../usb_protocol/api" }
+sysmodule_usb_protocol_fob_api = { path = "./api" }
+rcard-usb-proto = { path = "../../../shared/usb-proto" }
+userlib.workspace = true
+generated = { path = "../../modules/generated" }
+
+[[bin]]
+name = "sysmodule_usb_protocol_fob"
+test = false
+bench = false
+
+[lints]
+workspace = true

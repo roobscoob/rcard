@@ -1,5 +1,3 @@
-use std::sync::mpsc;
-
 use rcard_log::{LogMetadata, OwnedValue};
 
 #[derive(Debug)]
@@ -16,7 +14,7 @@ pub enum UsartLogKind {
 
 pub struct LogStream {
     pub metadata: LogMetadata,
-    pub values: mpsc::Receiver<OwnedValue>,
+    pub values: Vec<OwnedValue>,
 }
 
 impl core::fmt::Debug for UsartLogKind {

@@ -22,13 +22,23 @@ members = [
     "sysmodule/log_sink_storage",
     "sysmodule/usb",
     "sysmodule/usb/api",
+    "sysmodule/usb_protocol",
+    "sysmodule/usb_protocol/api",
+    "sysmodule/usb_protocol_host",
+    "sysmodule/usb_protocol_fob",
+    "sysmodule/usb_protocol_fob/api",
+    "sysmodule/log_sink_usb",
     "modules/storage_api",
     "modules/ipc",
     "modules/ipc/macros",
     "modules/once_cell",
+    "modules/generated",
+    "hubris/abi",
+    "hubris/userlib",
     "tasks/fob",
     "tasks/stub",
-    "tasks/kernel-sf32lb52",
+    "bootloader",
+    "kernels/sf32lb52",
     "tasks/supervisor",
     "tasks/idle",
 ]
@@ -43,23 +53,13 @@ panic = "deny"
 declare_interior_mutable_const = "allow"
 
 [workspace.dependencies]
-userlib = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173", features = [
-    "no-panic-handler",
-] }
-idyll_runtime = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
-hubris-build = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
-hubris-task-slots = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
-kipc = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173" }
+userlib = { path = "hubris/userlib" }
+abi = { path = "hubris/abi" }
+kipc = { path = "hubris/kipc" }
 rcard_log = { path = "../shared/log", package = "rcard-log" }
-
-[patch."https://github.com/cbiffle/exhubris"]
-userlib = { path = "patches/userlib" }
 
 [patch.crates-io]
 musb = { path = "patches/musb" }
-
-[patch."https://github.com/cbiffle/hubris-fork.git"]
-abi = { path = "patches/abi" }
 
 [profile.dev]
 panic = "abort"

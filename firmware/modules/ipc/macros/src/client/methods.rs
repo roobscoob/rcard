@@ -152,14 +152,14 @@ fn gen_constructor(
             })?;
             if rc == ipc::ACCESS_VIOLATION {
                 #_p!(
-                    "ipc: server {:?} rejected our message: access violation \
+                    "ipc: server {} rejected our message: access violation \
                      (this task is not authorized to use this server)",
                     server.get(),
                 );
             }
             if rc != ipc::kern::ResponseCode::SUCCESS {
                 #_p!(
-                    "ipc: server {:?} sent unexpected non-SUCCESS response code",
+                    "ipc: server {} sent unexpected non-SUCCESS response code",
                     server.get(),
                 );
             }

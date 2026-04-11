@@ -4,23 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-addr2line = "0.24"
-object = { version = "0.36", default-features = false, features = [
-    "read",
-    "elf",
-] }
 clap = { version = "4", features = ["derive"] }
-engine = { path = "../engine" }
+device = { path = "../device" }
+escargot = "0.5"
 emulator = { path = "../emulator" }
-gimli = "0.31"
 serial = { path = "../serial" }
+tfw = { path = "../tfw" }
 rcard-log = { path = "../../shared/log", features = ["alloc"] }
+rcard-places = { path = "../../shared/places", features = ["std"] }
+nusb = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 terminal_size = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 indicatif = "0.17"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+tfw = { path = "../tfw" }
+escargot = "0.5"
 
 [features]
 board-devkit-nano = []

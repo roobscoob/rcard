@@ -9,6 +9,7 @@ const CRC: u8 = 0x00;
 /// A raw SifliDebug frame — just a payload with wire format encode/decode.
 ///
 /// Knows nothing about command/response semantics.
+#[derive(Debug)]
 pub struct Frame {
     payload: Vec<u8>,
 }
@@ -29,10 +30,7 @@ impl Frame {
     /// Encode and write this frame to `writer`.
     ///
     /// Wire format: `7E 79 | len:u16le | 10 00 | payload`
-    pub async fn send(
-        &self,
-        writer: &mut (impl AsyncWrite + Unpin + ?Sized),
-    ) -> io::Result<()> {
+    pub async fn send(&self, writer: &mut (impl AsyncWrite + Unpin + ?Sized)) -> io::Result<()> {
         let len = self.payload.len() as u16;
         writer.write_all(&START_MARKER).await?;
         writer.write_all(&len.to_le_bytes()).await?;
@@ -45,9 +43,7 @@ impl Frame {
     ///
     /// Returns the frame and any bytes seen before the start marker
     /// (the "noise" — non-protocol traffic on the wire).
-    pub async fn recv(
-        reader: &mut (impl AsyncRead + Unpin),
-    ) -> io::Result<(Vec<u8>, Frame)> {
+    pub async fn recv(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(Vec<u8>, Frame)> {
         let mut noise = Vec::new();
         let mut prev: Option<u8> = None;
 
@@ -135,18 +131,12 @@ mod tests {
             Poll::Ready(Write::write(&mut self.0, buf))
         }
 
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<io::Result<()>> {
+        fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
             use std::io::Write;
             Poll::Ready(Write::flush(&mut self.0))
         }
 
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<io::Result<()>> {
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
     }
@@ -186,7 +176,9 @@ mod tests {
         frame.send(&mut wire).await.unwrap();
         assert_eq!(
             wire.into_inner(),
-            [0x7E, 0x79, 0x08, 0x00, 0x10, 0x00, 0x41, 0x54, 0x53, 0x46, 0x33, 0x32, 0x05, 0x21]
+            [
+                0x7E, 0x79, 0x08, 0x00, 0x10, 0x00, 0x41, 0x54, 0x53, 0x46, 0x33, 0x32, 0x05, 0x21
+            ]
         );
     }
 

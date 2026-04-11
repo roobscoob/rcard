@@ -5,7 +5,7 @@ pub mod allocator;
 pub mod frame_buffers;
 
 use frame_buffers::FrameBuffers;
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use once_cell::{GlobalState, OnceCell};
 use rcard_log::{OptionExt, ResultExt};
 use sysmodule_compositor_api::channel::ImageFormat;
@@ -17,10 +17,6 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log; cleanup Display, Reactor);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
-
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/notifications.rs"));
-}
 
 static FRAME_BUFFERS: OnceCell<GlobalState<FrameBuffers>> = OnceCell::new();
 

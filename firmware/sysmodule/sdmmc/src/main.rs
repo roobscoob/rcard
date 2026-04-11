@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use sifli_pac::sdmmc::Sdmmc as SdmmcPeri;
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use sysmodule_sdmmc_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);

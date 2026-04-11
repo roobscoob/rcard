@@ -8,14 +8,11 @@ default = ["bare-panics"]
 bare-panics = []
 
 [dependencies]
-idyll_runtime.workspace = true
 ipc = { path = "../../modules/ipc" }
 heapless = "0.8"
 sysmodule_reactor_api = { path = "api", features = ["bare-panics"] }
 userlib.workspace = true
-
-[build-dependencies]
-serde_json = "1"
+generated = { path = "../../modules/generated" }
 
 [[bin]]
 name = "sysmodule_reactor"

@@ -1,0 +1,10 @@
+[package]
+name = "call_rustfmt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.31", default-features = false, features = ["std"] }
+
+[lints.rust]
+warnings = "deny"

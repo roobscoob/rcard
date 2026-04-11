@@ -12,7 +12,7 @@ panics-emit-stack-dump = ["writer"]
 [dependencies]
 zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
 rcard-log-macros = { path = "macros" }
-userlib = { git = "https://github.com/cbiffle/exhubris", rev = "69d2f5ca8017fc3aaf692eae9455ac9fcd883173", optional = true }
+userlib = { path = "../../firmware/hubris/userlib", optional = true }
 
 [dev-dependencies]
 rcard-log = { path = ".", features = ["writer"] }

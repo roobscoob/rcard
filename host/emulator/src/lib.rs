@@ -10,20 +10,10 @@ pub mod peripherals;
 pub mod transport;
 
 pub use builder::DeviceBuilder;
-pub use transport::Emulator;
+pub use transport::EmulatedDevice;
 
 use monitor::Monitor;
 use peripherals::usart::UsartSink;
-
-/// Flash-mapped base address where the flash image is loaded.
-const FLASH_BASE: u64 = 0x1200_0000;
-
-/// Offset of ftab[3] (boot target) within sec_configuration.
-/// ftab[0] starts at byte 4; each entry is 16 bytes; index 3 → 4 + 3*16 = 52.
-const FTAB_ENTRY3_OFFSET: u64 = 4 + 3 * 16;
-
-/// Magic value at byte 0 of a valid sec_configuration partition.
-const SEC_CONFIG_MAGIC: u32 = 0x5345_4346;
 
 #[derive(Debug)]
 pub enum EmulatorError {
@@ -33,7 +23,7 @@ pub enum EmulatorError {
     MonitorDisconnected,
     MonitorCommand(String),
     TempFile(std::io::Error),
-    InvalidFtab(String),
+    InvalidPlaces(String),
 }
 
 impl std::fmt::Display for EmulatorError {
@@ -45,7 +35,7 @@ impl std::fmt::Display for EmulatorError {
             Self::MonitorDisconnected => write!(f, "Renode monitor disconnected"),
             Self::MonitorCommand(s) => write!(f, "monitor command error: {s}"),
             Self::TempFile(e) => write!(f, "temp file error: {e}"),
-            Self::InvalidFtab(s) => write!(f, "invalid ftab: {s}"),
+            Self::InvalidPlaces(s) => write!(f, "invalid places binary: {s}"),
         }
     }
 }
@@ -58,18 +48,33 @@ pub struct Device {
     _usart_threads: Vec<JoinHandle<()>>,
     _temp_dir: tempfile::TempDir,
     temp_path: PathBuf,
-    flash_data: Option<Vec<u8>>,
+    places_data: Option<Vec<u8>>,
 }
 
 impl Device {
-    /// Start execution. Reads the ftab at 0x1000_0000 to discover the boot
-    /// target address, sets VTOR, and runs until the CPU halts.
+    /// Load firmware segments from the places binary into the emulated
+    /// machine's memory, set VTOR, and run until the CPU halts.
     pub fn run(&mut self) -> Result<(), EmulatorError> {
-        let boot_addr = self.read_ftab_boot_target()?;
+        let data = self.places_data.as_ref()
+            .ok_or_else(|| EmulatorError::InvalidPlaces("no places binary loaded".into()))?;
 
-        let response = self
-            .monitor
-            .query(&format!("cpu VectorTableOffset 0x{boot_addr:X}"))?;
+        let image = rcard_places::PlacesImage::parse(data)
+            .map_err(|e| EmulatorError::InvalidPlaces(format!("{e:?}")))?;
+
+        // Load each segment into the emulated machine.
+        for (i, seg) in image.segments().enumerate() {
+            let seg_path = self.temp_path.join(format!("seg_{i}.bin"));
+            std::fs::write(&seg_path, seg.data()).map_err(EmulatorError::TempFile)?;
+            let seg_str = seg_path.to_string_lossy().replace('\\', "/");
+            self.monitor.send(&format!(
+                "sysbus LoadBinary @{seg_str} 0x{:X}", seg.dest()
+            ))?;
+        }
+
+        // Set vector table to the places entry point (kernel vector table).
+        let entry = image.entry_point();
+        self.monitor
+            .query(&format!("cpu VectorTableOffset 0x{entry:X}"))?;
 
         self.monitor.send("start")?;
 
@@ -83,45 +88,6 @@ impl Device {
             }
         }
         Ok(())
-    }
-
-    /// Parse the ftab at the start of the flash image to find the boot target address.
-    /// ftab[3].base is the flash address of the boot target.
-    fn read_ftab_boot_target(&self) -> Result<u64, EmulatorError> {
-        let data = self
-            .flash_data
-            .as_ref()
-            .ok_or_else(|| EmulatorError::InvalidFtab("no flash image loaded".into()))?;
-
-        if data.len() < 4 {
-            return Err(EmulatorError::InvalidFtab("image too small".into()));
-        }
-
-        // Verify magic
-        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if magic != SEC_CONFIG_MAGIC {
-            return Err(EmulatorError::InvalidFtab(format!(
-                "expected magic 0x{SEC_CONFIG_MAGIC:08X}, got 0x{magic:08X}"
-            )));
-        }
-
-        // Read ftab[3].base (first u32 of the entry)
-        let off = FTAB_ENTRY3_OFFSET as usize;
-        if data.len() < off + 4 {
-            return Err(EmulatorError::InvalidFtab(
-                "image too small for ftab[3]".into(),
-            ));
-        }
-        let boot_addr =
-            u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-
-        if boot_addr == 0 || boot_addr == 0xFFFF_FFFF {
-            return Err(EmulatorError::InvalidFtab(format!(
-                "ftab[3].base is 0x{boot_addr:08X} (uninitialized)"
-            )));
-        }
-
-        Ok(boot_addr as u64)
     }
 }
 

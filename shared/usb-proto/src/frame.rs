@@ -1,181 +1,142 @@
+use crate::error::HeaderError;
+use crate::header::FrameHeader;
+use crate::ipc_reply::IpcReplyView;
+use crate::ipc_request::IpcRequestView;
 use crate::messages::Message;
+use crate::simple::SimpleFrameView;
 
-/// Frame magic byte.
-pub const MAGIC: u8 = 0xCA;
-
-/// Header size in bytes.
-pub const HEADER_SIZE: usize = 6;
-
-/// Wire header for every frame.
-///
-/// ```text
-/// ┌─────────┬─────────┬──────────┬──────────┬──────────────┐
-/// │ magic   │ opcode  │ seq      │ length   │ payload ...  │
-/// │ 0xCA    │ u8      │ LE u16   │ LE u16   │ 0–65535      │
-/// └─────────┴─────────┴──────────┴──────────┴──────────────┘
-/// ```
+/// Discriminator byte identifying the frame type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FrameHeader {
-    pub opcode: u8,
-    pub seq: u16,
-    pub length: u16,
+#[repr(u8)]
+pub enum FrameType {
+    IpcRequest = 0x01,
+    IpcReply = 0x02,
+    Simple = 0x03,
 }
 
-/// A decoded frame: header + borrowed payload.
+impl FrameType {
+    pub fn from_u8(v: u8) -> Result<Self, HeaderError> {
+        match v {
+            0x01 => Ok(Self::IpcRequest),
+            0x02 => Ok(Self::IpcReply),
+            0x03 => Ok(Self::Simple),
+            other => Err(HeaderError::BadFrameType(other)),
+        }
+    }
+}
+
+/// A decoded frame: header + borrowed payload slice.
 #[derive(Clone, Copy, Debug)]
-pub struct Frame<'a> {
+pub struct RawFrame<'a> {
     pub header: FrameHeader,
     pub payload: &'a [u8],
 }
 
-impl<'a> Frame<'a> {
-    /// Try to parse this frame as a typed message.
-    ///
-    /// Returns `Some(M)` if the opcode matches and the payload parses
-    /// successfully, `None` otherwise.
-    pub fn try_parse<M: Message>(&self) -> Option<M> {
-        if self.header.opcode != M::OPCODE {
+impl<'a> RawFrame<'a> {
+    /// Parse this frame as an IPC request.
+    pub fn as_ipc_request(&self) -> Option<IpcRequestView<'a>> {
+        if self.header.frame_type != FrameType::IpcRequest {
             return None;
         }
-        M::from_payload(self.payload)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DecodeError {
-    /// Buffer too short to contain a header.
-    TooShort,
-    /// Magic byte mismatch — framing desync.
-    BadMagic,
-}
-
-impl FrameHeader {
-    /// Encode this header into a 6-byte buffer.
-    pub fn encode(&self, buf: &mut [u8; HEADER_SIZE]) {
-        buf[0] = MAGIC;
-        buf[1] = self.opcode as u8;
-        buf[2..4].copy_from_slice(&self.seq.to_le_bytes());
-        buf[4..6].copy_from_slice(&self.length.to_le_bytes());
+        IpcRequestView::from_bytes(self.payload)
     }
 
-    /// Decode a header from a byte slice.
-    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        if buf.len() < HEADER_SIZE {
-            return Err(DecodeError::TooShort);
+    /// Parse this frame as an IPC response (reply or tunnel error).
+    ///
+    /// Returns `Ok(IpcReplyView)` if the frame is an IPC reply, or
+    /// `Err(SimpleFrameView)` if it's a simple frame (e.g. tunnel error).
+    /// Returns `None` if the frame type doesn't match either.
+    pub fn as_ipc_response(&self) -> Option<IpcResponse<'a>> {
+        match self.header.frame_type {
+            FrameType::IpcReply => {
+                let view = IpcReplyView::from_bytes(self.payload)?;
+                Some(IpcResponse {
+                    inner: Ok(view),
+                    seq: self.header.seq,
+                })
+            }
+            FrameType::Simple => {
+                let view = SimpleFrameView::from_bytes(self.payload)?;
+                Some(IpcResponse {
+                    inner: Err(view),
+                    seq: self.header.seq,
+                })
+            }
+            _ => None,
         }
-        if buf[0] != MAGIC {
-            return Err(DecodeError::BadMagic);
-        }
-        let opcode = buf[1];
-        let seq = u16::from_le_bytes([buf[2], buf[3]]);
-        let length = u16::from_le_bytes([buf[4], buf[5]]);
-        Ok(Self { opcode, seq, length })
     }
 
-    /// Total frame size (header + payload).
-    pub fn frame_size(&self) -> usize {
-        HEADER_SIZE + self.length as usize
+    /// Parse this frame as a simple frame.
+    pub fn as_simple(&self) -> Option<SimpleFrameView<'a>> {
+        if self.header.frame_type != FrameType::Simple {
+            return None;
+        }
+        SimpleFrameView::from_bytes(self.payload)
+    }
+
+    /// Convenience: parse as a simple frame and try to decode a typed message.
+    pub fn parse_simple<M: Message>(&self) -> Option<M> {
+        self.as_simple()?.parse::<M>()
     }
 }
 
-/// Incrementally assemble frames from a byte stream.
+/// Response to an IPC request on the host-driven channel.
 ///
-/// Feed chunks from USB bulk reads into `push()`, then drain
-/// complete frames with `next_frame()`.
-pub struct FrameReader<const N: usize = 4096> {
-    buf: [u8; N],
-    len: usize,
+/// Wraps either an [`IpcReplyView`] (the IPC call executed) or a
+/// [`SimpleFrameView`] (tunnel-level error, e.g. task dead).
+///
+/// Use [`.parse::<T>()`](Self::parse) to decode the IPC return value,
+/// or [`.parse_simple::<M>()`](Self::parse_simple) to decode a tunnel
+/// error message:
+///
+/// ```ignore
+/// let response = frame.as_ipc_response()?;
+///
+/// if let Some(brightness) = response.parse::<Brightness>() {
+///     return Ok(brightness);
+/// }
+///
+/// if let Some(err) = response.parse_simple::<TunnelError>() {
+///     return Err(err.code.into());
+/// }
+/// ```
+pub struct IpcResponse<'a> {
+    inner: Result<IpcReplyView<'a>, SimpleFrameView<'a>>,
+    /// Sequence number from the frame header.
+    pub seq: u16,
 }
 
-impl<const N: usize> FrameReader<N> {
-    pub const fn new() -> Self {
-        Self { buf: [0; N], len: 0 }
-    }
-
-    /// Append raw bytes from a USB read. Returns the number of bytes consumed.
-    /// If the internal buffer is full, returns 0.
-    pub fn push(&mut self, data: &[u8]) -> usize {
-        let space = N - self.len;
-        let n = data.len().min(space);
-        self.buf[self.len..self.len + n].copy_from_slice(&data[..n]);
-        self.len += n;
-        n
-    }
-
-    /// Try to decode the next complete frame.
+impl<'a> IpcResponse<'a> {
+    /// Try to parse the IPC reply's return value as a zerocopy type.
     ///
-    /// Returns `Some(Frame)` if a full frame is available. The payload
-    /// borrows from the internal buffer and is valid until `consume()`.
-    pub fn next_frame(&self) -> Result<Option<Frame<'_>>, DecodeError> {
-        if self.len < HEADER_SIZE {
-            return Ok(None);
-        }
-        let header = FrameHeader::decode(&self.buf[..self.len])?;
-        let total = header.frame_size();
-        if self.len < total {
-            return Ok(None);
-        }
-        Ok(Some(Frame {
-            header,
-            payload: &self.buf[HEADER_SIZE..total],
-        }))
+    /// Returns `None` if this was a simple frame response, or if the
+    /// return value bytes don't parse as `T`.
+    pub fn parse<T: zerocopy::TryFromBytes + zerocopy::KnownLayout + zerocopy::Immutable>(
+        &self,
+    ) -> Option<T> {
+        self.inner.as_ref().ok()?.parse::<T>()
     }
 
-    /// Remove the first frame from the buffer after processing it.
-    /// Call this after `next_frame()` returns `Some`.
-    pub fn consume(&mut self, frame_size: usize) {
-        if frame_size >= self.len {
-            self.len = 0;
-        } else {
-            self.buf.copy_within(frame_size.., 0);
-            self.len -= frame_size;
-        }
+    /// Try to parse as a simple protocol message (e.g. tunnel error).
+    ///
+    /// Returns `None` if this was an IPC reply, or if the opcode doesn't
+    /// match `M::OPCODE`.
+    pub fn parse_simple<M: Message>(&self) -> Option<M> {
+        self.inner.as_ref().err()?.parse::<M>()
     }
 
-    /// Discard one byte and shift — use to recover from `BadMagic`.
-    pub fn skip_byte(&mut self) {
-        if self.len > 0 {
-            self.buf.copy_within(1.., 0);
-            self.len -= 1;
-        }
-    }
-}
-
-/// Build frames into a buffer for USB bulk writes.
-pub struct FrameWriter {
-    seq: u16,
-}
-
-impl FrameWriter {
-    pub const fn new() -> Self {
-        Self { seq: 0 }
+    /// The raw IPC reply view, if this was an IPC reply.
+    pub fn as_reply(&self) -> Option<&IpcReplyView<'a>> {
+        self.inner.as_ref().ok()
     }
 
-    /// Encode a typed message into `buf`. Returns the total number of bytes
-    /// written (header + payload), or `None` if the buffer is too small.
-    pub fn write<M: Message>(&mut self, msg: &M, buf: &mut [u8]) -> Option<usize> {
-        // Serialize payload after the header
-        if buf.len() < HEADER_SIZE {
-            return None;
-        }
-        let payload_len = msg.to_payload(&mut buf[HEADER_SIZE..])?;
-        let total = HEADER_SIZE + payload_len;
-
-        let header = FrameHeader {
-            opcode: M::OPCODE,
-            seq: self.seq,
-            length: payload_len as u16,
-        };
-        self.seq = self.seq.wrapping_add(1);
-
-        let mut hdr_buf = [0u8; HEADER_SIZE];
-        header.encode(&mut hdr_buf);
-        buf[..HEADER_SIZE].copy_from_slice(&hdr_buf);
-        Some(total)
+    /// The raw simple frame view, if this was a simple frame.
+    pub fn as_simple(&self) -> Option<&SimpleFrameView<'a>> {
+        self.inner.as_ref().err()
     }
 
-    /// Current sequence number (for correlation).
-    pub fn current_seq(&self) -> u16 {
-        self.seq
+    /// Whether this response is an IPC reply (vs. a simple frame).
+    pub fn is_reply(&self) -> bool {
+        self.inner.is_ok()
     }
 }

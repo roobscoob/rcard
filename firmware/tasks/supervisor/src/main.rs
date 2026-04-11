@@ -6,7 +6,7 @@ use core::mem::MaybeUninit;
 use hubris_abi::{FaultInfo, FaultSource, SchedState, TaskState};
 use sifli_pac::usart::vals::M;
 
-include!(concat!(env!("OUT_DIR"), "/task_names.rs"));
+use generated::tasks::TASK_NAMES;
 
 const FAULT_NOTIFICATION: u32 = 1;
 

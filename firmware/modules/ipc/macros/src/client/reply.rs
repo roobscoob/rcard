@@ -15,14 +15,14 @@ pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream
     let rc_check = quote! {
         if rc == ipc::ACCESS_VIOLATION {
             #_p!(
-                "ipc: server {:?} rejected our message: access violation \
+                "ipc: server {} rejected our message: access violation \
                  (this task is not authorized to use this server)",
                 #server_expr,
             );
         }
         if rc != ipc::kern::ResponseCode::SUCCESS {
             #_p!(
-                "ipc: server {:?} sent unexpected non-SUCCESS response code; \
+                "ipc: server {} sent unexpected non-SUCCESS response code; \
                  this indicates a protocol violation",
                 #server_expr,
             );
@@ -34,7 +34,7 @@ pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream
         quote! {
             #rc_check
             if len == 0 {
-                #_p!("ipc: server {:?} sent empty reply", #server_expr);
+                #_p!("ipc: server {} sent empty reply", #server_expr);
             }
             let mut __off = 0usize;
             match retbuffer[0] {
@@ -47,14 +47,14 @@ pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream
                     __off += 1;
                     let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[__off..len]) else {
                         #_p!(
-                            "ipc: server {:?} sent malformed error reply ({} bytes received)",
+                            "ipc: server {} sent malformed error reply ({} bytes received)",
                             #server_expr, len,
                         );
                     };
                     Err(err)
                 }
                 tag => #_p!(
-                    "ipc: server {:?} sent invalid result tag {}",
+                    "ipc: server {} sent invalid result tag {}",
                     #server_expr, tag,
                 ),
             }
@@ -63,21 +63,21 @@ pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream
         quote! {
             #rc_check
             if len == 0 {
-                #_p!("ipc: server {:?} sent empty reply", #server_expr);
+                #_p!("ipc: server {} sent empty reply", #server_expr);
             }
             match retbuffer[0] {
                 0u8 => Ok(()),
                 1u8 => {
                     let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
                         #_p!(
-                            "ipc: server {:?} sent malformed error reply ({} bytes received)",
+                            "ipc: server {} sent malformed error reply ({} bytes received)",
                             #server_expr, len,
                         );
                     };
                     Err(err)
                 }
                 tag => #_p!(
-                    "ipc: server {:?} sent invalid result tag {}",
+                    "ipc: server {} sent invalid result tag {}",
                     #server_expr, tag,
                 ),
             }
@@ -107,82 +107,82 @@ pub fn gen_ctor_reply(
         ConstructorReturn::Bare => (
             quote! { core::result::Result<Self, #err_type> },
             quote! {
-                if len == 0 { #_p!("ipc: server {:?} sent empty ctor reply", server.get()); }
+                if len == 0 { #_p!("ipc: server {} sent empty ctor reply", server.get()); }
                 match retbuffer[0] {
                     0u8 => {
                         let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[1..len]) else {
-                            #_p!("ipc: server {:?} sent malformed ctor reply ({} bytes)", server.get(), len);
+                            #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
                         };
                         Ok(#make_self)
                     }
                     1u8 => {
                         let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
-                            #_p!("ipc: server {:?} sent malformed ctor error ({} bytes)", server.get(), len);
+                            #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
                         };
                         Err(#err_type::from_wire(err))
                     }
-                    tag => #_p!("ipc: server {:?} sent invalid ctor tag {}", server.get(), tag),
+                    tag => #_p!("ipc: server {} sent invalid ctor tag {}", server.get(), tag),
                 }
             },
         ),
         ConstructorReturn::Result(error_type) => (
             quote! { core::result::Result<core::result::Result<Self, #error_type>, #err_type> },
             quote! {
-                if len == 0 { #_p!("ipc: server {:?} sent empty ctor reply", server.get()); }
+                if len == 0 { #_p!("ipc: server {} sent empty ctor reply", server.get()); }
                 match retbuffer[0] {
                     0u8 => {
-                        if len < 2 { #_p!("ipc: server {:?} sent truncated ctor reply", server.get()); }
+                        if len < 2 { #_p!("ipc: server {} sent truncated ctor reply", server.get()); }
                         match retbuffer[1] {
                             0u8 => {
                                 let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[2..len]) else {
-                                    #_p!("ipc: server {:?} sent malformed ctor reply ({} bytes)", server.get(), len);
+                                    #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
                                 };
                                 Ok(Ok(#make_self))
                             }
                             1u8 => {
                                 let Some((e, _)) = ipc::wire::read::<#error_type>(&retbuffer[2..len]) else {
-                                    #_p!("ipc: server {:?} sent malformed ctor domain error ({} bytes)", server.get(), len);
+                                    #_p!("ipc: server {} sent malformed ctor domain error ({} bytes)", server.get(), len);
                                 };
                                 Ok(Err(e))
                             }
-                            tag => #_p!("ipc: server {:?} sent invalid inner ctor tag {}", server.get(), tag),
+                            tag => #_p!("ipc: server {} sent invalid inner ctor tag {}", server.get(), tag),
                         }
                     }
                     1u8 => {
                         let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
-                            #_p!("ipc: server {:?} sent malformed ctor error ({} bytes)", server.get(), len);
+                            #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
                         };
                         Err(#err_type::from_wire(err))
                     }
-                    tag => #_p!("ipc: server {:?} sent invalid ctor tag {}", server.get(), tag),
+                    tag => #_p!("ipc: server {} sent invalid ctor tag {}", server.get(), tag),
                 }
             },
         ),
         ConstructorReturn::OptionSelf => (
             quote! { core::result::Result<core::option::Option<Self>, #err_type> },
             quote! {
-                if len == 0 { #_p!("ipc: server {:?} sent empty ctor reply", server.get()); }
+                if len == 0 { #_p!("ipc: server {} sent empty ctor reply", server.get()); }
                 match retbuffer[0] {
                     0u8 => {
-                        if len < 2 { #_p!("ipc: server {:?} sent truncated ctor reply", server.get()); }
+                        if len < 2 { #_p!("ipc: server {} sent truncated ctor reply", server.get()); }
                         match retbuffer[1] {
                             0u8 => {
                                 let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[2..len]) else {
-                                    #_p!("ipc: server {:?} sent malformed ctor reply ({} bytes)", server.get(), len);
+                                    #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
                                 };
                                 Ok(Some(#make_self))
                             }
                             1u8 => Ok(None),
-                            tag => #_p!("ipc: server {:?} sent invalid option tag {}", server.get(), tag),
+                            tag => #_p!("ipc: server {} sent invalid option tag {}", server.get(), tag),
                         }
                     }
                     1u8 => {
                         let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
-                            #_p!("ipc: server {:?} sent malformed ctor error ({} bytes)", server.get(), len);
+                            #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
                         };
                         Err(#err_type::from_wire(err))
                     }
-                    tag => #_p!("ipc: server {:?} sent invalid ctor tag {}", server.get(), tag),
+                    tag => #_p!("ipc: server {} sent invalid ctor tag {}", server.get(), tag),
                 }
             },
         ),

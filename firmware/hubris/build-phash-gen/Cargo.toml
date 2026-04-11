@@ -1,0 +1,13 @@
+[package]
+name = "phash-gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.31", default-features = false, features = ["std"] }
+rand = { version = "0.8", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
+phash = { path = "../phash" }
+
+[lints.rust]
+warnings = "deny"

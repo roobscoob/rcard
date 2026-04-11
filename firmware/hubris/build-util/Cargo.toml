@@ -1,0 +1,17 @@
+[package]
+name = "build-util"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.31", default-features = false, features = ["std"] }
+indexmap = { version = "1.4.0", default-features = false, features = ["serde-1"] }
+ordered-toml = { git = "https://github.com/oxidecomputer/ordered-toml", default-features = false }
+serde = { version = "1.0.114", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+toml = { version = "0.9.6", default-features = false, features = ["parse", "display", "serde", "preserve_order"] }
+
+toml-task = { path = "../toml-task" }
+
+[lints.rust]
+warnings = "deny"

@@ -4,7 +4,8 @@ use rcard_log::{LogLevel, LogMetadata};
 use sysmodule_log_api::LogError;
 
 use crate::ringbuf::LogRing;
-use crate::{generated, usart_write, Reactor};
+use crate::{usart_write, Reactor};
+use generated::notifications;
 
 fn get_timestamp() -> u64 {
     userlib::sys_get_timer().now
@@ -20,7 +21,7 @@ fn notify_logs(level: LogLevel) {
         LogLevel::Trace => 0,
     };
     let _ = Reactor::refresh(
-        generated::GROUP_ID_LOGS,
+        notifications::GROUP_ID_LOGS,
         0,
         priority,
         sysmodule_reactor_api::OverflowStrategy::DropOldest,
@@ -29,22 +30,43 @@ fn notify_logs(level: LogLevel) {
 
 // --- Framing protocol ---
 //
-// Wire format per frame: [u64 stream_id LE][u8 length][data...]
+// Wire format: COBS-encoded frames separated by 0x00 delimiters.
+// Each COBS frame decodes to: [u64 stream_id LE][u8 length][data...]
 // Each log message gets a unique stream_id. Within a stream:
-// - First bytes: hubpack-serialized LogMetadata
+// - First bytes: zerocopy-serialized LogMetadata
 // - Remaining bytes: Format-encoded argument data
+//
+// COBS (Consistent Overhead Byte Stuffing) ensures 0x00 never appears
+// in the encoded data, so the host can always resynchronize by scanning
+// for a 0x00 delimiter.
 
 /// Maximum size for inline log messages in the ring buffer.
 const MAX_INLINE_LOG_SIZE: usize = 128;
 
-/// Send a frame over USART: [u64 stream_id LE][u8 length][data...]
+/// Max raw chunk: 8 (stream_id) + 1 (length) + 255 (data) = 264 bytes.
+const MAX_RAW_CHUNK: usize = 9 + 255;
+
+/// Send a COBS-framed chunk over USART.
+///
+/// Each chunk is: COBS([stream_id LE][length][data...]) + 0x00 delimiter.
 fn send_frame(stream_id: u64, data: &[u8]) {
     let mut offset = 0;
     while offset < data.len() {
         let chunk_len = (data.len() - offset).min(255);
-        usart_write(&stream_id.to_le_bytes());
-        usart_write(&[chunk_len as u8]);
-        usart_write(&data[offset..offset + chunk_len]);
+
+        // Build raw chunk: [stream_id: 8][length: 1][data: chunk_len]
+        let raw_len = 9 + chunk_len;
+        let mut raw = [0u8; MAX_RAW_CHUNK];
+        raw[..8].copy_from_slice(&stream_id.to_le_bytes());
+        raw[8] = chunk_len as u8;
+        raw[9..raw_len].copy_from_slice(&data[offset..offset + chunk_len]);
+
+        // COBS-encode and append 0x00 delimiter
+        let mut encoded = [0u8; cobs::max_encoding_length(MAX_RAW_CHUNK) + 1];
+        let enc_len = cobs::encode(&raw[..raw_len], &mut encoded);
+        encoded[enc_len] = 0x00;
+        usart_write(&encoded[..enc_len + 1]);
+
         offset += chunk_len;
     }
 }
@@ -178,7 +200,7 @@ impl sysmodule_log_api::Log for LogResource {
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> Result<u32, LogError> {
         let caller = meta.sender.task_index();
-        if !generated::LOGS_SUBSCRIBERS.contains(&caller) {
+        if !notifications::LOGS_SUBSCRIBERS.contains(&caller) {
             return Err(LogError::Unauthorized);
         }
 

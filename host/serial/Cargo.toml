@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-engine = { path = "../engine" }
+cobs = "0.3"
+device = { path = "../device" }
 rcard-log = { path = "../../shared/log", features = ["alloc"] }
 serialport = "4"
-tokio = { version = "1", features = ["sync", "rt", "macros", "io-util"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "io-util", "time"] }
 tokio-serial = "5"
 zerocopy = "0.8"

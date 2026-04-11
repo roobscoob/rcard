@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use rcard_log::{debug, error, info, panic, trace, OptionExt};
 use sifli_pac::mpi::Mpi as MpiPeri;
 use sysmodule_mpi_api::*;

@@ -117,6 +117,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcard-places"
+version = "0.1.0"
+
+[[package]]
 name = "rcard-usb-proto"
 version = "0.1.0"
 dependencies = [
@@ -209,7 +213,6 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "userlib"
 version = "0.1.0"
-source = "git+https://github.com/cbiffle/exhubris?rev=69d2f5ca8017fc3aaf692eae9455ac9fcd883173#69d2f5ca8017fc3aaf692eae9455ac9fcd883173"
 dependencies = [
  "bitflags",
  "cfg-if",

@@ -9,6 +9,17 @@ use tokio::sync::mpsc;
 use super::frame::Frame;
 use super::protocol::{Command, Error, Response};
 
+/// Control messages to the background read loop.
+enum TapControl {
+    /// Switch the read loop into sentinel-resync mode: forward every byte as
+    /// passthrough noise while matching against `sentinel`. On match, drop
+    /// any parser state, signal `done`, and resume normal framing.
+    ResyncOnSentinel {
+        sentinel: Vec<u8>,
+        done: tokio::sync::oneshot::Sender<()>,
+    },
+}
+
 /// Split raw serial IO into a debug handle and transparent passthrough IO.
 ///
 /// Spawns a background task that reads from `reader`, routing SifliDebug
@@ -23,12 +34,14 @@ where
         Arc::new(tokio::sync::Mutex::new(Box::new(writer)));
     let (passthrough_tx, passthrough_rx) = mpsc::channel::<Vec<u8>>(64);
     let (frame_tx, frame_rx) = mpsc::channel::<Frame>(1);
+    let (control_tx, control_rx) = mpsc::channel::<TapControl>(4);
 
-    tokio::spawn(read_loop(reader, passthrough_tx, frame_tx));
+    tokio::spawn(read_loop(reader, passthrough_tx, frame_tx, control_rx));
 
     let handle = DebugHandle {
         writer: writer.clone(),
         frame_rx: tokio::sync::Mutex::new(frame_rx),
+        control_tx,
     };
     let tap_reader = TapReader {
         rx: passthrough_rx,
@@ -45,6 +58,7 @@ async fn read_loop(
     reader: impl AsyncRead + Unpin,
     passthrough_tx: mpsc::Sender<Vec<u8>>,
     frame_tx: mpsc::Sender<Frame>,
+    mut control_rx: mpsc::Receiver<TapControl>,
 ) {
     let mut reader = BufReader::new(reader);
     let mut noise = Vec::new();
@@ -52,15 +66,33 @@ async fn read_loop(
 
     loop {
         let mut byte_buf = [0u8; 1];
-        let b = match reader.read_exact(&mut byte_buf).await {
-            Ok(_) => byte_buf[0],
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                eprintln!("[tap] read task: got EOF");
-                break;
+        let b = tokio::select! {
+            biased;
+            ctrl = control_rx.recv() => {
+                match ctrl {
+                    Some(TapControl::ResyncOnSentinel { sentinel, done }) => {
+                        // Flush any accumulated noise before entering resync.
+                        if !noise.is_empty() {
+                            let _ = passthrough_tx.send(std::mem::take(&mut noise)).await;
+                        }
+                        prev_was_7e = false;
+                        if resync_on_sentinel(&mut reader, &passthrough_tx, &sentinel)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let _ = done.send(());
+                        continue;
+                    }
+                    None => break,
+                }
             }
-            Err(e) => {
-                eprintln!("[tap] read task: read error: {e}");
-                break;
+            result = reader.read_exact(&mut byte_buf) => {
+                match result {
+                    Ok(_) => byte_buf[0],
+                    Err(_) => break,
+                }
             }
         };
 
@@ -79,10 +111,7 @@ async fn read_loop(
                 Ok(frame) => {
                     let _ = frame_tx.send(frame).await;
                 }
-                Err(e) => {
-                    eprintln!("[tap] read task: frame body error: {e}");
-                    return;
-                }
+                Err(_) => return,
             }
         } else {
             if prev_was_7e {
@@ -111,6 +140,45 @@ async fn read_loop(
     }
 }
 
+/// Sentinel-resync sub-loop.
+///
+/// Forwards every received byte as passthrough noise while matching against
+/// `sentinel` with a rolling window. Returns when a contiguous match is
+/// found — any unrelated bytes before the match have already been forwarded
+/// to `passthrough_tx` so the downstream line reader sees the full sequence.
+///
+/// Handles self-overlap correctly: on mismatch, the window keeps the longest
+/// suffix of the input that is also a prefix of the sentinel.
+async fn resync_on_sentinel(
+    reader: &mut (impl AsyncRead + Unpin),
+    passthrough_tx: &mpsc::Sender<Vec<u8>>,
+    sentinel: &[u8],
+) -> io::Result<()> {
+    if sentinel.is_empty() {
+        return Ok(());
+    }
+    let mut window: Vec<u8> = Vec::with_capacity(sentinel.len());
+    loop {
+        let mut b = [0u8; 1];
+        reader.read_exact(&mut b).await?;
+        let byte = b[0];
+
+        // Forward as noise immediately so the downstream line reader sees it.
+        let _ = passthrough_tx.send(vec![byte]).await;
+
+        // Extend the window; if it would overflow, drop the front by one and
+        // check if the remaining suffix is still a prefix of the sentinel.
+        window.push(byte);
+        while !window.is_empty() && !sentinel.starts_with(&window) {
+            window.remove(0);
+        }
+
+        if window.len() == sentinel.len() {
+            return Ok(());
+        }
+    }
+}
+
 /// Read the remaining frame fields after the start marker has been consumed.
 async fn read_frame_body(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Frame> {
     let mut len_buf = [0u8; 2];
@@ -135,20 +203,18 @@ async fn read_frame_body(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Fr
 pub struct DebugHandle {
     writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
     frame_rx: tokio::sync::Mutex<mpsc::Receiver<Frame>>,
+    control_tx: mpsc::Sender<TapControl>,
 }
 
 /// Send a command and wait for the response.
 ///
 /// For fire-and-forget commands (`Exit`), returns `Ok(None)`.
 impl DebugHandle {
-    pub async fn request(&self, cmd: &Command<'_>) -> Result<Option<Response>, Error> {
+    pub async fn request(&self, cmd: &Command<'_>) -> Result<Response, Error> {
+        let frame = cmd.to_frame();
         {
             let mut w = self.writer.lock().await;
-            cmd.to_frame().send(&mut **w).await?;
-        }
-
-        if !cmd.expects_response() {
-            return Ok(None);
+            frame.send(&mut **w).await?;
         }
 
         let frame = self
@@ -159,10 +225,13 @@ impl DebugHandle {
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "read task exited"))?;
 
-        Ok(Some(Response::parse(frame.payload())?))
+        Ok(Response::parse(frame.payload())?)
     }
 
     /// Enter debug mode.
+    ///
+    /// Drains any stale response frames (e.g. from a previous Exit) before
+    /// sending the Enter command.
     pub async fn enter(&self) -> Result<(), Error> {
         self.request(&Command::Enter).await?;
         Ok(())
@@ -176,16 +245,59 @@ impl DebugHandle {
 
     /// Read `count` 32-bit words starting at `addr`.
     pub async fn mem_read(&self, addr: u32, count: u16) -> Result<Vec<u32>, Error> {
-        let resp = self.request(&Command::MemRead { addr, count }).await?;
-        match resp {
-            Some(Response::MemRead(words)) => Ok(words),
-            _ => unreachable!("MemRead always expects a response"),
+        match self.request(&Command::MemRead { addr, count }).await? {
+            Response::MemRead(words) => Ok(words),
+            _ => Err(Error::Protocol(
+                super::protocol::ProtocolError::UnexpectedResponse("MemRead"),
+            )),
         }
     }
 
     /// Write 32-bit words to `addr`.
     pub async fn mem_write(&self, addr: u32, data: &[u32]) -> Result<(), Error> {
-        self.request(&Command::MemWrite { addr, data }).await?;
+        match self.request(&Command::MemWrite { addr, data }).await? {
+            Response::MemWrite => Ok(()),
+            _ => Err(Error::Protocol(
+                super::protocol::ProtocolError::UnexpectedResponse("MemWrite"),
+            )),
+        }
+    }
+
+    /// Write 32-bit words to `addr` without waiting for a response.
+    /// Use for operations that kill the connection (e.g. soft reset via AIRCR).
+    pub async fn mem_write_no_response(&self, addr: u32, data: &[u32]) -> Result<(), Error> {
+        let cmd = Command::MemWrite { addr, data };
+        let mut w = self.writer.lock().await;
+        cmd.to_frame().send(&mut **w).await?;
+        Ok(())
+    }
+
+    /// Put the tap into sentinel-resync mode.
+    ///
+    /// The tap discards frame parser state and starts forwarding every
+    /// received byte as passthrough noise while matching a rolling window
+    /// against `sentinel`. Returns once the sentinel is found on the wire.
+    ///
+    /// Any stale frames left in the receive channel are drained before
+    /// returning, so the next `request()` call sees a clean slate.
+    ///
+    /// Use this after issuing a command that disrupts normal framing
+    /// (e.g. a soft reset that cuts the device's response mid-frame).
+    pub async fn resync_on_sentinel(&self, sentinel: Vec<u8>) -> Result<(), Error> {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        self.control_tx
+            .send(TapControl::ResyncOnSentinel {
+                sentinel,
+                done: done_tx,
+            })
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "tap closed"))?;
+        done_rx
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "tap closed"))?;
+        // Drain any stale frames that were routed before/during resync.
+        let mut rx = self.frame_rx.lock().await;
+        while rx.try_recv().is_ok() {}
         Ok(())
     }
 }

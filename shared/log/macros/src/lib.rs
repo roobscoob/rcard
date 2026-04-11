@@ -1,13 +1,13 @@
 mod attrs;
 mod derive_format;
-mod sidecar;
+mod section;
 mod species;
 
 use proc_macro::TokenStream;
 
 /// Derive the `Format` trait for structs and enums.
 ///
-/// Generates a `Format` impl and emits metadata to sidecar JSON files.
+/// Generates a `Format` impl and embeds metadata in `.log_strings` ELF sections.
 /// Hash-based IDs are used as type_ids and field_ids on the wire.
 ///
 /// Supports `#[format(key = "value")]` hint attributes on both the type and
@@ -21,7 +21,7 @@ pub fn derive_format(input: TokenStream) -> TokenStream {
 
 /// Internal macro used by the `info!`, `warn!`, etc. log macros.
 ///
-/// Emits metadata to a sidecar file and serializes arguments.
+/// Embeds metadata in `.log_strings` and serializes arguments.
 /// Not intended for direct use — use the level macros instead.
 #[proc_macro]
 pub fn __species(input: TokenStream) -> TokenStream {

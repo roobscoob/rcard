@@ -7,12 +7,8 @@ use quote::{format_ident, quote};
 use syn::parse_macro_input;
 
 mod client;
-mod emit_meta;
 mod lease;
 mod parse;
-mod resolve_acl;
-mod resolve_alloc;
-mod resolve_priority;
 mod server;
 mod server_macro;
 mod transfer;
@@ -63,44 +59,6 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Emit metadata for post-build handle ACL verification.
-    {
-        let crate_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-        let implements_str = attrs
-            .implements
-            .as_ref()
-            .and_then(|p| p.segments.last().map(|s| s.ident.to_string()));
-        let clone_str = attrs.clone_mode.map(|_| "refcount");
-        let handle_params: Vec<emit_meta::HandleParam> = methods
-            .iter()
-            .flat_map(|m| {
-                m.params.iter().filter_map(|p| {
-                    let mode = p.handle_mode?;
-                    Some(emit_meta::HandleParam {
-                        method: m.name.to_string(),
-                        handle_trait: p
-                            .impl_trait_name
-                            .as_ref()
-                            .map(|i| i.to_string())
-                            .unwrap_or_else(|| "(concrete)".to_string()),
-                        mode: match mode {
-                            parse::HandleMode::Move => "move".to_string(),
-                            parse::HandleMode::Clone => "clone".to_string(),
-                        },
-                    })
-                })
-            })
-            .collect();
-        emit_meta::emit_resource(
-            &crate_name,
-            &trait_name.to_string(),
-            attrs.kind,
-            implements_str.as_deref(),
-            clone_str,
-            &handle_params,
-        );
-    }
-
     let server_trait = gen_server_trait(trait_name, &methods, &attrs);
     let op_enum = gen_operation_enum(trait_name, &methods, &attrs);
     let dispatcher = gen_dispatcher(trait_name, &methods, &attrs);
@@ -134,12 +92,6 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(m) => m,
         Err(e) => return e.to_compile_error().into(),
     };
-
-    // Emit metadata for post-build handle ACL verification.
-    {
-        let crate_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-        emit_meta::emit_interface(&crate_name, &trait_name.to_string(), iface_attrs.kind);
-    }
 
     let attrs = ResourceAttr {
         arena_size: None,
@@ -184,17 +136,6 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn server(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as server_macro::ServerInput);
 
-    // Emit metadata for post-build handle ACL verification.
-    {
-        let task_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-        let serves: Vec<String> = input
-            .entries
-            .iter()
-            .map(|e| e.trait_name.to_string())
-            .collect();
-        emit_meta::emit_server(&task_name, &serves);
-    }
-
     server_macro::gen_server(&input).into()
 }
 
@@ -226,7 +167,7 @@ pub fn notification_handler(attr: TokenStream, item: TokenStream) -> TokenStream
 
     let output = quote! {
         #fn_vis fn #fn_name(__notif: &sysmodule_reactor_api::Notification) {
-            if __notif.group_id != generated::#group_id_const {
+            if __notif.group_id != ::generated::notifications::#group_id_const {
                 return;
             }
             let sender = __notif.sender_index;
@@ -242,84 +183,23 @@ pub fn notification_handler(attr: TokenStream, item: TokenStream) -> TokenStream
 // ipc::__check_uses!(...)
 // ===========================================================================
 
-/// Internal proc macro invoked by generated `bind_X!` macros.
-///
-/// Checks that the consuming crate has declared a dependency on the named
-/// task via `uses-sysmodule` in `app.kdl`. Reads `.work/app.uses.json`
-/// at compile time. If the file doesn't exist (e.g. during IDE cargo check),
-/// enforcement is silently skipped.
+/// No-op — dependency validation is handled by the Nickel config structure
+/// and ACL enforcement is at runtime via `generated::acl`.
 #[proc_macro]
-pub fn __check_uses(input: TokenStream) -> TokenStream {
-    let lit = parse_macro_input!(input as syn::LitStr);
-    let dep_task = lit.value();
-
-    let result = (|| -> Result<Option<String>, (bool, String)> {
-        let manifest_dir =
-            std::env::var("CARGO_MANIFEST_DIR").map_err(|e| (true, e.to_string()))?;
-        let project_root = std::path::PathBuf::from(&manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".work").exists())
-            .ok_or_else(|| (true, "no .work directory found".to_string()))?
-            .to_path_buf();
-
-        let json_path = project_root.join(".work").join("app.uses.json");
-        let content = std::fs::read_to_string(&json_path).map_err(|e| {
-            let is_not_found = e.kind() == std::io::ErrorKind::NotFound;
-            (is_not_found, e.to_string())
-        })?;
-
-        let pkg_name = std::env::var("CARGO_PKG_NAME").map_err(|e| (true, e.to_string()))?;
-
-        let root: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| (false, format!("failed to parse app.uses.json: {}", e)))?;
-        let obj = root
-            .as_object()
-            .ok_or_else(|| (false, "app.uses.json is not a JSON object".to_string()))?;
-
-        let deps = match obj.get(&pkg_name) {
-            Some(v) => v.as_array().ok_or_else(|| {
-                (
-                    false,
-                    format!("app.uses.json: value for '{}' is not an array", pkg_name),
-                )
-            })?,
-            None => return Ok(None),
-        };
-
-        if deps.iter().any(|d| d.as_str() == Some(&dep_task)) {
-            Ok(None)
-        } else {
-            let short_name = dep_task.strip_prefix("sysmodule_").unwrap_or(&dep_task);
-            Ok(Some(format!(
-                "This task does not declare a dependency on `{}`. \
-                 Add `uses-sysmodule \"{}\"` to your task in app.kdl.",
-                dep_task, short_name,
-            )))
-        }
-    })();
-
-    match result {
-        Ok(Some(err_msg)) => {
-            let err = syn::Error::new(lit.span(), err_msg);
-            err.to_compile_error().into()
-        }
-        Ok(None) => TokenStream::new(),
-        Err((true, _)) => TokenStream::new(),
-        Err((false, msg)) => {
-            syn::Error::new(proc_macro::Span::call_site().into(), msg)
-                .to_compile_error()
-                .into()
-        }
-    }
+pub fn __check_uses(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
 }
 
 // ===========================================================================
 // ipc::allocation!(...)
 // ===========================================================================
 
-/// Declare a static handle to a named memory allocation.
+/// Declare a static in a named memory region.
 ///
-/// Syntax: `ipc::allocation!(NAME = @alloc_name: Type);`
+/// The linker places the data in the region assigned by `tfw::layout`.
+/// At runtime, `get()` returns a one-shot `&'static mut` reference.
+///
+/// Syntax: `ipc::allocation!(NAME = @region_name: Type);`
 #[proc_macro]
 pub fn allocation(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as AllocationInput);
@@ -328,61 +208,11 @@ pub fn allocation(input: TokenStream) -> TokenStream {
     let alloc_name_str = parsed.alloc_name.to_string();
     let ty = &parsed.ty;
 
-    // Check that this task has uses-allocation in app.kdl
-    match resolve_alloc::check_acl(&alloc_name_str) {
-        Ok(Some(err_msg)) => {
-            return syn::Error::new(parsed.alloc_name.span(), err_msg)
-                .to_compile_error()
-                .into();
-        }
-        Ok(None) => {} // allowed
-        Err(_) => {}   // file missing, skip check
-    }
-
-    let info = match resolve_alloc::resolve(&alloc_name_str) {
-        Ok(Some(info)) => info,
-        Ok(None) => {
-            let msg = format!("unknown allocation '{}'", alloc_name_str);
-            return syn::Error::new(parsed.alloc_name.span(), msg)
-                .to_compile_error()
-                .into();
-        }
-        Err(_) => {
-            return quote! {
-                static #static_name: () = ();
-            }
-            .into();
-        }
-    };
-
-    let alloc_base = info.base as usize;
-    let alloc_size = info.size as usize;
-    let alloc_align = info.align as usize;
-
-    let size_msg = format!(
-        "size mismatch: type size != allocation '{}' size ({} bytes)",
-        alloc_name_str, alloc_size,
-    );
-    let align_msg = format!(
-        "alignment mismatch: type alignment > allocation '{}' alignment ({} bytes)",
-        alloc_name_str, alloc_align,
-    );
-
+    let section_name = format!(".{alloc_name_str}");
     let wrapper_type = format_ident!("__Alloc_{}", static_name);
-
-    let sentinel_ident =
-        format_ident!("__only_one_usage_allowed_for_allocation_{}", alloc_name_str);
+    let storage_ident = format_ident!("__alloc_storage_{}", alloc_name_str);
 
     let output = quote! {
-        const _: () = assert!(
-            core::mem::size_of::<#ty>() == #alloc_size,
-            #size_msg,
-        );
-        const _: () = assert!(
-            core::mem::align_of::<#ty>() <= #alloc_align,
-            #align_msg,
-        );
-
         #[allow(non_camel_case_types)]
         struct #wrapper_type;
 
@@ -391,15 +221,19 @@ pub fn allocation(input: TokenStream) -> TokenStream {
             fn get(&self) -> Option<&'static mut core::mem::MaybeUninit<#ty>> {
                 static TAKEN: core::sync::atomic::AtomicBool =
                     core::sync::atomic::AtomicBool::new(false);
-                ipc::alloc_take::take::<#ty>(&TAKEN, #alloc_base)
+                use core::ops::Not;
+                TAKEN
+                    .swap(true, core::sync::atomic::Ordering::Relaxed)
+                    .not()
+                    .then(|| unsafe { &mut *core::ptr::addr_of_mut!(#storage_ident) })
             }
         }
 
-        static #static_name: #wrapper_type = #wrapper_type;
+        #[unsafe(link_section = #section_name)]
+        static mut #storage_ident: core::mem::MaybeUninit<#ty> =
+            core::mem::MaybeUninit::uninit();
 
-        #[unsafe(no_mangle)]
-        #[unsafe(link_section = ".discard")]
-        static #sentinel_ident: () = ();
+        static #static_name: #wrapper_type = #wrapper_type;
     };
 
     output.into()

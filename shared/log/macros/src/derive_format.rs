@@ -26,18 +26,16 @@ fn meta_hash(key: &str) -> u64 {
     hasher.finish()
 }
 
-/// Emit a sidecar JSON file for a metadata entry and return its hash as a u64 literal.
-fn emit_meta(filename_prefix: &str, key: &str, json: serde_json::Value) -> u64 {
+/// Emit a `.log_strings` section entry for a metadata entry and return its hash
+/// plus the tokens that define the section static.
+fn emit_meta(key: &str, json: serde_json::Value) -> (u64, TokenStream) {
     let hash = meta_hash(key);
     let hash_hex = format!("0x{:016x}", hash);
-    crate::sidecar::emit(
-        &format!("{}.{:016x}.json", filename_prefix, hash),
-        &serde_json::json!({
-            "id": hash_hex,
-            "entry": json,
-        }),
-    );
-    hash
+    let tokens = crate::section::emit(&serde_json::json!({
+        "id": hash_hex,
+        "entry": json,
+    }));
+    (hash, tokens)
 }
 
 fn derive_struct(
@@ -74,14 +72,16 @@ fn derive_struct(
         field_json_entries.push(entry);
     }
 
-    // Type-level metadata → sidecar
+    // Type-level metadata → .log_strings section
     let type_json = serde_json::json!({
         "kind": "struct",
         "name": name_str,
         "hints": struct_hints,
         "fields": field_json_entries,
     });
-    let type_hash: u64 = emit_meta("type", &format!("type:{}", name_str), type_json);
+    let (type_hash, type_section) = emit_meta(&format!("type:{}", name_str), type_json);
+
+    let mut section_tokens = vec![type_section];
 
     // Per-field metadata + format body
     let mut format_body = Vec::new();
@@ -99,11 +99,11 @@ fn derive_struct(
             "name": field_name_str,
             "index": i,
         });
-        let field_hash: u64 = emit_meta(
-            "field",
+        let (field_hash, field_section) = emit_meta(
             &format!("field:{}.{}", name_str, field_name_str),
             field_json,
         );
+        section_tokens.push(field_section);
 
         let tmp = format_ident!("__field{}", i);
         let field_copy = if is_named {
@@ -160,6 +160,8 @@ fn derive_struct(
     };
 
     quote! {
+        #(#section_tokens)*
+
         impl rcard_log::formatter::Format for #name {
             fn format<W: rcard_log::formatter::Writer>(&self, __f: &mut rcard_log::formatter::Formatter<W>) {
                 #format_call
@@ -178,15 +180,16 @@ fn derive_enum(
 
     let variant_names: Vec<String> = data.variants.iter().map(|v| v.ident.to_string()).collect();
 
-    // Enum-level metadata → sidecar
+    // Enum-level metadata → .log_strings section
     let enum_json = serde_json::json!({
         "kind": "enum",
         "name": name_str,
         "hints": enum_hints,
         "variants": variant_names,
     });
-    let _enum_hash: u64 = emit_meta("type", &format!("type:{}", name_str), enum_json);
+    let (_enum_hash, enum_section) = emit_meta(&format!("type:{}", name_str), enum_json);
 
+    let mut section_tokens = vec![enum_section];
     let mut match_arms = Vec::new();
 
     for variant in &data.variants {
@@ -203,7 +206,8 @@ fn derive_enum(
                     "name": variant_name_str,
                     "style": "unit",
                 });
-                let variant_hash: u64 = emit_meta("variant", &variant_key, variant_json);
+                let (variant_hash, variant_section) = emit_meta(&variant_key, variant_json);
+                section_tokens.push(variant_section);
 
                 match_arms.push(quote! {
                     #name::#variant_ident => {
@@ -238,11 +242,11 @@ fn derive_enum(
                         "name": field_name_str,
                         "index": i,
                     });
-                    let field_hash: u64 = emit_meta(
-                        "field",
+                    let (field_hash, field_section) = emit_meta(
                         &format!("field:{}::{}.{}", name_str, variant_name_str, field_name_str),
                         field_json,
                     );
+                    section_tokens.push(field_section);
 
                     body.push(quote! {
                         __f.write_field_id(#field_hash);
@@ -257,7 +261,8 @@ fn derive_enum(
                     "style": "struct",
                     "fields": field_json_entries,
                 });
-                let variant_hash: u64 = emit_meta("variant", &variant_key, variant_json);
+                let (variant_hash, variant_section) = emit_meta(&variant_key, variant_json);
+                section_tokens.push(variant_section);
 
                 let field_idents: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
 
@@ -284,7 +289,8 @@ fn derive_enum(
                     "style": "tuple",
                     "field_count": field_count,
                 });
-                let variant_hash: u64 = emit_meta("variant", &variant_key, variant_json);
+                let (variant_hash, variant_section) = emit_meta(&variant_key, variant_json);
+                section_tokens.push(variant_section);
 
                 let binding_names: Vec<_> = (0..fields.unnamed.len())
                     .map(|i| format_ident!("__f{}", i))
@@ -315,6 +321,8 @@ fn derive_enum(
     }
 
     quote! {
+        #(#section_tokens)*
+
         impl rcard_log::formatter::Format for #name {
             fn format<W: rcard_log::formatter::Writer>(&self, __f: &mut rcard_log::formatter::Formatter<W>) {
                 match self {

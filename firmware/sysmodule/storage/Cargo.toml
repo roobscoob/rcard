@@ -8,8 +8,7 @@ bare-panics = []
 panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 
 [dependencies]
-hubris-task-slots.workspace = true
-idyll_runtime.workspace = true
+generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc" }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
@@ -18,7 +17,7 @@ sysmodule_mpi_api = { path = "../mpi/api" }
 sysmodule_storage_api = { path = "api" }
 once-cell = { path = "../../modules/once_cell" }
 storage_api = { path = "../../modules/storage_api" }
-userlib = { workspace = true, features = ["no-panic-handler"] }
+userlib.workspace = true
 
 [build-dependencies]
 serde_json = "1"

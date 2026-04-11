@@ -1,0 +1,22 @@
+[package]
+name = "tfw"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+addr2line = "0.24"
+escargot = "0.5"
+gimli = "0.31"
+glob = "0.3"
+object = { version = "0.36", default-features = false, features = ["read", "write", "elf"] }
+rcard-log = { path = "../../shared/log", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.8"
+build-kconfig = { path = "../../firmware/hubris/build-kconfig" }
+nickel-lang-core = "0.17"
+rcard-places = { path = "../../shared/places", features = ["std"] }
+tempfile = "3"
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+uuid = { version = "1.23.0", features = ["v4"] }

@@ -1,0 +1,7 @@
+[package]
+name = "unwrap-lite"
+version = "0.1.0"
+edition = "2021"
+
+[lints.rust]
+warnings = "deny"

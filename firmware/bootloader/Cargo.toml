@@ -1,0 +1,19 @@
+[package]
+name = "bootloader-sf32lb52"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bootloader-sf32lb52"
+test = false
+bench = false
+
+[dependencies]
+rcard-places = { path = "../../shared/places" }
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+
+[build-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

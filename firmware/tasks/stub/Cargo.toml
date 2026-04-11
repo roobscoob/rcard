@@ -8,13 +8,12 @@ bare-panics = []
 panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 
 [dependencies]
-hubris-task-slots.workspace = true
+generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc" }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
-sysmodule_usb_api = { path = "../../sysmodule/usb/api" }
-userlib = { workspace = true, features = ["no-panic-handler"] }
+userlib.workspace = true
 
 [[bin]]
 name = "stub"

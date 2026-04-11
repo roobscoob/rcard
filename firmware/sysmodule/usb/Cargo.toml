@@ -8,8 +8,7 @@ bare-panics = []
 panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 
 [dependencies]
-hubris-task-slots.workspace = true
-idyll_runtime.workspace = true
+generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc" }
 musb = { version = "0.3", features = ["builtin-sf32lb52x", "usb-device-impl"] }
 sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
@@ -18,7 +17,7 @@ rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
 sysmodule_usb_api = { path = "api" }
 usb-device = "0.3"
-userlib = { workspace = true, features = ["no-panic-handler"] }
+userlib.workspace = true
 
 [[bin]]
 name = "sysmodule_usb"

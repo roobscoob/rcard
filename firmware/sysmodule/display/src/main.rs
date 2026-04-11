@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use sysmodule_display_api::*;
 
 static DISPLAY_IN_USE: AtomicBool = AtomicBool::new(false);
@@ -14,6 +14,23 @@ sysmodule_log_api::panic_handler!(Log);
 
 fn lcdc() -> sifli_pac::lcdc::Lcdc {
     sifli_pac::LCDC1
+}
+
+fn gpio() -> sifli_pac::hpsys_gpio::HpsysGpio {
+    sifli_pac::HPSYS_GPIO
+}
+
+/// PA02 — display_en
+const DISPLAY_EN_BIT: u32 = 1 << 2;
+
+fn set_display_en(on: bool) {
+    let g = gpio();
+    if on {
+        g.doesr0().write(|w| w.0 = DISPLAY_EN_BIT);
+        g.dosr0().write(|w| w.0 = DISPLAY_EN_BIT);
+    } else {
+        g.docr0().write(|w| w.0 = DISPLAY_EN_BIT);
+    }
 }
 
 fn busy_wait(cycles: u32) {
@@ -34,7 +51,8 @@ fn spi_send(is_data: bool, byte: u8) {
     l.lcd_single().write(|w| w.0 = if is_data { 1 } else { 0 });
     l.lcd_wr().write(|w| w.0 = byte as u32);
     // bit 1: WR_TRIG — triggers the SPI write; TYPE must remain set
-    l.lcd_single().write(|w| w.0 = if is_data { 1 | (1 << 1) } else { 1 << 1 });
+    l.lcd_single()
+        .write(|w| w.0 = if is_data { 1 | (1 << 1) } else { 1 << 1 });
 }
 
 fn ssd1312_cmd(byte: u8) {
@@ -60,9 +78,11 @@ fn lcdc_init_spi() {
     l.spi_if_conf().write(|w| w.0 = (1 << 27) | (4 << 6));
     // LCD_IF_CONF: LCD_RSTB = 0 (assert reset),
     //              PWH[17:12] = 1, PWL[11:6] = 1, TAH[5:3] = 1, TAS[2:0] = 1
-    l.lcd_if_conf().write(|w| w.0 = (1 << 12) | (1 << 6) | (1 << 3) | 1);
+    l.lcd_if_conf()
+        .write(|w| w.0 = (1 << 12) | (1 << 6) | (1 << 3) | 1);
     // LCD_IF_CONF: bit 23 LCD_RSTB = 1 (release reset), same timing
-    l.lcd_if_conf().write(|w| w.0 = (1 << 23) | (1 << 12) | (1 << 6) | (1 << 3) | 1);
+    l.lcd_if_conf()
+        .write(|w| w.0 = (1 << 23) | (1 << 12) | (1 << 6) | (1 << 3) | 1);
     // Wait for SSD1312 to complete internal reset (~3us minimum)
     busy_wait(1_000);
 }
@@ -123,6 +143,7 @@ impl Display for DisplayResource {
             return Err(DisplayOpenError::AlreadyOpen);
         }
 
+        set_display_en(true);
         lcdc_init_spi();
         ssd1312_init(&config);
 
@@ -155,6 +176,7 @@ impl Display for DisplayResource {
 impl Drop for DisplayResource {
     fn drop(&mut self) {
         ssd1312_cmd(0xAE); // Display off
+        set_display_en(false);
         DISPLAY_IN_USE.store(false, Ordering::Release);
     }
 }

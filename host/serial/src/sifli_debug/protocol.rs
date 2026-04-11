@@ -3,6 +3,7 @@ use std::fmt;
 use super::frame::Frame;
 
 // Response codes from the chip.
+const RESP_EXIT: u8 = 0xD0;
 const RESP_ENTER: u8 = 0xD1;
 const RESP_MEM_READ: u8 = 0xD2;
 const RESP_MEM_WRITE: u8 = 0xD3;
@@ -17,6 +18,7 @@ const OP_MEM_READ: &[u8] = b"@r";
 const OP_MEM_WRITE: &[u8] = b"@w";
 
 /// A SifliDebug command to send to the chip.
+#[derive(Debug)]
 pub enum Command<'a> {
     Enter,
     Exit,
@@ -28,11 +30,6 @@ impl Command<'_> {
     /// Build a `Frame` from this command.
     pub fn to_frame(&self) -> Frame {
         Frame::new(self.to_payload())
-    }
-
-    /// Whether we should wait for a response frame after sending.
-    pub fn expects_response(&self) -> bool {
-        !matches!(self, Command::Exit)
     }
 
     fn to_payload(&self) -> Vec<u8> {
@@ -73,6 +70,8 @@ impl Command<'_> {
 /// A parsed response from the chip.
 #[derive(Debug)]
 pub enum Response {
+    /// Exit acknowledged (0xD0).
+    Exit,
     /// Enter acknowledged (0xD1).
     Enter,
     /// Memory read result (0xD2).
@@ -88,6 +87,7 @@ impl Response {
         let body = &payload[1..];
 
         match code {
+            RESP_EXIT => Ok(Response::Exit),
             RESP_ENTER => Ok(Response::Enter),
             RESP_MEM_WRITE => Ok(Response::MemWrite),
             RESP_MEM_READ => {
@@ -118,6 +118,7 @@ pub enum ProtocolError {
     PayloadTooShort,
     UnalignedReadData,
     UnknownResponseCode(u8),
+    UnexpectedResponse(&'static str),
 }
 
 impl fmt::Display for ProtocolError {
@@ -131,6 +132,9 @@ impl fmt::Display for ProtocolError {
             ProtocolError::UnknownResponseCode(c) => {
                 write!(f, "unknown response code: 0x{c:02X}")
             }
+            ProtocolError::UnexpectedResponse(expected) => {
+                write!(f, "unexpected response (expected {expected})")
+            }
         }
     }
 }
@@ -142,6 +146,7 @@ impl std::error::Error for ProtocolError {}
 pub enum Error {
     Io(std::io::Error),
     Protocol(ProtocolError),
+    Timeout,
 }
 
 impl fmt::Display for Error {
@@ -149,6 +154,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Protocol(e) => write!(f, "protocol: {e}"),
+            Error::Timeout => write!(f, "timeout"),
         }
     }
 }
@@ -158,6 +164,7 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Protocol(e) => Some(e),
+            Error::Timeout => None,
         }
     }
 }
@@ -218,7 +225,9 @@ mod tests {
         .to_frame();
         assert_eq!(
             frame.payload(),
-            &[0x40, 0x77, 0xF0, 0xED, 0x00, 0xE0, 0x01, 0x00, 0x03, 0x00, 0x5F, 0xA0]
+            &[
+                0x40, 0x77, 0xF0, 0xED, 0x00, 0xE0, 0x01, 0x00, 0x03, 0x00, 0x5F, 0xA0
+            ]
         );
     }
 

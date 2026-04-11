@@ -4,3 +4,26 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.31"
+egui_tiles = "0.12"
+egui_extras = "0.31"
+egui_ltreeview = "0.1.10"
+egui-phosphor = "0.9"
+escargot = "0.5"
+rfd = "0.15"
+crossbeam-channel = "0.5"
+device = { path = "../device" }
+serial = { path = "../serial" }
+usb = { path = "../usb" }
+emulator = { path = "../emulator" }
+tfw = { path = "../tfw" }
+rcard-log = { path = "../../shared/log", features = ["alloc"] }
+rcard-places = { path = "../../shared/places", features = ["std"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[build-dependencies]
+tfw = { path = "../tfw" }
+escargot = "0.5"

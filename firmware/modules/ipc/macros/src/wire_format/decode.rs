@@ -13,13 +13,13 @@ pub fn gen_decode_return_value(rt: &syn::Type, server_expr: &TokenStream2) -> To
     if let Some(inner) = extract_option_inner(rt) {
         quote! {{
             if __off >= len {
-                #_p!("ipc: server {:?} sent truncated reply", #server_expr);
+                #_p!("ipc: server {} sent truncated reply", #server_expr);
             }
             match retbuffer[__off] {
                 0u8 => {
                     __off += 1;
                     let Some((__val, _)) = ipc::wire::read::<#inner>(&retbuffer[__off..len]) else {
-                        #_p!("ipc: server {:?} sent malformed reply ({} bytes)", #server_expr, len);
+                        #_p!("ipc: server {} sent malformed reply ({} bytes)", #server_expr, len);
                     };
                     __off += core::mem::size_of_val(&__val);
                     Some(__val)
@@ -28,7 +28,7 @@ pub fn gen_decode_return_value(rt: &syn::Type, server_expr: &TokenStream2) -> To
                     __off += 1;
                     None
                 }
-                __tag => #_p!("ipc: server {:?} sent invalid option tag {}", #server_expr, __tag),
+                __tag => #_p!("ipc: server {} sent invalid option tag {}", #server_expr, __tag),
             }
         }}
     } else if let Some((ok_ty, err_ty)) = extract_result_types(rt) {
@@ -38,7 +38,7 @@ pub fn gen_decode_return_value(rt: &syn::Type, server_expr: &TokenStream2) -> To
         } else {
             quote! {{
                 let Some((__val, _)) = ipc::wire::read::<#ok_ty>(&retbuffer[__off..len]) else {
-                    #_p!("ipc: server {:?} sent malformed reply ({} bytes)", #server_expr, len);
+                    #_p!("ipc: server {} sent malformed reply ({} bytes)", #server_expr, len);
                 };
                 __off += core::mem::size_of_val(&__val);
                 __val
@@ -46,7 +46,7 @@ pub fn gen_decode_return_value(rt: &syn::Type, server_expr: &TokenStream2) -> To
         };
         quote! {{
             if __off >= len {
-                #_p!("ipc: server {:?} sent truncated reply", #server_expr);
+                #_p!("ipc: server {} sent truncated reply", #server_expr);
             }
             match retbuffer[__off] {
                 0u8 => {
@@ -56,18 +56,18 @@ pub fn gen_decode_return_value(rt: &syn::Type, server_expr: &TokenStream2) -> To
                 1u8 => {
                     __off += 1;
                     let Some((__err, _)) = ipc::wire::read::<#err_ty>(&retbuffer[__off..len]) else {
-                        #_p!("ipc: server {:?} sent malformed error reply ({} bytes)", #server_expr, len);
+                        #_p!("ipc: server {} sent malformed error reply ({} bytes)", #server_expr, len);
                     };
                     __off += core::mem::size_of_val(&__err);
                     Err(__err)
                 }
-                __tag => #_p!("ipc: server {:?} sent invalid result tag {}", #server_expr, __tag),
+                __tag => #_p!("ipc: server {} sent invalid result tag {}", #server_expr, __tag),
             }
         }}
     } else {
         quote! {{
             let Some((__val, _)) = ipc::wire::read::<#rt>(&retbuffer[__off..len]) else {
-                #_p!("ipc: server {:?} sent malformed reply ({} bytes)", #server_expr, len);
+                #_p!("ipc: server {} sent malformed reply ({} bytes)", #server_expr, len);
             };
             __off += core::mem::size_of_val(&__val);
             __val

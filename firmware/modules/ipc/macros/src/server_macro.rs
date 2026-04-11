@@ -2,8 +2,6 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::Ident;
 
-use crate::resolve_acl;
-use crate::resolve_priority;
 use crate::util;
 
 // ---------------------------------------------------------------------------
@@ -179,99 +177,38 @@ pub fn gen_server(input: &ServerInput) -> TokenStream2 {
 }
 
 // ---------------------------------------------------------------------------
-// Build-time resolution helpers
+// Runtime resolution via `generated` crate
 // ---------------------------------------------------------------------------
 
 fn gen_priority_fn() -> TokenStream2 {
-    match resolve_priority::resolve() {
-        Ok(entries) if !entries.is_empty() => {
-            let arms: Vec<TokenStream2> = entries
-                .iter()
-                .map(|e| {
-                    let idx = e.task_index as u16;
-                    let prio = e.priority as i8;
-                    quote! { #idx => #prio }
-                })
-                .collect();
-            quote! {
-                fn __ipc_priority_for(sender_index: u16) -> i8 {
-                    match sender_index {
-                        #(#arms,)*
-                        _ => 0,
-                    }
-                }
-            }
-        }
-        Ok(_) => {
-            quote! {
-                fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
-            }
-        }
-        Err(msg) => {
-            if msg.contains("cannot read") {
-                quote! {
-                    fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
-                }
-            } else {
-                let err = format!("ipc: failed to resolve priorities: {}", msg);
-                quote! { compile_error!(#err); }
-            }
-        }
+    // Priority is no longer resolved at compile time.
+    // All callers get default priority 0.
+    // TODO: if per-caller priorities are needed, add them to generated::tasks.
+    quote! {
+        fn __ipc_priority_for(_sender_index: u16) -> i8 { 0 }
     }
 }
 
 fn gen_acl_fn() -> TokenStream2 {
-    match resolve_acl::resolve() {
-        Ok(allowed) if !allowed.is_empty() => {
-            let arms: Vec<TokenStream2> = allowed
-                .iter()
-                .map(|&idx| {
-                    quote! { #idx => true }
-                })
-                .collect();
-            quote! {
-                fn __ipc_acl_check(sender_index: u16) -> bool {
-                    match sender_index {
-                        #(#arms,)*
-                        _ => false,
-                    }
-                }
-            }
-        }
-        Ok(_) => {
-            quote! {
-                fn __ipc_acl_check(_sender_index: u16) -> bool { false }
-            }
-        }
-        Err(msg) => {
-            if msg.contains("cannot read") {
-                quote! {
-                    fn __ipc_acl_check(_sender_index: u16) -> bool { false }
-                }
-            } else {
-                let err = format!("ipc: failed to resolve ACL: {}", msg);
-                quote! { compile_error!(#err); }
-            }
+    let pkg_ident = format_ident!("{}", std::env::var("CARGO_PKG_NAME")
+        .unwrap_or_default()
+        .replace('-', "_"));
+
+    quote! {
+        fn __ipc_acl_check(sender_index: u16) -> bool {
+            ::generated::acl_check!(#pkg_ident, sender_index)
         }
     }
 }
 
 fn gen_self_task_index() -> TokenStream2 {
+    // Look up our own task index from the generated task list at runtime.
     let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-    let task_names: Vec<String> = std::env::var("HUBRIS_TASKS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.to_string())
-        .collect();
-
-    if let Some(idx) = task_names.iter().position(|t| t == &pkg) {
-        let idx = idx as u16;
-        quote! {
-            let __ipc_self_task_index: u16 = #idx;
-        }
-    } else {
-        quote! {
-            let __ipc_self_task_index: u16 = 0;
-        }
+    let pkg_lit = proc_macro2::Literal::string(&pkg);
+    quote! {
+        let __ipc_self_task_index: u16 = ::generated::tasks::TASK_NAMES
+            .iter()
+            .position(|&n| n == #pkg_lit)
+            .unwrap_or(0) as u16;
     }
 }

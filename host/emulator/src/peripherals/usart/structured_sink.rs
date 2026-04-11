@@ -1,80 +1,62 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 
+use device::logs::LogEntry;
+use rcard_log::LogMetadata;
 use rcard_log::decoder::{Decoder, FeedResult};
-use rcard_log::{LogMetadata, OwnedValue};
 use zerocopy::TryFromBytes;
 
-use super::log::{LogStream, UsartLog, UsartLogKind};
+use super::log::{UsartLog, UsartLogKind};
 use super::UsartSink;
 
 const METADATA_SIZE: usize = core::mem::size_of::<LogMetadata>();
 
 pub struct StructuredSink {
     channel: u8,
-    frame: FrameState,
+    cobs_buf: Vec<u8>,
     streams: HashMap<u64, StreamState>,
     tx: mpsc::Sender<UsartLog>,
-}
-
-enum FrameState {
-    ReadingId { buf: [u8; 8], pos: u8 },
-    ReadingLength { id: u64 },
-    ReadingData { id: u64, remaining: u8 },
 }
 
 struct StreamState {
     meta_buf: [u8; METADATA_SIZE],
     meta_pos: usize,
+    metadata: Option<LogMetadata>,
+    meta_failed: bool,
     decoder: Decoder,
-    tx: Option<mpsc::Sender<OwnedValue>>,
-    channel: u8,
-    entry_tx: mpsc::Sender<UsartLog>,
+    values: Vec<rcard_log::OwnedValue>,
 }
 
 impl StreamState {
-    fn new(channel: u8, entry_tx: mpsc::Sender<UsartLog>) -> Self {
+    fn new() -> Self {
         StreamState {
             meta_buf: [0; METADATA_SIZE],
             meta_pos: 0,
+            metadata: None,
+            meta_failed: false,
             decoder: Decoder::new(),
-            tx: None,
-            channel,
-            entry_tx,
+            values: Vec::new(),
         }
     }
 
-    /// Feed a byte into this stream. Returns `true` if end-of-stream was reached.
     fn feed_byte(&mut self, byte: u8) -> bool {
         if self.meta_pos < METADATA_SIZE {
             self.meta_buf[self.meta_pos] = byte;
             self.meta_pos += 1;
 
             if self.meta_pos == METADATA_SIZE {
-                let metadata = LogMetadata::try_read_from_bytes(&self.meta_buf)
-                    .expect("failed to deserialize LogMetadata");
-                let (tx, rx) = mpsc::channel();
-                self.tx = Some(tx);
-                let _ = self.entry_tx.send(UsartLog {
-                    channel: self.channel,
-                    kind: UsartLogKind::Stream(LogStream {
-                        metadata,
-                        values: rx,
-                    }),
-                });
+                match LogMetadata::try_read_from_bytes(&self.meta_buf) {
+                    Ok(metadata) => self.metadata = Some(metadata),
+                    Err(_) => self.meta_failed = true,
+                }
             }
             return false;
         }
 
-        let tx = match &self.tx {
-            Some(tx) => tx,
-            None => return false,
-        };
-
         let (_, result) = self.decoder.feed(&[byte]);
         match result {
             FeedResult::Done(value) => {
-                let _ = tx.send(value);
+                self.values.push(value);
                 false
             }
             FeedResult::EndOfStream => true,
@@ -87,71 +69,66 @@ impl StructuredSink {
     pub fn new(channel: u8, tx: mpsc::Sender<UsartLog>) -> Self {
         StructuredSink {
             channel,
-            frame: FrameState::ReadingId {
-                buf: [0; 8],
-                pos: 0,
-            },
+            cobs_buf: Vec::with_capacity(270),
             streams: HashMap::new(),
             tx,
+        }
+    }
+
+    fn process_chunk(&mut self, chunk: &[u8]) {
+        if chunk.len() < 9 {
+            return;
+        }
+
+        let id = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3],
+            chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        let length = chunk[8] as usize;
+
+        if length == 0 || chunk.len() < 9 + length {
+            return;
+        }
+
+        let data = &chunk[9..9 + length];
+        let stream = self.streams.entry(id).or_insert_with(StreamState::new);
+
+        for &byte in data {
+            if stream.feed_byte(byte) {
+                if let Some(removed) = self.streams.remove(&id) {
+                    if !removed.meta_failed {
+                        if let Some(meta) = removed.metadata {
+                            let _ = self.tx.send(UsartLog {
+                                channel: self.channel,
+                                kind: UsartLogKind::Stream(super::log::LogStream {
+                                    metadata: meta,
+                                    values: removed.values,
+                                }),
+                            });
+                        }
+                    }
+                }
+                return;
+            }
         }
     }
 }
 
 impl UsartSink for StructuredSink {
     fn on_byte(&mut self, byte: u8) {
-        let frame = std::mem::replace(
-            &mut self.frame,
-            FrameState::ReadingId {
-                buf: [0; 8],
-                pos: 0,
-            },
-        );
-
-        self.frame = match frame {
-            FrameState::ReadingId { mut buf, pos } => {
-                buf[pos as usize] = byte;
-                let pos = pos + 1;
-                if pos == 8 {
-                    FrameState::ReadingLength {
-                        id: u64::from_le_bytes(buf),
-                    }
-                } else {
-                    FrameState::ReadingId { buf, pos }
+        if byte == 0x00 {
+            if !self.cobs_buf.is_empty() {
+                let mut decoded = vec![0u8; self.cobs_buf.len()];
+                if let Ok(len) = cobs::decode(&self.cobs_buf, &mut decoded) {
+                    self.process_chunk(&decoded[..len]);
                 }
+                self.cobs_buf.clear();
             }
-            FrameState::ReadingLength { id } => {
-                if byte == 0 {
-                    FrameState::ReadingId {
-                        buf: [0; 8],
-                        pos: 0,
-                    }
-                } else {
-                    FrameState::ReadingData {
-                        id,
-                        remaining: byte,
-                    }
-                }
+        } else {
+            self.cobs_buf.push(byte);
+            if self.cobs_buf.len() > 300 {
+                self.cobs_buf.clear();
             }
-            FrameState::ReadingData { id, remaining } => {
-                let stream = self
-                    .streams
-                    .entry(id)
-                    .or_insert_with(|| StreamState::new(self.channel, self.tx.clone()));
-
-                if stream.feed_byte(byte) {
-                    self.streams.remove(&id);
-                }
-
-                let remaining = remaining - 1;
-                if remaining == 0 {
-                    FrameState::ReadingId {
-                        buf: [0; 8],
-                        pos: 0,
-                    }
-                } else {
-                    FrameState::ReadingData { id, remaining }
-                }
-            }
-        };
+        }
     }
 }

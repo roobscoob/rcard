@@ -1,0 +1,13 @@
+[package]
+name = "toml-task"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.31", default-features = false, features = ["std"] }
+indexmap = { version = "1.4.0", default-features = false, features = ["serde-1"] }
+ordered-toml = { git = "https://github.com/oxidecomputer/ordered-toml" }
+serde = { version = "1.0.114", default-features = false, features = ["derive"] }
+
+[lints.rust]
+warnings = "deny"

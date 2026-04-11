@@ -8,7 +8,6 @@ bare-panics = []
 
 [dependencies]
 ipc = { path = "../../../modules/ipc" }
-idyll_runtime.workspace = true
 rcard-log = { path = "../../../../shared/log" }
 userlib.workspace = true
 zerocopy = "0.8"

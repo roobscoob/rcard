@@ -2,11 +2,11 @@ pub mod stacktrace;
 
 use std::collections::HashMap;
 
-use engine::logs::LogEntry;
+use device::logs::LogEntry;
 use rcard_log::{LogLevel, OwnedValue};
 
-use crate::metadata::Species;
-use crate::tfw::TfwMetadata;
+use tfw::archive::TfwMetadata;
+use tfw::metadata::Species;
 
 // ANSI color codes
 const RESET: &str = "\x1b[0m";
@@ -20,6 +20,10 @@ const BLUE: &str = "\x1b[34m";
 const MAGENTA: &str = "\x1b[35m";
 const WHITE: &str = "\x1b[37m";
 const ORANGE: &str = "\x1b[38;5;208m";
+const INVERTED: &str = "\x1b[7m";
+
+pub const TEXT_WHITE: &str = WHITE;
+pub const TEXT_INVERTED: &str = INVERTED;
 
 pub fn prefix_width(task_pad: usize) -> usize {
     task_pad + 10
@@ -31,15 +35,11 @@ pub fn terminal_width() -> usize {
         .unwrap_or(119)
 }
 
-pub fn print_text_line(source: &str, text: &str, task_pad: usize) {
-    let (source, text) = match text.split_once(": ") {
-        Some((prefix, rest)) => (prefix, rest),
-        None => (source, text),
-    };
+pub fn print_text_line(source: &str, text: &str, source_style: &str, task_pad: usize) {
+    let pad = task_pad.saturating_sub(source.len());
     println!(
-        "       {WHITE}{:>tp$}{RESET} {DIM}|{RESET} {text}",
-        source,
-        tp = task_pad,
+        "       {:>pad$}{source_style}{source}{RESET} {DIM}|{RESET} {text}",
+        "",
     );
 }
 

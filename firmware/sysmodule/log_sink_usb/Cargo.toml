@@ -1,0 +1,28 @@
+[package]
+name = "sysmodule_log_sink_usb"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bare-panics = []
+panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
+
+[dependencies]
+ipc = { path = "../../modules/ipc" }
+once-cell = { path = "../../modules/once_cell" }
+rcard-log = { path = "../../../shared/log", features = ["writer"] }
+rcard-log-macros = { path = "../../../shared/log/macros" }
+rcard-usb-proto = { path = "../../../shared/usb-proto" }
+sysmodule_log_api = { path = "../log/api" }
+sysmodule_reactor_api = { path = "../reactor/api" }
+sysmodule_usb_protocol_fob_api = { path = "../usb_protocol_fob/api" }
+userlib.workspace = true
+generated = { path = "../../modules/generated" }
+
+[[bin]]
+name = "sysmodule_log_sink_usb"
+test = false
+bench = false
+
+[lints]
+workspace = true

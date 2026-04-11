@@ -9,7 +9,7 @@ mod folder_iter;
 mod registry;
 mod state;
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 
 use sysmodule_fs_api::*;
 

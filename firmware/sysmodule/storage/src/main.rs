@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use once_cell::OnceCell;
 use rcard_log::{OptionExt, ResultExt};
 use storage_api::{Geometry, StorageError};
@@ -131,7 +131,8 @@ impl Partition for PartitionResource {
         let config = &PARTITIONS[idx];
 
         let caller = meta.sender.task_index();
-        let is_fs_task = caller == SLOTS.sysmodule_fs.task_index();
+        let is_fs_task = generated::peers::PEERS.sysmodule_fs
+            .map_or(false, |id| caller == id.task_index());
 
         if is_managed(config.name) {
             if !is_fs_task {

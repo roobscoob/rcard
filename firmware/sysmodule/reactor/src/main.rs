@@ -4,9 +4,7 @@
 use core::cell::UnsafeCell;
 use sysmodule_reactor_api::*;
 
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/notifications.rs"));
-}
+use generated::notifications;
 
 const QUEUE_CAPACITY: usize = 32;
 
@@ -61,10 +59,10 @@ fn drop_notification_for(notif: &Notification, dropped_for: u16) {
 }
 
 fn validate(sender_index: u16, group_id: u16, priority: u8) -> Result<(), ReactorError> {
-    let group = generated::GROUPS
+    let group = notifications::GROUPS
         .get(group_id as usize)
         .ok_or(ReactorError::InvalidGroup)?;
-    if !generated::is_sender_allowed(group_id, sender_index) {
+    if !notifications::is_sender_allowed(group_id, sender_index) {
         return Err(ReactorError::NotAuthorized);
     }
     if !group.priority_range.contains(&priority) {
@@ -76,7 +74,7 @@ fn validate(sender_index: u16, group_id: u16, priority: u8) -> Result<(), Reacto
 /// Report a drop for every subscriber of `notif`'s group whose cursor
 /// hasn't yet passed `index` (i.e. they would have seen this entry).
 fn report_eviction(state: &State, notif: &Notification, index: usize) {
-    for &task_idx in generated::group_subscribers(notif.group_id) {
+    for &task_idx in notifications::group_subscribers(notif.group_id) {
         let cursor = state.cursors[task_idx as usize] as usize;
         if cursor <= index {
             drop_notification_for(notif, task_idx);
@@ -112,7 +110,7 @@ fn evict(state: &mut State, priority: u8, strategy: OverflowStrategy) -> bool {
 /// Remove entry at `index` from the queue and adjust all cursors accordingly.
 fn remove_and_adjust_cursors(state: &mut State, index: usize) {
     state.queue.remove(index);
-    for &task_idx in generated::SUBSCRIBER_TASKS {
+    for &task_idx in notifications::SUBSCRIBER_TASKS {
         let c = &mut state.cursors[task_idx as usize];
         if (*c as usize) > index {
             *c -= 1;
@@ -129,7 +127,7 @@ fn remove_and_adjust_cursors(state: &mut State, index: usize) {
 fn gc(state: &mut State) {
     while !state.queue.is_empty() {
         let group_id = state.queue[0].group_id;
-        let all_consumed = generated::group_subscribers(group_id)
+        let all_consumed = notifications::group_subscribers(group_id)
             .iter()
             .all(|&t| state.cursors[t as usize] > 0);
         if !all_consumed {
@@ -138,7 +136,7 @@ fn gc(state: &mut State) {
         state.queue.remove(0);
         // Decrement all subscriber cursors (not just group subscribers)
         // since queue indices shifted.
-        for &task_idx in generated::SUBSCRIBER_TASKS {
+        for &task_idx in notifications::SUBSCRIBER_TASKS {
             let c = &mut state.cursors[task_idx as usize];
             if *c > 0 {
                 *c -= 1;
@@ -157,7 +155,7 @@ fn gc(state: &mut State) {
 /// notify can use the correct generation, or the subscriber should re-register
 /// after restart.
 fn notify_subscribers(group_id: u16) {
-    for &task_idx in generated::group_subscribers(group_id) {
+    for &task_idx in notifications::group_subscribers(group_id) {
         let tid = userlib::TaskId::gen0(task_idx);
         let _ = userlib::sys_post(tid, NOTIFICATION_BIT);
     }
@@ -168,7 +166,7 @@ fn has_more_for(state: &State, task_index: u16) -> bool {
     let cursor = state.cursors[task_index as usize] as usize;
     state.queue[cursor..]
         .iter()
-        .any(|n| generated::is_subscriber(n.group_id, task_index))
+        .any(|n| notifications::is_subscriber(n.group_id, task_index))
 }
 
 struct ReactorImpl;
@@ -197,7 +195,7 @@ impl Reactor for ReactorImpl {
             }
 
             if state.queue.is_full() && !evict(state, priority, strategy) {
-                for &t in generated::group_subscribers(group_id) {
+                for &t in notifications::group_subscribers(group_id) {
                     drop_notification_for(&notif, t);
                 }
                 return Err(ReactorError::QueueFull);
@@ -241,7 +239,7 @@ impl Reactor for ReactorImpl {
                 gc(state);
             }
             if state.queue.is_full() && !evict(state, effective_priority, strategy) {
-                for &t in generated::group_subscribers(group_id) {
+                for &t in notifications::group_subscribers(group_id) {
                     drop_notification_for(&notif, t);
                 }
                 return Err(ReactorError::QueueFull);
@@ -265,7 +263,7 @@ impl Reactor for ReactorImpl {
 
             // Scan from cursor for the first notification this task subscribes to.
             for i in start..state.queue.len() {
-                if generated::is_subscriber(state.queue[i].group_id, task_index) {
+                if notifications::is_subscriber(state.queue[i].group_id, task_index) {
                     let notif = state.queue[i];
 
                     // Advance cursor.

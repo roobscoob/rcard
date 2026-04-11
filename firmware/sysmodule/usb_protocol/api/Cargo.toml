@@ -1,0 +1,21 @@
+[package]
+name = "sysmodule_usb_protocol_api"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bare-panics = []
+
+[dependencies]
+ipc = { path = "../../../modules/ipc" }
+sysmodule_usb_api = { path = "../../usb/api" }
+rcard-log = { path = "../../../../shared/log", features = ["writer"] }
+userlib.workspace = true
+zerocopy = "0.8"
+
+[lib]
+test = false
+bench = false
+
+[lints]
+workspace = true

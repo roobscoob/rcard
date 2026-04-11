@@ -1,0 +1,25 @@
+[package]
+name = "userlib"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.6.0"
+cfg-if = "1.0.0"
+
+[target."thumbv8m.main-none-eabihf".dependencies]
+cortex-m = {version = "0.7", features = ["inline-asm"]}
+
+[target.thumbv7em-none-eabihf.dependencies]
+cortex-m = {version = "0.7", features = ["inline-asm"]}
+
+[target.thumbv6m-none-eabi.dependencies]
+cortex-m = {version = "0.7", features = ["inline-asm"]}
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+bench = false
+doctest = false

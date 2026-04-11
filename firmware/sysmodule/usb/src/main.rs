@@ -3,7 +3,7 @@
 
 use core::cell::UnsafeCell;
 
-use hubris_task_slots::SLOTS;
+use generated::slots::SLOTS;
 use musb::{MusbInstance, UsbInstance, UsbdBus};
 use rcard_log::{debug, info, OptionExt, ResultExt};
 use usb_device::device::UsbRev;
@@ -89,7 +89,10 @@ static USB_ALLOC: SyncCell<Option<UsbBusAllocator<UsbdBus<UsbInstance>>>> = Sync
 // ---------------------------------------------------------------------------
 
 struct VendorClass<'a, B: usb_device::bus::UsbBus> {
-    iface: usb_device::bus::InterfaceNumber,
+    /// Interface numbers — one per distinct endpoint group.
+    /// Endpoints are assigned to interfaces by endpoint number:
+    /// EP1 → ifaces[0] (host-driven), EP2 → ifaces[1] (fob-driven), etc.
+    ifaces: [Option<usb_device::bus::InterfaceNumber>; 7],
     ep_in: [Option<EndpointIn<'a, B>>; 7],
     ep_out: [Option<EndpointOut<'a, B>>; 7],
     /// Pre-built MSOS 2.0 platform capability (25 bytes) and descriptor set (30 bytes).
@@ -101,13 +104,12 @@ struct VendorClass<'a, B: usb_device::bus::UsbBus> {
 impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
     fn new(
         alloc: &'a UsbBusAllocator<UsbdBus<UsbInstance>>,
-        endpoints: &[Option<EndpointConfig>; 7],
+        endpoints_in: &[Option<EndpointConfig>; 7],
+        endpoints_out: &[Option<EndpointConfig>; 7],
         identity: &DeviceIdentity,
     ) -> Self {
-        let iface = alloc.interface();
-
         let mut class = VendorClass {
-            iface,
+            ifaces: [const { None }; 7],
             ep_in: [const { None }; 7],
             ep_out: [const { None }; 7],
             msos_platform_capability: identity.msos_platform_capability,
@@ -115,50 +117,63 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
             msos_vendor_code: identity.msos_vendor_code,
         };
 
-        for (idx, ep_config) in endpoints.iter().enumerate() {
-            if let Some(config) = ep_config {
-                let ep_num = (idx + 1) as u8;
-                let mps = config.max_packet_size;
-                let interval = config.interval;
-                let ep_type = match config.transfer_type {
-                    TransferType::Bulk => usb_device::endpoint::EndpointType::Bulk,
-                    TransferType::Interrupt => usb_device::endpoint::EndpointType::Interrupt,
-                    TransferType::Isochronous => usb_device::endpoint::EndpointType::Isochronous {
-                        synchronization:
-                            usb_device::endpoint::IsochronousSynchronizationType::Asynchronous,
-                        usage: usb_device::endpoint::IsochronousUsageType::Data,
-                    },
-                };
-                match config.direction {
-                    Direction::In => {
-                        let addr = EndpointAddress::from_parts(
-                            ep_num as usize,
-                            usb_device::UsbDirection::In,
-                        );
-                        class.ep_in[idx] = Some(
-                            alloc
-                                .alloc(Some(addr), ep_type, mps, interval)
-                                .map_err(UsbdError::from)
-                                .log_expect("EP alloc failed"),
-                        );
-                    }
-                    Direction::Out => {
-                        let addr = EndpointAddress::from_parts(
-                            ep_num as usize,
-                            usb_device::UsbDirection::Out,
-                        );
-                        class.ep_out[idx] = Some(
-                            alloc
-                                .alloc(Some(addr), ep_type, mps, interval)
-                                .map_err(UsbdError::from)
-                                .log_expect("EP alloc failed"),
-                        );
-                    }
-                }
+        for idx in 0..7 {
+            let has_in = endpoints_in[idx].is_some();
+            let has_out = endpoints_out[idx].is_some();
+
+            if !has_in && !has_out {
+                continue;
+            }
+
+            let ep_num = (idx + 1) as u8;
+
+            // Allocate one interface per endpoint number.
+            // IN + OUT on the same number share an interface.
+            if class.ifaces[idx].is_none() {
+                class.ifaces[idx] = Some(alloc.interface());
+            }
+
+            if let Some(config) = &endpoints_in[idx] {
+                let ep_type = transfer_type(config.transfer_type);
+                let addr = EndpointAddress::from_parts(
+                    ep_num as usize,
+                    usb_device::UsbDirection::In,
+                );
+                class.ep_in[idx] = Some(
+                    alloc
+                        .alloc(Some(addr), ep_type, config.max_packet_size, config.interval)
+                        .map_err(UsbdError::from)
+                        .log_expect("EP IN alloc failed"),
+                );
+            }
+
+            if let Some(config) = &endpoints_out[idx] {
+                let ep_type = transfer_type(config.transfer_type);
+                let addr = EndpointAddress::from_parts(
+                    ep_num as usize,
+                    usb_device::UsbDirection::Out,
+                );
+                class.ep_out[idx] = Some(
+                    alloc
+                        .alloc(Some(addr), ep_type, config.max_packet_size, config.interval)
+                        .map_err(UsbdError::from)
+                        .log_expect("EP OUT alloc failed"),
+                );
             }
         }
 
         class
+    }
+}
+
+fn transfer_type(tt: TransferType) -> usb_device::endpoint::EndpointType {
+    match tt {
+        TransferType::Bulk => usb_device::endpoint::EndpointType::Bulk,
+        TransferType::Interrupt => usb_device::endpoint::EndpointType::Interrupt,
+        TransferType::Isochronous => usb_device::endpoint::EndpointType::Isochronous {
+            synchronization: usb_device::endpoint::IsochronousSynchronizationType::Asynchronous,
+            usage: usb_device::endpoint::IsochronousUsageType::Data,
+        },
     }
 }
 
@@ -168,12 +183,17 @@ impl<B: usb_device::bus::UsbBus> UsbClass<B> for VendorClass<'_, B> {
         &self,
         writer: &mut DescriptorWriter,
     ) -> usb_device::Result<()> {
-        writer.interface(self.iface, 0xFF, 0x00, 0x00)?;
-        for ep in self.ep_in.iter().flatten() {
-            writer.endpoint(ep)?;
-        }
-        for ep in self.ep_out.iter().flatten() {
-            writer.endpoint(ep)?;
+        // Each endpoint number gets its own interface descriptor.
+        // Endpoints sharing a number (IN + OUT pair) are grouped.
+        for (idx, iface) in self.ifaces.iter().enumerate() {
+            let Some(iface) = iface else { continue };
+            writer.interface(*iface, 0xFF, 0x00, 0x00)?;
+            if let Some(ep) = &self.ep_out[idx] {
+                writer.endpoint(ep)?;
+            }
+            if let Some(ep) = &self.ep_in[idx] {
+                writer.endpoint(ep)?;
+            }
         }
         Ok(())
     }
@@ -209,8 +229,11 @@ struct UsbGlobal {
     identity: DeviceIdentity,
     endpoint_count: u8,
 
-    // Endpoint tracking (index 0 = EP1, index 6 = EP7)
-    endpoints: [Option<EndpointConfig>; 7],
+    // Endpoint tracking (index 0 = EP1, index 6 = EP7).
+    // Split by direction — USB hardware has separate TX/RX FIFOs per
+    // endpoint number, so EP1 IN and EP1 OUT are independent.
+    endpoints_in: [Option<EndpointConfig>; 7],
+    endpoints_out: [Option<EndpointConfig>; 7],
 
     // usb-device state (populated when all endpoints are opened)
     device: Option<UsbDevice<'static, UsbdBus<UsbInstance>>>,
@@ -241,7 +264,8 @@ impl UsbGlobal {
                 msos_vendor_code: 0,
             },
             endpoint_count: 0,
-            endpoints: [None; 7],
+            endpoints_in: [None; 7],
+            endpoints_out: [None; 7],
             device: None,
             class: None,
             bus_taken: false,
@@ -270,7 +294,7 @@ impl UsbGlobal {
         debug!("MUSB power before activate: {}", power_before.0);
 
         // Create our class (allocates endpoints from usb-device)
-        let class = VendorClass::new(alloc, &self.endpoints, &self.identity);
+        let class = VendorClass::new(alloc, &self.endpoints_in, &self.endpoints_out, &self.identity);
 
         // SAFETY: UsbGlobal only exists inside `static USB`, so self.identity
         // has 'static lifetime. We reborrow through a pointer to decouple
@@ -527,9 +551,13 @@ impl UsbEndpoint for UsbEndpointResource {
             return Err(UsbError::InvalidEndpoint);
         }
 
-        // Prevent double-configuring the same hardware endpoint
+        // Prevent double-configuring the same hardware endpoint + direction
         let idx = (ep_num - 1) as usize;
-        if usb.endpoints[idx].is_some() {
+        let slot = match config.direction {
+            Direction::In => &mut usb.endpoints_in[idx],
+            Direction::Out => &mut usb.endpoints_out[idx],
+        };
+        if slot.is_some() {
             return Err(UsbError::EndpointBusy);
         }
 
@@ -541,7 +569,7 @@ impl UsbEndpoint for UsbEndpointResource {
             ep_num, ep_dir, ep_tt, ep_mps, handle.0
         );
 
-        usb.endpoints[idx] = Some(config);
+        *slot = Some(config);
         usb.endpoints_opened += 1;
 
         if usb.endpoints_opened == usb.endpoint_count {
@@ -647,7 +675,10 @@ impl Drop for UsbEndpointResource {
         );
         let usb = USB.get();
         let idx = (self.config.number - 1) as usize;
-        usb.endpoints[idx] = None;
+        match self.config.direction {
+            Direction::In => usb.endpoints_in[idx] = None,
+            Direction::Out => usb.endpoints_out[idx] = None,
+        }
         usb.endpoints_opened -= 1;
     }
 }
