@@ -23,27 +23,24 @@ pub struct CompileArtifact {
 /// 1. Cargo build with partial linking (-r)
 /// 2. Re-link for sizing → resolve deferred regions
 /// 3. Re-link at final addresses
+///
+/// Emits `Build(Organizing)` and `Build(CompilingApp)` at the appropriate
+/// points so the event stream reflects the real pipeline structure.
 pub fn compile_all(
     firmware_dir: &Path,
     config: &AppConfig,
     layout: &mut Layout,
+    reservations: &layout::Reservations,
     linker_dir: &Path,
     work_dir: &Path,
     emit: crate::build::EventFn<'_>,
 ) -> Result<Vec<CompileArtifact>, CompileError> {
-    use crate::build::{BuildEvent, CompilePhase};
+    use crate::build::{BuildEvent, BuildState, CrateEvent, CrateKind, CrateState, ResourceUpdate};
 
     let target = &config.target;
     let all_tasks = layout::collect_tasks(config);
 
-    let task_names: Vec<&str> = {
-        let mut names: Vec<(&str, u32)> = all_tasks
-            .iter()
-            .map(|(name, task)| (*name, task.priority))
-            .collect();
-        names.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        names.iter().map(|(name, _)| *name).collect()
-    };
+    let task_names: Vec<&str> = layout::ordered_task_names(&all_tasks);
     let hubris_tasks = task_names.join(",");
 
     let partial_dir = work_dir.join("partial");
@@ -57,19 +54,31 @@ pub fn compile_all(
     let manifests = resolve_workspace_manifests(firmware_dir)?;
     let config_json = work_dir.join("config.json");
 
-    // ── Phase 1: Cargo build with partial linking ─────────────────────
+    // Helper to emit a crate state transition.
+    let emit_crate = |name: &str, kind: CrateKind, state: CrateState| {
+        emit(BuildEvent::Crate {
+            name: name.to_string(),
+            kind,
+            update: ResourceUpdate::State(state),
+        });
+    };
 
-    emit(BuildEvent::PhaseStart {
-        phase: CompilePhase::PartialLink,
-    });
+    // Helper to emit a crate event.
+    let emit_crate_event = |name: &str, kind: CrateKind, event: CrateEvent| {
+        emit(BuildEvent::Crate {
+            name: name.to_string(),
+            kind,
+            update: ResourceUpdate::Event(event),
+        });
+    };
+
+    // ── Building: Cargo build with partial linking ────────────────────
+
     let partial_link_script = write_partial_link_script(work_dir)?;
     let kernel_partial_link_script = write_kernel_partial_link_script(work_dir)?;
 
     for (crate_name, task) in &all_tasks {
-        emit(BuildEvent::TaskCompiling {
-            task: crate_name.to_string(),
-            phase: CompilePhase::PartialLink,
-        });
+        emit_crate(crate_name, CrateKind::Task, CrateState::Building);
         let manifest = find_manifest(&manifests, crate_name)?;
         cargo_build_partial(
             &manifest,
@@ -81,6 +90,8 @@ pub fn compile_all(
             &task.features,
             None,
             &config_json,
+            crate_name,
+            CrateKind::Task,
             emit,
         )?;
         let artifact = firmware_dir
@@ -93,11 +104,8 @@ pub fn compile_all(
         }
     }
 
-    // ── Phase 2: Re-link for sizing → resolve deferred ────────────────
+    // ── Measuring: Re-link for sizing → resolve deferred ─────────────
 
-    emit(BuildEvent::PhaseStart {
-        phase: CompilePhase::Sizing,
-    });
     let mut measured: BTreeMap<RegionKey, u64> = BTreeMap::new();
 
     for &task_name in &task_names {
@@ -106,10 +114,7 @@ pub fn compile_all(
             continue;
         }
 
-        emit(BuildEvent::TaskCompiling {
-            task: task_name.to_string(),
-            phase: CompilePhase::Sizing,
-        });
+        emit_crate(task_name, CrateKind::Task, CrateState::Measuring);
 
         let task = all_tasks[task_name];
         let sizing_elf = sizing_dir.join(task_name);
@@ -133,8 +138,7 @@ pub fn compile_all(
         for (region_name, size) in sizes {
             let key = (task_name.to_string(), region_name.clone());
             if layout.deferred.contains_key(&key) {
-                emit(BuildEvent::RegionMeasured {
-                    task: task_name.to_string(),
+                emit_crate_event(task_name, CrateKind::Task, CrateEvent::Sized {
                     region: region_name.clone(),
                     size,
                 });
@@ -143,20 +147,23 @@ pub fn compile_all(
         }
     }
 
-    // Resolve task deferred regions from measurements
+    // Resolve task deferred regions from measurements.
     layout
-        .resolve_deferred(&measured)
+        .resolve_deferred(&measured, reservations)
         .map_err(|e| CompileError::Other(format!("resolve layout: {e}")))?;
 
-    emit(BuildEvent::LayoutResolved {
-        total_regions: layout.placed.len(),
-    });
+    // ── Organizing ───────────────────────────────────────────────────
+    // Signal that the layout has been re-solved with actual sizes.
 
-    // ── Phase 3: Re-link at final addresses ───────────────────────────
+    emit(BuildEvent::Build(BuildState::Organizing {
+        regions_placed: layout.placed.len(),
+    }));
 
-    emit(BuildEvent::PhaseStart {
-        phase: CompilePhase::FinalLink,
-    });
+    // Emit Memory events for newly placed deferred regions.
+    crate::build::emit_memory_allocations(&layout.placed, config, emit);
+
+    // ── Linking: Re-link at final addresses ──────────────────────────
+
     let mut artifacts = Vec::new();
 
     for &task_name in &task_names {
@@ -165,10 +172,7 @@ pub fn compile_all(
             continue;
         }
 
-        emit(BuildEvent::TaskCompiling {
-            task: task_name.to_string(),
-            phase: CompilePhase::FinalLink,
-        });
+        emit_crate(task_name, CrateKind::Task, CrateState::Linking);
 
         let task = all_tasks[task_name];
         let final_elf = final_dir.join(task_name);
@@ -187,6 +191,8 @@ pub fn compile_all(
             &final_mem_dir,
         )?;
 
+        emit_crate(task_name, CrateKind::Task, CrateState::Linked);
+
         artifacts.push(CompileArtifact {
             crate_name: task_name.to_string(),
             elf_path: final_elf,
@@ -194,17 +200,10 @@ pub fn compile_all(
         });
     }
 
-    // ── Kernel ────────────────────────────────────────────────────────
-    //
-    // Same partial-link → sizing → final-link pipeline as tasks.
-    // KCONFIG only references task addresses (already placed), so we
-    // bake it in at partial-link time. This avoids the old approach of
-    // giving the kernel "all remaining space" then shrinking, which
-    // broke when code and data shared the same physical memory.
+    // ── Compile App: Kernel ──────────────────────────────────────────
 
-    emit(BuildEvent::PhaseStart {
-        phase: CompilePhase::Kernel,
-    });
+    emit(BuildEvent::Build(BuildState::CompilingApp));
+
     let kconfig = generate_kconfig(layout, &task_names, &all_tasks, config)?;
 
     let kernel_crate = &config.kernel.crate_info.package.name;
@@ -212,11 +211,8 @@ pub fn compile_all(
     let kernel_dir = linker_dir.join("kernel");
     let kernel_task = config_to_fake_task(config);
 
-    // Phase 1: Partial link kernel with KCONFIG
-    emit(BuildEvent::TaskCompiling {
-        task: kernel_crate.clone(),
-        phase: CompilePhase::PartialLink,
-    });
+    // Building
+    emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Building);
     cargo_build_partial(
         &kernel_manifest,
         kernel_crate,
@@ -227,6 +223,8 @@ pub fn compile_all(
         &[],
         Some(&kconfig),
         &config_json,
+        kernel_crate,
+        CrateKind::Kernel,
         emit,
     )?;
     let kernel_partial_src = firmware_dir
@@ -239,18 +237,14 @@ pub fn compile_all(
         std::fs::copy(&kernel_partial_src, &kernel_partial).map_err(CompileError::Io)?;
     }
 
-    // Phase 2: Size kernel at generous addresses
-    emit(BuildEvent::TaskCompiling {
-        task: kernel_crate.clone(),
-        phase: CompilePhase::Sizing,
-    });
+    // Measuring
+    emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Measuring);
     let (kernel_sizing_memory, kernel_chunk_map) = generate_generous_memory_x(&kernel_task);
     let kernel_sizing_dir = sizing_dir.join(format!("{kernel_crate}_mem"));
     std::fs::create_dir_all(&kernel_sizing_dir).map_err(CompileError::Io)?;
     std::fs::write(kernel_sizing_dir.join("memory.x"), &kernel_sizing_memory)
         .map_err(CompileError::Io)?;
 
-    // Copy device.x so the kernel link script's INCLUDE finds it
     let device_x_src = kernel_dir.join("device.x");
     std::fs::copy(&device_x_src, kernel_sizing_dir.join("device.x")).map_err(CompileError::Io)?;
 
@@ -266,24 +260,19 @@ pub fn compile_all(
     let kernel_sizes = measure_region_sizes(&kernel_sizing_elf, &kernel_chunk_map)?;
     let mut kernel_measured: BTreeMap<RegionKey, u64> = BTreeMap::new();
     for (region_name, size) in &kernel_sizes {
-        emit(BuildEvent::RegionMeasured {
-            task: "kernel".to_string(),
+        emit_crate_event(kernel_crate, CrateKind::Kernel, CrateEvent::Sized {
             region: region_name.clone(),
             size: *size,
         });
         kernel_measured.insert(("kernel".to_string(), region_name.clone()), *size);
     }
 
-    // Place kernel regions using measured sizes
     layout
-        .resolve_kernel_deferred(&kernel_measured)
+        .resolve_kernel_deferred(&kernel_measured, reservations)
         .map_err(|e| CompileError::Other(format!("resolve kernel layout: {e}")))?;
 
-    // Phase 3: Final link kernel at real addresses
-    emit(BuildEvent::TaskCompiling {
-        task: kernel_crate.clone(),
-        phase: CompilePhase::FinalLink,
-    });
+    // Linking
+    emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Linking);
     let kernel_memory = generate_final_memory_x("kernel", &kernel_task, layout);
     std::fs::write(kernel_dir.join("memory.x"), &kernel_memory).map_err(CompileError::Io)?;
 
@@ -296,23 +285,17 @@ pub fn compile_all(
         &kernel_dir,
     )?;
 
+    emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Linked);
+
     artifacts.push(CompileArtifact {
         crate_name: kernel_crate.to_string(),
         elf_path: kernel_final_elf,
         kind: ArtifactKind::Kernel,
     });
 
-    // ── Bootloader (optional) ────────────────────────────────────────
-    //
-    // Same partial-link → sizing → final-link pipeline. Simpler than
-    // kernel: no task addresses needed, just the firmware partition
-    // location so the bootloader knows where to find places.bin.
+    // ── Compile App: Bootloader (optional) ───────────────────────────
 
     if let Some(bl) = &config.bootloader {
-        emit(BuildEvent::PhaseStart {
-            phase: CompilePhase::Bootloader,
-        });
-
         let bl_kconfig = generate_bootloader_kconfig(config)?;
         let bl_crate = &bl.crate_info.package.name;
         let bl_manifest = find_manifest(&manifests, bl_crate)?;
@@ -320,11 +303,8 @@ pub fn compile_all(
         let bl_task = bl_to_fake_task(bl);
         let bl_partial_link_script = write_bootloader_partial_link_script(work_dir)?;
 
-        // Phase 1: Partial link
-        emit(BuildEvent::TaskCompiling {
-            task: bl_crate.clone(),
-            phase: CompilePhase::PartialLink,
-        });
+        // Building
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Building);
         cargo_build_partial(
             &bl_manifest,
             bl_crate,
@@ -335,6 +315,8 @@ pub fn compile_all(
             &[],
             Some(&bl_kconfig),
             &config_json,
+            bl_crate,
+            CrateKind::Bootloader,
             emit,
         )?;
         let bl_partial_src = firmware_dir
@@ -347,11 +329,8 @@ pub fn compile_all(
             std::fs::copy(&bl_partial_src, &bl_partial).map_err(CompileError::Io)?;
         }
 
-        // Phase 2: Size at generous addresses
-        emit(BuildEvent::TaskCompiling {
-            task: bl_crate.clone(),
-            phase: CompilePhase::Sizing,
-        });
+        // Measuring
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Measuring);
         let (bl_sizing_memory, bl_chunk_map) = generate_generous_memory_x(&bl_task);
         let bl_sizing_dir = sizing_dir.join(format!("{bl_crate}_mem"));
         std::fs::create_dir_all(&bl_sizing_dir).map_err(CompileError::Io)?;
@@ -370,8 +349,7 @@ pub fn compile_all(
         let bl_sizes = measure_region_sizes(&bl_sizing_elf, &bl_chunk_map)?;
         let mut bl_measured: BTreeMap<RegionKey, u64> = BTreeMap::new();
         for (region_name, size) in &bl_sizes {
-            emit(BuildEvent::RegionMeasured {
-                task: "bootloader".to_string(),
+            emit_crate_event(bl_crate, CrateKind::Bootloader, CrateEvent::Sized {
                 region: region_name.clone(),
                 size: *size,
             });
@@ -379,14 +357,11 @@ pub fn compile_all(
         }
 
         layout
-            .resolve_bootloader_deferred(&bl_measured)
+            .resolve_bootloader_deferred(&bl_measured, reservations)
             .map_err(|e| CompileError::Other(format!("resolve bootloader layout: {e}")))?;
 
-        // Phase 3: Final link at real addresses
-        emit(BuildEvent::TaskCompiling {
-            task: bl_crate.clone(),
-            phase: CompilePhase::FinalLink,
-        });
+        // Linking
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Linking);
         let bl_memory = generate_final_memory_x("bootloader", &bl_task, layout);
         std::fs::write(bl_linker_dir.join("memory.x"), &bl_memory).map_err(CompileError::Io)?;
 
@@ -398,6 +373,8 @@ pub fn compile_all(
             &bl_linker_dir.join("link.x"),
             &bl_linker_dir,
         )?;
+
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Linked);
 
         artifacts.push(CompileArtifact {
             crate_name: bl_crate.to_string(),
@@ -620,8 +597,12 @@ fn cargo_build_partial(
     features: &[String],
     hubris_kconfig: Option<&str>,
     config_json: &Path,
+    emit_crate_name: &str,
+    emit_crate_kind: crate::build::CrateKind,
     emit: crate::build::EventFn<'_>,
 ) -> Result<(), CompileError> {
+    use crate::build::{BuildEvent, CrateEvent, ResourceUpdate};
+
     let dir = work_dir.display().to_string().replace('\\', "/");
     let script = linker_script.display().to_string().replace('\\', "/");
     let flags = [
@@ -651,8 +632,19 @@ fn cargo_build_partial(
     let mut failed = false;
     for msg in messages {
         match msg {
-            Ok(msg) => emit(crate::build::BuildEvent::CargoMessage(msg)),
-            Err(_) => failed = true,
+            Ok(msg) => emit(BuildEvent::Crate {
+                name: emit_crate_name.to_string(),
+                kind: emit_crate_kind,
+                update: ResourceUpdate::Event(CrateEvent::CargoMessage(msg)),
+            }),
+            Err(e) => {
+                emit(BuildEvent::Crate {
+                    name: emit_crate_name.to_string(),
+                    kind: emit_crate_kind,
+                    update: ResourceUpdate::Event(CrateEvent::CargoError(e)),
+                });
+                failed = true;
+            }
         }
     }
     if failed {
@@ -815,53 +807,13 @@ fn measure_region_sizes(
     Ok(result)
 }
 
-/// Compute scheduling priorities from the dependency tree.
-fn compute_priorities(
-    task_names: &[&str],
-    all_tasks: &BTreeMap<&str, &TaskConfig>,
-) -> BTreeMap<String, u8> {
-    fn dep_depth(
-        name: &str,
-        all: &BTreeMap<&str, &TaskConfig>,
-        cache: &mut BTreeMap<String, u8>,
-    ) -> u8 {
-        if let Some(&d) = cache.get(name) {
-            return d;
-        }
-        let task = match all.get(name) {
-            Some(t) => t,
-            None => {
-                cache.insert(name.to_string(), 0);
-                return 0;
-            }
-        };
-        let max_dep = task
-            .depends_on
-            .iter()
-            .map(|dep| dep_depth(&dep.crate_info.package.name, all, cache))
-            .max()
-            .unwrap_or(0);
-        let d = max_dep.saturating_add(1);
-        cache.insert(name.to_string(), d);
-        d
-    }
-    let mut depths = BTreeMap::new();
-    for &name in task_names {
-        dep_depth(name, all_tasks, &mut depths);
-    }
-    let mut ordered: Vec<(&str, u32, u8)> = task_names
-        .iter()
-        .map(|&name| {
-            let wg = all_tasks.get(name).map(|t| t.priority).unwrap_or(0);
-            let dd = depths.get(name).copied().unwrap_or(0);
-            (name, wg, dd)
-        })
-        .collect();
-    ordered.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
-    ordered
+/// Scheduling priorities: position in `task_names` (which is already in
+/// canonical order from `layout::ordered_task_names`).
+fn compute_priorities(task_names: &[&str]) -> BTreeMap<String, u8> {
+    task_names
         .iter()
         .enumerate()
-        .map(|(i, (name, _, _))| (name.to_string(), i as u8))
+        .map(|(i, &name)| (name.to_string(), i as u8))
         .collect()
 }
 
@@ -872,7 +824,7 @@ fn generate_kconfig(
     all_tasks: &BTreeMap<&str, &TaskConfig>,
     config: &AppConfig,
 ) -> Result<String, CompileError> {
-    let priorities = compute_priorities(task_names, all_tasks);
+    let priorities = compute_priorities(task_names);
 
     let mut kconfig = build_kconfig::KernelConfig {
         features: vec!["stack_watermark".to_string()],
@@ -903,9 +855,15 @@ fn generate_kconfig(
         let task = all_tasks[task_name];
         let mut owned_regions = BTreeMap::new();
 
-        // All regions come from layout.placed — no flash/ram distinction
+        // All regions come from layout.placed — no flash/ram distinction.
+        // Skip zero-size allocations: they exist only for linker script
+        // ORIGIN and have no content to protect. On ARMv8-M, a zero-size
+        // MPU region would cause an RLAR wraparound covering all memory.
         for ((owner, region_name), alloc) in &layout.placed {
             if owner != task_name {
+                continue;
+            }
+            if alloc.size == 0 {
                 continue;
             }
             let (read, write, execute) = match region_name.as_str() {

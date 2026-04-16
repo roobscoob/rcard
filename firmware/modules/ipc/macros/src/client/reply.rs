@@ -12,27 +12,13 @@ use crate::wire_format;
 /// `wire_format::gen_decode_return_value`.
 pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream2) -> TokenStream2 {
     let _p = panic_path();
-    let rc_check = quote! {
-        if rc == ipc::ACCESS_VIOLATION {
-            #_p!(
-                "ipc: server {} rejected our message: access violation \
-                 (this task is not authorized to use this server)",
-                #server_expr,
-            );
-        }
-        if rc != ipc::kern::ResponseCode::SUCCESS {
-            #_p!(
-                "ipc: server {} sent unexpected non-SUCCESS response code; \
-                 this indicates a protocol violation",
-                #server_expr,
-            );
-        }
-    };
+    // rc is already checked by `ipc::call_send` (panics on ACCESS_VIOLATION
+    // and any non-SUCCESS), so by the time we get here we only need to parse
+    // the reply body.
 
     if let Some(rt) = return_type {
         let decode = wire_format::gen_decode_return_value(rt, &server_expr);
         quote! {
-            #rc_check
             if len == 0 {
                 #_p!("ipc: server {} sent empty reply", #server_expr);
             }
@@ -61,7 +47,6 @@ pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream
         }
     } else {
         quote! {
-            #rc_check
             if len == 0 {
                 #_p!("ipc: server {} sent empty reply", #server_expr);
             }

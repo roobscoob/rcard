@@ -11,6 +11,9 @@ use rcard_log::Format;
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum EfuseError {

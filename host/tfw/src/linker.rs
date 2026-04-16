@@ -358,6 +358,7 @@ SECTIONS
   .hubris_abi_version (INFO) : { KEEP(*(.hubris_abi_version)); }
   .idolatry (INFO) : { KEEP(*(.idolatry)); }
   .log_strings (INFO) : { KEEP(*(.log_strings .log_strings.*)); }
+  .ipc_meta (INFO) : { KEEP(*(.ipc_meta .ipc_meta.*)); }
 
 "#;
 

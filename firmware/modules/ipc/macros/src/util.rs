@@ -89,3 +89,26 @@ pub fn to_screaming_snake_case(s: &str) -> String {
 pub fn to_snake_ident(ident: &Ident) -> Ident {
     Ident::new(&to_snake_case(&ident.to_string()), ident.span())
 }
+
+/// Wrap every top-level item in `tokens` with `#[cfg(target_os = "none")]`.
+///
+/// Parses the token stream as a list of Rust items and prepends the cfg
+/// attribute to each individually, so firmware-only macro output (client
+/// structs, server dispatchers, `#[macro_export]` wiring macros) is elided
+/// on host builds without nesting in a module or const block.
+pub fn cfg_gate_firmware_only(tokens: TokenStream2) -> TokenStream2 {
+    let file: syn::File = syn::parse2(tokens).unwrap_or_else(|e| {
+        panic!("cfg_gate_firmware_only: failed to parse token stream: {e}");
+    });
+    let gated: Vec<TokenStream2> = file
+        .items
+        .iter()
+        .map(|item| {
+            quote! {
+                #[cfg(target_os = "none")]
+                #item
+            }
+        })
+        .collect();
+    quote! { #(#gated)* }
+}

@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use generated::slots::SLOTS;
-use once_cell::{GlobalState, OnceCell};
+use once_cell::OnceCell;
 use sysmodule_host_transport_api::*;
 use sysmodule_log_api::*;
 
@@ -28,38 +28,27 @@ pub(crate) fn usart_write(data: &[u8]) {
     }
 }
 
-/// Maximum IPC reply body we can wrap into a single COBS chunk.
-pub(crate) const MAX_REPLY_BODY: usize = 8704;
-const IPC_REPLY_RAW_LEN: usize = 1 + MAX_REPLY_BODY;
-const IPC_REPLY_ENCODED_LEN: usize = cobs::max_encoding_length(IPC_REPLY_RAW_LEN) + 1;
+/// Maximum body size for `send_ipc_reply`. Tunnel errors (~7 bytes),
+/// Awake (~40 bytes), and MoshiMoshi replies fit easily. Full IPC
+/// replies are handled by `deliver_reply` which COBS-encodes directly
+/// into FRAME_BUF from the lease — never through this function.
+const MAX_SMALL_REPLY: usize = 64;
 
-// Raw (pre-COBS) staging: [type: 1][body: N]. Parked in BSS because
-// MAX_REPLY_BODY is ~8.7 KB — putting it on the stack would blow the
-// task's 8 KiB stack on any reply path.
-static IPC_REPLY_RAW: GlobalState<[u8; IPC_REPLY_RAW_LEN]> =
-    GlobalState::new([0u8; IPC_REPLY_RAW_LEN]);
-/// COBS-encoded chunk + trailing 0x00 delimiter, ready for USART.
-static IPC_REPLY_ENCODED: GlobalState<[u8; IPC_REPLY_ENCODED_LEN]> =
-    GlobalState::new([0u8; IPC_REPLY_ENCODED_LEN]);
-
-/// Wrap a wire-format IPC reply (full `rcard_usb_proto` frame — header +
-/// body, or a `SimpleFrame` tunnel error) in a TYPE_IPC_REPLY COBS chunk
-/// and send it over USART. Called both by `transport::LogHostTransport`
-/// (`deliver_reply`) and by the RX dispatcher when it needs to NACK
-/// without going through host_proxy.
+/// Send a small IPC reply (tunnel error, Awake, etc.) wrapped in
+/// TYPE_IPC_REPLY + COBS. Uses stack-local buffers only.
 pub(crate) fn send_ipc_reply(usart: &Usart, body: &[u8]) -> Result<(), ()> {
-    if body.len() > MAX_REPLY_BODY {
+    if body.len() > MAX_SMALL_REPLY {
         return Err(());
     }
-    IPC_REPLY_RAW.with(|raw| {
-        raw[0] = rcard_log::wire::TYPE_IPC_REPLY;
-        raw[1..1 + body.len()].copy_from_slice(body);
-        IPC_REPLY_ENCODED.with(|encoded| {
-            let enc_len = cobs::encode(&raw[..1 + body.len()], encoded);
-            encoded[enc_len] = 0x00;
-            let _ = usart.write(&encoded[..enc_len + 1]);
-        });
-    });
+    let mut raw = [0u8; 1 + MAX_SMALL_REPLY];
+    raw[0] = rcard_log::wire::TYPE_IPC_REPLY;
+    raw[1..1 + body.len()].copy_from_slice(body);
+    let raw_len = 1 + body.len();
+
+    let mut encoded = [0u8; cobs::max_encoding_length(1 + MAX_SMALL_REPLY) + 1];
+    let enc_len = cobs::encode(&raw[..raw_len], &mut encoded);
+    encoded[enc_len] = 0x00;
+    let _ = usart.write(&encoded[..enc_len + 1]);
     Ok(())
 }
 
@@ -122,12 +111,13 @@ pub(crate) fn send_awake(seq: u16) {
     let mut frame = [0u8; FRAME_LEN];
 
     let Some(n) = encode_simple(&Awake::new(uid, firmware_id), &mut frame, seq) else {
-        return;
+        panic!("failed to encode Awake frame");
     };
 
     let Some(usart) = USART.get() else {
-        return;
+        panic!("USART not initialized");
     };
+
     let _ = send_ipc_reply(usart, &frame[..n]);
 }
 

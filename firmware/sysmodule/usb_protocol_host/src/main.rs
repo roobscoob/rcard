@@ -21,7 +21,7 @@ sysmodule_usb_protocol_api::bind_usb_protocol_manager!(
 
 use sysmodule_reactor_api::OverflowStrategy;
 
-const MAX_FRAME: usize = 8704;
+const MAX_FRAME: usize = rcard_usb_proto::MAX_DECODED_FRAME;
 
 // ---------------------------------------------------------------------------
 // Pending request staging
@@ -119,16 +119,21 @@ impl HostTransport for HostTransportImpl {
             return Err(HostTransportError::WireWriteFailed);
         };
 
-        // Copy the read-lease into a local buffer. Bulk-read it in one
-        // shot to keep the ep.write() path outside the lease borrow.
+        // Stream the lease to USB in 64-byte chunks — matches the USB
+        // bulk max packet size and avoids an 8 KB stack-local copy.
         let len = buf.len();
-        let mut local = [0u8; MAX_FRAME];
-        if len > local.len() {
-            return Err(HostTransportError::LeaseTooSmall);
+        let mut offset = 0;
+        let mut result = Ok(());
+        while offset < len {
+            let mut chunk = [0u8; 64];
+            let chunk_len = (len - offset).min(64);
+            let _ = buf.read_range(offset, &mut chunk[..chunk_len]);
+            if let Err(e) = write_usb(ep_in, &chunk[..chunk_len]) {
+                result = Err(e);
+                break;
+            }
+            offset += chunk_len;
         }
-        let _ = buf.read_range(0, &mut local[..len]);
-
-        let result = write_usb(ep_in, &local[..len]);
 
         // Always clear the pending slot even if USB write failed — the
         // dispatch is complete from host_proxy's perspective.
@@ -310,6 +315,7 @@ fn main() -> ! {
             transfer_type: TransferType::Bulk,
             max_packet_size: 64,
             interval: 0,
+            interface_group: 0,
         },
     )
     .log_expect("EP OUT IPC failed")
@@ -318,11 +324,12 @@ fn main() -> ! {
     let ep_in = UsbEndpoint::open(
         handles.ep_in,
         EndpointConfig {
-            number: 1,
+            number: 5,
             direction: Direction::In,
             transfer_type: TransferType::Bulk,
             max_packet_size: 64,
             interval: 0,
+            interface_group: 0,
         },
     )
     .log_expect("EP IN IPC failed")

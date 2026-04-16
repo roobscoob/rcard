@@ -49,6 +49,13 @@ pub enum Command {
         layout: String,
         out: PathBuf,
     },
+    /// Make an IPC call to a device.
+    IpcCall {
+        device_id: DeviceId,
+        call: ipc_runtime::EncodedCall,
+        /// oneshot to return the result to the caller.
+        reply: tokio::sync::oneshot::Sender<Result<usb::IpcCallResult, String>>,
+    },
 }
 
 // ── Events (bridge → GUI) ──────────────────────────────────────────────
@@ -143,7 +150,10 @@ pub enum FlashPhase {
     /// Auto-reset failed — asking the user to reset manually.
     WaitingForReset,
     /// Writing stub firmware to RAM.
-    Writing { bytes_written: u32, bytes_total: u32 },
+    Writing {
+        bytes_written: u32,
+        bytes_total: u32,
+    },
     /// Stub loaded, device is booting.
     Booting,
     /// Flash finished successfully.
@@ -162,9 +172,8 @@ pub enum FlashPhase {
 /// could be an EmulatedDevice, a PhysicalDevice behind a serial
 /// connection, etc.
 struct BridgeDevice {
-    _device: Box<dyn Device>,
+    device: Box<dyn Device>,
     cancel: tokio_util::sync::CancellationToken,
-    _event_task: tokio::task::JoinHandle<()>,
 }
 
 struct BridgeSerial {
@@ -179,7 +188,7 @@ pub async fn run(
     event_tx: crossbeam_channel::Sender<Event>,
     ctx: egui::Context,
 ) {
-    let mut devices: HashMap<DeviceId, BridgeDevice> = HashMap::new();
+    let devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut serials: HashMap<SerialPortIndex, BridgeSerial> = HashMap::new();
 
     // Shared persistent device registry: UID → DeviceId.
@@ -193,6 +202,24 @@ pub async fn run(
     // Notified when a new flash request lands — wakes the USART1 loop
     // so it can try to enter debug immediately (without waiting for reset).
     let flash_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
+    // Oneshot receivers waiting for a specific ChipUid to re-enumerate
+    // over USB after a stub flash. The USB supervisor fires these when
+    // it attaches a fob with the matching serial descriptor.
+    let flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // Spawn the native-USB supervisor. Owns attach/detach lifecycle for
+    // all rcard fobs enumerated over native USB. Uses polling today
+    // (nusb 0.1); swap the discovery function for `nusb::watch_devices`
+    // when the crate is bumped to 0.2.
+    let _usb_supervisor = tokio::spawn(usb_supervisor_loop(
+        event_tx.clone(),
+        ctx.clone(),
+        devices.clone(),
+        persistent_devices.clone(),
+        next_device_id.clone(),
+        flash_wait_usb.clone(),
+    ));
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -208,7 +235,8 @@ pub async fn run(
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let task_cancel = cancel.clone();
 
-                let task = tokio::task::spawn_blocking({
+                let bridge_devices = devices.clone();
+                let _task = tokio::task::spawn_blocking({
                     let tx = tx.clone();
                     let repaint = repaint.clone();
                     move || {
@@ -240,11 +268,19 @@ pub async fn run(
                                 });
                                 repaint.request_repaint();
 
-                                // Forward events until cancelled or closed.
+                                // Subscribe before moving the device into the
+                                // bridge map — the receiver works independently.
                                 let mut rx = dev.subscribe();
+                                bridge_devices.lock().unwrap().insert(
+                                    device_id,
+                                    BridgeDevice {
+                                        device: Box::new(dev),
+                                        cancel: task_cancel.clone(),
+                                    },
+                                );
+
+                                // Forward events until cancelled or closed.
                                 loop {
-                                    // Can't use tokio::select in spawn_blocking,
-                                    // so poll with a timeout.
                                     if task_cancel.is_cancelled() {
                                         break;
                                     }
@@ -274,8 +310,9 @@ pub async fn run(
                                     }
                                 }
 
-                                // Keep dev alive (owns Renode process) until loop exits.
-                                drop(dev);
+                                // Remove device from bridge map — the Device
+                                // (and its Renode _run_thread) drops here.
+                                bridge_devices.lock().unwrap().remove(&device_id);
                                 for id in [AdapterId(0), AdapterId(1), AdapterId(2)] {
                                     let _ = tx.send(Event::AdapterRemoved { adapter_id: id });
                                 }
@@ -283,28 +320,15 @@ pub async fn run(
                             }
                             Err(e) => {
                                 eprintln!("emulator start failed: {e}");
-                                // No DeviceCreated was sent, nothing to delete.
                                 repaint.request_repaint();
                             }
                         }
                     }
                 });
-
-                // Store a placeholder BridgeDevice so we can cancel it.
-                // We don't have the Device here (it's inside the blocking task),
-                // but we have the cancel token to stop it.
-                devices.insert(
-                    device_id,
-                    BridgeDevice {
-                        _device: Box::new(NullDevice),
-                        cancel,
-                        _event_task: task,
-                    },
-                );
             }
 
             Command::RemoveDevice(id) => {
-                if let Some(dev) = devices.remove(&id) {
+                if let Some(dev) = devices.lock().unwrap().remove(&id) {
                     dev.cancel.cancel();
                 }
             }
@@ -344,6 +368,8 @@ pub async fn run(
                     next_device_id.clone(),
                     pending_flash.clone(),
                     flash_notify.clone(),
+                    flash_wait_usb.clone(),
+                    devices.clone(),
                 ));
 
                 serials.insert(
@@ -375,51 +401,88 @@ pub async fn run(
                     let tx = build_tx.clone();
                     let repaint = build_ctx.clone();
                     let on_event = move |event: tfw::build::BuildEvent| {
-                        let msg = match &event {
-                            tfw::build::BuildEvent::StageStart { stage } => {
-                                let name = format!("{stage:?}");
+                        use tfw::build::*;
+                        let msg: Option<String> = match &event {
+                            BuildEvent::Build(state) => {
+                                let name = format!("{state:?}");
                                 let _ = tx.send(Event::BuildStage {
                                     build_id,
                                     stage: name.clone(),
                                     detail: String::new(),
                                 });
-                                Some(format!("Stage: {name}"))
+                                match state {
+                                    BuildState::Done => Some("Build complete.".into()),
+                                    _ => Some(format!("Stage: {name}")),
+                                }
                             }
-                            tfw::build::BuildEvent::PhaseStart { phase } => {
-                                Some(format!("  Phase: {phase:?}"))
-                            }
-                            tfw::build::BuildEvent::TaskCompiling { task, phase } => {
+                            BuildEvent::Crate {
+                                name,
+                                kind: _,
+                                update: ResourceUpdate::State(state),
+                            } => {
                                 let _ = tx.send(Event::BuildStage {
                                     build_id,
                                     stage: "Compile".into(),
-                                    detail: format!("{phase:?}: {task}"),
+                                    detail: format!("{state:?}: {name}"),
                                 });
-                                Some(format!("  Compiling {task} ({phase:?})"))
+                                Some(format!("  {state:?} {name}"))
                             }
-                            tfw::build::BuildEvent::RegionMeasured { task, region, size } => {
-                                Some(format!("  Measured {task}.{region} = {size} bytes"))
-                            }
-                            tfw::build::BuildEvent::LayoutResolved { total_regions } => {
-                                Some(format!("  Layout resolved: {total_regions} regions"))
-                            }
-                            tfw::build::BuildEvent::ImageLinked { size } => {
-                                Some(format!("  Image linked: {size} bytes"))
-                            }
-                            tfw::build::BuildEvent::Packed { path } => {
-                                Some(format!("  Packed: {}", path.display()))
-                            }
-                            tfw::build::BuildEvent::MemoryMap { .. } => None,
-                            tfw::build::BuildEvent::CargoMessage(m) => {
-                                m.decode().ok().and_then(|decoded| {
-                                    if let escargot::format::Message::CompilerMessage(cm) = decoded
-                                    {
-                                        cm.message.rendered.map(|r| r.trim().to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                            }
-                            tfw::build::BuildEvent::Done => Some("Build complete.".into()),
+                            BuildEvent::Crate {
+                                name,
+                                kind: _,
+                                update: ResourceUpdate::Event(event),
+                            } => match event {
+                                CrateEvent::Sized { region, size } => {
+                                    Some(format!("  Measured {name}.{region} = {size} bytes"))
+                                }
+                                CrateEvent::CargoMessage(m) => {
+                                    m.decode().ok().and_then(|decoded| {
+                                        if let escargot::format::Message::CompilerMessage(cm) =
+                                            decoded
+                                        {
+                                            cm.message.rendered.map(|r| r.trim().to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                }
+                                CrateEvent::CargoError(e) => Some(format!("{e}")),
+                            },
+                            BuildEvent::HostCrate {
+                                name,
+                                update: ResourceUpdate::State(state),
+                            } => Some(format!("  {name}: {state:?}")),
+                            BuildEvent::HostCrate {
+                                name: _,
+                                update: ResourceUpdate::Event(event),
+                            } => match event {
+                                HostCrateEvent::CargoMessage(m) => {
+                                    m.decode().ok().and_then(|decoded| {
+                                        if let escargot::format::Message::CompilerMessage(cm) =
+                                            decoded
+                                        {
+                                            cm.message.rendered.map(|r| r.trim().to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                }
+                                HostCrateEvent::CargoError(e) => Some(format!("{e}")),
+                            },
+                            BuildEvent::Memory { .. } => None,
+                            BuildEvent::Image(ResourceUpdate::State(state)) => match state {
+                                ImageState::Assembled { size } => {
+                                    Some(format!("  Image assembled: {size} bytes"))
+                                }
+                                ImageState::Archived { path } => {
+                                    Some(format!("  Archived: {}", path.display()))
+                                }
+                            },
+                            BuildEvent::Image(ResourceUpdate::Event(event)) => match event {
+                                ImageEvent::PlaceWritten { place, dest, .. } => {
+                                    Some(format!("  Place {place} @ {dest:#010x}"))
+                                }
+                            },
                         };
                         if let Some(message) = msg {
                             let _ = tx.send(Event::BuildLog { build_id, message });
@@ -444,6 +507,52 @@ pub async fn run(
                     build_ctx.request_repaint();
                 });
             }
+
+            Command::IpcCall {
+                device_id,
+                call,
+                reply,
+            } => {
+                // Find the device and an IPC capability. Prefer USB
+                // (faster) with USART2 as fallback.
+                let devices_lock = devices.lock().unwrap();
+                if let Some(bridge_dev) = devices_lock.get(&device_id) {
+                    use device::device::DeviceExt;
+
+                    // Helper: spawn the call on whichever transport is available.
+                    macro_rules! spawn_ipc_call {
+                        ($ipc:expr) => {{
+                            let ipc = $ipc.clone();
+                            tokio::spawn(async move {
+                                let lease_refs: Vec<&[u8]> =
+                                    call.lease_data.iter().map(|d| d.as_slice()).collect();
+                                let req = rcard_usb_proto::IpcRequest {
+                                    task_id: call.task_id,
+                                    resource_kind: call.resource_kind,
+                                    method: call.method_id,
+                                    args: &call.wire_args,
+                                    leases: &call.leases,
+                                    lease_data: &lease_refs,
+                                };
+                                let result = ipc.call(&req).await.map_err(|e| e.to_string());
+                                let _ = reply.send(result);
+                            });
+                        }};
+                    }
+
+                    if let Some(usb_ipc) = bridge_dev.device.get::<usb::Ipc>() {
+                        spawn_ipc_call!(usb_ipc);
+                    } else if let Some(serial_ipc) = bridge_dev.device.get::<serial::SerialIpc>() {
+                        spawn_ipc_call!(serial_ipc);
+                    } else {
+                        let _ = reply.send(Err(
+                            "device has no IPC capability (no USART2 or USB transport)".into(),
+                        ));
+                    }
+                } else {
+                    let _ = reply.send(Err("device not found in bridge".into()));
+                }
+            }
         }
     }
 }
@@ -461,6 +570,8 @@ async fn serial_connect_loop(
     next_device_id: Arc<AtomicU64>,
     pending_flash: Arc<Mutex<HashMap<DeviceId, PathBuf>>>,
     flash_notify: Arc<tokio::sync::Notify>,
+    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+    bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
 ) {
     match adapter_type {
         SerialAdapterType::Usart1 => {
@@ -474,6 +585,7 @@ async fn serial_connect_loop(
                 next_device_id,
                 pending_flash,
                 flash_notify,
+                flash_wait_usb,
             )
             .await;
         }
@@ -486,6 +598,7 @@ async fn serial_connect_loop(
                 cancel,
                 persistent_devices,
                 next_device_id,
+                bridge_devices,
             )
             .await;
         }
@@ -504,6 +617,7 @@ async fn usart1_connect_loop(
     next_device_id: Arc<AtomicU64>,
     pending_flash: Arc<Mutex<HashMap<DeviceId, PathBuf>>>,
     flash_notify: Arc<tokio::sync::Notify>,
+    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
 ) {
     let adapter_id = device::adapter::AdapterId(index as u64);
 
@@ -533,7 +647,10 @@ async fn usart1_connect_loop(
         // Destructure into the line reader (owned by the parallel reader
         // task) and the shared SifliDebug handle (used for discovery and
         // flash operations from this main loop).
-        let serial::Usart1Connection { mut reader, sifli_debug } = conn;
+        let serial::Usart1Connection {
+            mut reader,
+            sifli_debug,
+        } = conn;
 
         let _ = tx.send(Event::AdapterCreated {
             adapter_id,
@@ -564,9 +681,8 @@ async fn usart1_connect_loop(
                         for &byte in &buf[..n] {
                             if byte == b'\n' {
                                 let text = std::mem::take(&mut line);
-                                let start = line_start
-                                    .take()
-                                    .unwrap_or_else(std::time::Instant::now);
+                                let start =
+                                    line_start.take().unwrap_or_else(std::time::Instant::now);
                                 if line_tx.send((start, text)).is_err() {
                                     return;
                                 }
@@ -815,33 +931,49 @@ async fn usart1_connect_loop(
                                         match flash_stub_via_debug(&session, &tx, persistent_id, &ctx).await {
                                             Ok(()) => {
                                                 eprintln!("[usart1:{port}] stub written, waiting for USB");
-                                                // Wait for the stub's USB device to appear. The
-                                                // stub reports serial = hex of the chip UID,
-                                                // so we match against that to make sure it's
-                                                // the device we just flashed, not a stale peer.
-                                                let serial_hex = format!("{uid}");
-                                                let found = usb::wait_for_serial(
-                                                    &serial_hex,
-                                                    std::time::Duration::from_secs(10),
-                                                )
-                                                .await;
-                                                if found {
-                                                    eprintln!("[usart1:{port}] stub USB up, flash done");
-                                                    let _ = tx.send(Event::FlashProgress {
-                                                        device_id: persistent_id,
-                                                        phase: FlashPhase::Done,
-                                                    });
-                                                } else {
-                                                    eprintln!("[usart1:{port}] stub USB never appeared");
-                                                    let _ = tx.send(Event::FlashProgress {
-                                                        device_id: persistent_id,
-                                                        phase: FlashPhase::Failed {
-                                                            at_step: 2,
-                                                            message: "stub USB device did not appear within 10s".into(),
-                                                        },
-                                                    });
-                                                }
-                                                ctx.request_repaint();
+                                                // Register a oneshot with the USB supervisor;
+                                                // it fires when a fob with this chip UID enumerates
+                                                // over native USB. No descriptor polling here —
+                                                // the supervisor is the single source of truth for
+                                                // USB presence, and its attach event means the
+                                                // adapter is fully claimed and IPC is live, not
+                                                // just that the OS saw the descriptor.
+                                                let (wait_tx, wait_rx) = tokio::sync::oneshot::channel::<()>();
+                                                flash_wait_usb.lock().unwrap().insert(uid, wait_tx);
+                                                let flash_tx = tx.clone();
+                                                let flash_ctx = ctx.clone();
+                                                let flash_port = port.clone();
+                                                let flash_wait_usb_cleanup = flash_wait_usb.clone();
+                                                tokio::spawn(async move {
+                                                    let result = tokio::time::timeout(
+                                                        std::time::Duration::from_secs(20),
+                                                        wait_rx,
+                                                    )
+                                                    .await;
+                                                    match result {
+                                                        Ok(Ok(())) => {
+                                                            eprintln!("[usart1:{flash_port}] stub USB up, flash done");
+                                                            let _ = flash_tx.send(Event::FlashProgress {
+                                                                device_id: persistent_id,
+                                                                phase: FlashPhase::Done,
+                                                            });
+                                                        }
+                                                        _ => {
+                                                            // Drop the waiter so a late attach
+                                                            // doesn't resolve against a stale entry.
+                                                            flash_wait_usb_cleanup.lock().unwrap().remove(&uid);
+                                                            eprintln!("[usart1:{flash_port}] stub USB never appeared");
+                                                            let _ = flash_tx.send(Event::FlashProgress {
+                                                                device_id: persistent_id,
+                                                                phase: FlashPhase::Failed {
+                                                                    at_step: 2,
+                                                                    message: "stub USB device did not appear within 20s".into(),
+                                                                },
+                                                            });
+                                                        }
+                                                    }
+                                                    flash_ctx.request_repaint();
+                                                });
                                             }
                                             Err(e) => {
                                                 eprintln!("[usart1:{port}] stub flash failed: {e}");
@@ -937,6 +1069,7 @@ async fn usart2_connect_loop(
     cancel: tokio_util::sync::CancellationToken,
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
+    bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
 ) {
     let adapter_id = device::adapter::AdapterId(index as u64 + 500_000);
 
@@ -947,15 +1080,21 @@ async fn usart2_connect_loop(
         });
         ctx.request_repaint();
 
-        // Create a PhysicalDevice that owns the log sink. We subscribe to
-        // its broadcast so structured logs decoded off USART2 can be
-        // forwarded to the serial adapter panel.
-        let mut dev = device::physical::PhysicalDevice::new();
-        let mut rx = dev.subscribe();
-        let connect_result = serial::Usart2::connect(&port, adapter_id, dev.log_sink(adapter_id));
+        // Standalone broadcast channel for event forwarding. No
+        // PhysicalDevice yet — just plumbing so logs decoded off
+        // USART2 can reach the serial adapter panel before a device
+        // has been identified.
+        let (events_tx, _) = tokio::sync::broadcast::channel(256);
+        let sink = device::device::LogSink::new(adapter_id, events_tx.clone());
+        let mut rx = events_tx.subscribe();
+
+        let connect_result = serial::Usart2::connect(&port, adapter_id, sink);
 
         match connect_result {
-            Ok(_adapter) => {
+            Ok(adapter) => {
+                // Hold the adapter until Awake identifies a device.
+                let mut adapter = Some(adapter);
+
                 let _ = tx.send(Event::AdapterCreated {
                     adapter_id,
                     display_name: format!("USART2 ({})", port),
@@ -1008,6 +1147,12 @@ async fn usart2_connect_loop(
                                     } = &event
                                     {
                                         let chip_uid = ChipUid(*uid);
+
+                                        // On reboot, remove the old device entry.
+                                        if let Some(old_id) = current_device {
+                                            bridge_devices.lock().unwrap().remove(&old_id);
+                                        }
+
                                         handle_usart2_awake(
                                             index,
                                             adapter_id,
@@ -1020,6 +1165,25 @@ async fn usart2_connect_loop(
                                             &next_device_id,
                                             &ctx,
                                         );
+
+                                        // Create the PhysicalDevice now that we
+                                        // know what's on the other end. Attach
+                                        // the adapter so its SerialIpc capability
+                                        // is registered, then insert into the
+                                        // bridge map so IPC dispatch can find it.
+                                        if let Some(dev_id) = current_device {
+                                            if let Some(usart2) = adapter.take() {
+                                                let mut dev = device::physical::PhysicalDevice::new();
+                                                dev.attach(usart2);
+                                                bridge_devices.lock().unwrap().insert(
+                                                    dev_id,
+                                                    BridgeDevice {
+                                                        device: Box::new(dev),
+                                                        cancel: cancel.clone(),
+                                                    },
+                                                );
+                                            }
+                                        }
                                     }
 
                                     let _ = tx.send(Event::SerialControlEvent { index, event });
@@ -1033,11 +1197,10 @@ async fn usart2_connect_loop(
                     }
                 }
 
-                // Port loop ended. Ephemeral devices auto-clean via the
-                // 0-adapter rule in state.rs; persistent devices go
-                // disconnected. Mirrors the USART1 teardown.
-                current_device.take();
-                drop(dev);
+                // Port loop ended — remove device from bridge map.
+                if let Some(dev_id) = current_device.take() {
+                    bridge_devices.lock().unwrap().remove(&dev_id);
+                }
                 let _ = tx.send(Event::AdapterRemoved { adapter_id });
                 ctx.request_repaint();
                 return;
@@ -1286,14 +1449,20 @@ async fn flash_stub_via_debug(
     writes.sort_by_key(|w| w.data.len());
 
     let bytes_total: u32 = writes.iter().map(|w| (w.data.len() * 4) as u32).sum();
-    eprintln!("[flash] {} write(s) totaling {bytes_total} bytes:", writes.len());
+    eprintln!(
+        "[flash] {} write(s) totaling {bytes_total} bytes:",
+        writes.len()
+    );
     for w in &writes {
         eprintln!("[flash]   addr={:#x} bytes={}", w.addr, w.data.len() * 4);
     }
 
     let _ = tx.send(Event::FlashProgress {
         device_id,
-        phase: FlashPhase::Writing { bytes_written: 0, bytes_total },
+        phase: FlashPhase::Writing {
+            bytes_written: 0,
+            bytes_total,
+        },
     });
     ctx.request_repaint();
 
@@ -1314,7 +1483,14 @@ async fn flash_stub_via_debug(
         for (i, chunk) in write.data.chunks(chunk_size).enumerate() {
             let addr = write.addr + (i * chunk_size * 4) as u32;
             write_chunk_with_progress(
-                session, addr, chunk, bytes_written, bytes_total, device_id, tx, ctx,
+                session,
+                addr,
+                chunk,
+                bytes_written,
+                bytes_total,
+                device_id,
+                tx,
+                ctx,
             )
             .await?;
             bytes_written += (chunk.len() * 4) as u32;
@@ -1331,8 +1507,8 @@ async fn flash_stub_via_debug(
         const VERIFY_CHUNK_WORDS: usize = 1024;
         let mut word_offset = 0usize;
         while word_offset < write.data.len() {
-            let want = &write.data[word_offset
-                ..(word_offset + VERIFY_CHUNK_WORDS).min(write.data.len())];
+            let want =
+                &write.data[word_offset..(word_offset + VERIFY_CHUNK_WORDS).min(write.data.len())];
             let addr = write.addr + (word_offset * 4) as u32;
             let got = session
                 .mem_read(addr, want.len() as u16)
@@ -1518,10 +1694,7 @@ enum DiscoveryOutcome {
 }
 
 /// Attempt to identify the device on a USART1 connection via SifliDebug.
-async fn try_discover_usart1(
-    sifli_debug: &serial::SifliDebug,
-    port: &str,
-) -> DiscoveryOutcome {
+async fn try_discover_usart1(sifli_debug: &serial::SifliDebug, port: &str) -> DiscoveryOutcome {
     eprintln!("[usart1:{port}] discovery: probing for SifliDebug");
     let t0 = std::time::Instant::now();
     let Some(session) = sifli_debug.try_acquire().await else {
@@ -1581,9 +1754,9 @@ fn register_from_discovery(
         } => {
             let id = {
                 let mut registry = persistent_devices.lock().unwrap();
-                *registry.entry(uid).or_insert_with(|| {
-                    DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed))
-                })
+                *registry
+                    .entry(uid)
+                    .or_insert_with(|| DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed)))
             };
             let _ = tx.send(Event::DeviceCreated {
                 device_id: id,
@@ -1599,38 +1772,249 @@ fn register_from_discovery(
     }
 }
 
-// ── Null device placeholder ────────────────────────────────────────────
+// ── USB supervisor ──────────────────────────────────────────────────────
 
-/// Placeholder for BridgeDevice when the real device lives inside a
-/// spawned blocking task (e.g. emulator). The bridge only needs the
-/// cancel token to stop it.
-struct NullDevice;
+/// Per-fob state the supervisor tracks.
+struct UsbEntry {
+    chip_uid: ChipUid,
+    adapter_id: device::adapter::AdapterId,
+    device_id: DeviceId,
+    /// Receiver for the underlying device's broadcast channel. Drives
+    /// `DeviceReportedBuildId` / `Log` forwarding for USB-sourced events.
+    _events_task: tokio::task::JoinHandle<()>,
+}
 
-impl Device for NullDevice {
-    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<device::device::DeviceEvent> {
-        let (tx, rx) = tokio::sync::broadcast::channel(1);
-        drop(tx);
-        rx
+/// Owns native-USB lifecycle for all rcard fobs. Consumes the
+/// `nusb::watch_devices` hotplug stream (via `usb::watch_fobs`), which
+/// self-seeds with already-attached devices at subscription time.
+async fn usb_supervisor_loop(
+    tx: crossbeam_channel::Sender<Event>,
+    ctx: egui::Context,
+    bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
+    persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
+    next_device_id: Arc<AtomicU64>,
+    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+) {
+    use futures_util::StreamExt;
+
+    // Adapter IDs for USB live in a separate numeric range from USART1/2
+    // (which use `index` and `index + 500_000`). 1_000_000+ avoids collisions.
+    const USB_ADAPTER_ID_BASE: u64 = 1_000_000;
+    let mut next_usb_adapter_index: u64 = 0;
+
+    // Two indexes into the same UsbEntry set: one by nusb DeviceId (for
+    // O(1) detach lookup), one by ChipUid (so attach-dedup doesn't let
+    // us open a second Usb for the same fob if nusb surfaces a spurious
+    // Connected event).
+    let mut entries_by_nusb: HashMap<nusb::DeviceId, ChipUid> = HashMap::new();
+    let mut entries_by_uid: HashMap<ChipUid, UsbEntry> = HashMap::new();
+
+    let mut stream = match usb::watch_fobs() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[usb] hotplug watch failed to start: {e}");
+            return;
+        }
+    };
+
+    while let Some(event) = stream.next().await {
+        match event {
+            usb::FobEvent::Connected(fob) => {
+                let Some(uid) = parse_chip_uid(&fob.serial) else {
+                    eprintln!("[usb:{}] malformed serial descriptor, ignoring", fob.serial);
+                    continue;
+                };
+                if entries_by_uid.contains_key(&uid) {
+                    // Duplicate event (typical when the seed race and
+                    // a real Connected arrive for the same device).
+                    continue;
+                }
+
+                let adapter_id =
+                    device::adapter::AdapterId(USB_ADAPTER_ID_BASE + next_usb_adapter_index);
+                next_usb_adapter_index += 1;
+
+                match handle_usb_attach(
+                    &fob.serial,
+                    uid,
+                    adapter_id,
+                    &tx,
+                    &ctx,
+                    &bridge_devices,
+                    &persistent_devices,
+                    &next_device_id,
+                    &flash_wait_usb,
+                ) {
+                    Ok(entry) => {
+                        entries_by_nusb.insert(fob.id, uid);
+                        entries_by_uid.insert(uid, entry);
+                    }
+                    Err(e) => {
+                        eprintln!("[usb:{}] attach failed: {e}", fob.serial);
+                    }
+                }
+            }
+            usb::FobEvent::Disconnected(nusb_id) => {
+                let Some(uid) = entries_by_nusb.remove(&nusb_id) else {
+                    continue;
+                };
+                if let Some(entry) = entries_by_uid.remove(&uid) {
+                    handle_usb_detach(entry.chip_uid, &entry, &tx, &ctx, &bridge_devices);
+                }
+            }
+        }
     }
-    fn query_capability(
-        &self,
-        _: std::any::TypeId,
-    ) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
-        None
+}
+
+/// Parse a chip UID from its USB serial string (32 hex chars, little-endian
+/// byte order matching `ChipUid::Display`). Returns `None` on bad input.
+fn parse_chip_uid(serial: &str) -> Option<ChipUid> {
+    if serial.len() != 32 {
+        return None;
     }
-    fn query_all_capabilities(
-        &self,
-        _: std::any::TypeId,
-    ) -> Vec<(
-        device::adapter::AdapterId,
-        std::sync::Arc<dyn std::any::Any + Send + Sync>,
-    )> {
-        vec![]
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in serial.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).ok()?;
+        bytes[i] = u8::from_str_radix(s, 16).ok()?;
     }
-    fn has_capability(&self, _: std::any::TypeId) -> bool {
-        false
+    Some(ChipUid(bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_usb_attach(
+    serial: &str,
+    uid: ChipUid,
+    adapter_id: device::adapter::AdapterId,
+    tx: &crossbeam_channel::Sender<Event>,
+    ctx: &egui::Context,
+    bridge_devices: &Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
+    persistent_devices: &Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
+    next_device_id: &Arc<AtomicU64>,
+    flash_wait_usb: &Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+) -> Result<UsbEntry, String> {
+    // Resolve / mint the persistent DeviceId for this chip UID.
+    let device_id = {
+        let mut registry = persistent_devices.lock().unwrap();
+        *registry
+            .entry(uid)
+            .or_insert_with(|| DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed)))
+    };
+
+    // Ensure a BridgeDevice exists, grab a LogSink from it.
+    let sink = {
+        let mut devs = bridge_devices.lock().unwrap();
+        let bridge_dev = devs.entry(device_id).or_insert_with(|| {
+            let dev = device::physical::PhysicalDevice::new();
+            BridgeDevice {
+                device: Box::new(dev),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            }
+        });
+        bridge_dev
+            .device
+            .log_sink(adapter_id)
+            .ok_or_else(|| "device does not expose a log sink".to_string())?
+    };
+
+    let usb = usb::Usb::connect(adapter_id, serial, sink).map_err(|e| format!("{e}"))?;
+
+    // Subscribe to the device's broadcast before attaching so we don't
+    // miss the AdapterConnected event. Also used to forward Awake logs
+    // → DeviceReportedBuildId in the future.
+    let mut rx = {
+        let devs = bridge_devices.lock().unwrap();
+        let bridge_dev = devs
+            .get(&device_id)
+            .ok_or_else(|| "bridge device vanished between log_sink() and attach()".to_string())?;
+        bridge_dev.device.subscribe()
+    };
+
+    // Attach on the bridge device. This registers the Ipc capability and
+    // emits AdapterConnected on the broadcast channel.
+    {
+        let mut devs = bridge_devices.lock().unwrap();
+        if let Some(bridge_dev) = devs.get_mut(&device_id) {
+            bridge_dev.device.attach_adapter(Box::new(usb));
+        }
     }
-    fn adapters(&self) -> Vec<(device::adapter::AdapterId, &dyn device::adapter::Adapter)> {
-        vec![]
+
+    // Announce to the GUI. DeviceCreated is idempotent in state.rs —
+    // merges adapter_ids + capabilities into the existing handle.
+    let _ = tx.send(Event::AdapterCreated {
+        adapter_id,
+        display_name: format!("USB ({serial})"),
+    });
+    let _ = tx.send(Event::DeviceCreated {
+        device_id,
+        name: format!("Device {uid}"),
+        kind: DeviceKind::Persistent,
+        adapter_ids: vec![adapter_id],
+        capabilities: vec![KnownCapability::UsbIpc],
+        firmware_id: None,
+    });
+    ctx.request_repaint();
+
+    // If a USART1 flash handler is waiting for this UID to come up over
+    // USB, fire the oneshot. Remove the entry regardless so a late
+    // spurious fire doesn't clobber a future flash attempt.
+    if let Some(waiter) = flash_wait_usb.lock().unwrap().remove(&uid) {
+        let _ = waiter.send(());
     }
+
+    // Spawn a task to forward device events for future expansion
+    // (Awake → DeviceReportedBuildId, etc). Drops cleanly on detach when
+    // the broadcast channel closes.
+    let forward_tx = tx.clone();
+    let forward_ctx = ctx.clone();
+    let events_task = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(device::device::DeviceEvent::Log(log)) => {
+                    let _ = forward_tx.send(Event::Log {
+                        device: device_id,
+                        log,
+                    });
+                    forward_ctx.request_repaint();
+                }
+                Ok(device::device::DeviceEvent::AdapterDisconnected(id)) if id == adapter_id => {
+                    // This adapter's slot on the device is gone — stop.
+                    return;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+
+    eprintln!("[usb:{serial}] attached → {device_id:?}");
+
+    Ok(UsbEntry {
+        chip_uid: uid,
+        adapter_id,
+        device_id,
+        _events_task: events_task,
+    })
+}
+
+fn handle_usb_detach(
+    uid: ChipUid,
+    entry: &UsbEntry,
+    tx: &crossbeam_channel::Sender<Event>,
+    ctx: &egui::Context,
+    bridge_devices: &Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
+) {
+    {
+        let mut devs = bridge_devices.lock().unwrap();
+        if let Some(bridge_dev) = devs.get_mut(&entry.device_id) {
+            bridge_dev.device.detach_adapter(entry.adapter_id);
+        }
+    }
+
+    let _ = tx.send(Event::AdapterRemoved {
+        adapter_id: entry.adapter_id,
+    });
+    ctx.request_repaint();
+
+    eprintln!("[usb:{uid}] detached");
 }

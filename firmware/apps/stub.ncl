@@ -22,7 +22,6 @@ fun args =>
 
     boot = {
       ftab = args.places.sec_config,
-      loader = args.places.bootloader,
     },
 
     notifications = {
@@ -48,5 +47,13 @@ fun args =>
       args.tasks.supervisor,
       args.tasks.idle,
       args.tasks.stub,
+      args.tasks.sysmodule_host_proxy,
+      # USB now comes from the shared usb_protocol stack (same topology
+      # as the full firmware: EP1 IN/OUT for host-driven IPC, EP2 IN/OUT
+      # for fob-driven events). The stub task itself no longer takes the
+      # bus directly — usb_protocol owns it.
+      args.tasks.sysmodule_usb_protocol,
+      args.tasks.sysmodule_usb_protocol_host,
+      args.tasks.sysmodule_usb_protocol_fob,
     ],
   }

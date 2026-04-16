@@ -17,6 +17,8 @@ crossbeam-channel = "0.5"
 device = { path = "../device" }
 serial = { path = "../serial" }
 usb = { path = "../usb" }
+nusb = { version = "0.2", features = ["tokio"] }
+futures-util = { version = "0.3", default-features = false }
 emulator = { path = "../emulator" }
 tfw = { path = "../tfw" }
 rcard-log = { path = "../../shared/log", features = ["alloc"] }
@@ -30,6 +32,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 uuid = "1"
+ipc-runtime = { path = "../ipc-runtime" }
+indexmap = "2"
 
 [build-dependencies]
 tfw = { path = "../tfw" }

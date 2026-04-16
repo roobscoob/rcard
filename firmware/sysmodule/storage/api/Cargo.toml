@@ -5,13 +5,16 @@ edition = "2021"
 
 [features]
 bare-panics = []
+host = ["ipc/host"]
 
 [dependencies]
 ipc = { path = "../../../modules/ipc" }
 rcard-log = { path = "../../../../shared/log" }
-userlib.workspace = true
 zerocopy = "0.8"
 storage_api = { path = "../../../modules/storage_api" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+userlib.workspace = true
 
 [build-dependencies]
 serde_json = "1"

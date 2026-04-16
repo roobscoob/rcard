@@ -18,6 +18,7 @@ pub fn link_image(
     config: &AppConfig,
     layout: &Layout,
     out_dir: &Path,
+    emit: crate::build::EventFn<'_>,
 ) -> Result<PathBuf, LinkError> {
     std::fs::create_dir_all(out_dir).map_err(LinkError::Io)?;
 
@@ -66,8 +67,22 @@ pub fn link_image(
         }
     }
 
-    for (place_name, segs) in &by_place {
-        let mut segs = segs.clone();
+    // CPU base of the place hosting places.bin. Segments in this place
+    // get file_offset = (segment_dest - host_base), so their bytes land
+    // at their linker addresses on flash and run XIP. Segments destined
+    // for other places (RAM-init data) are packed after the host place's
+    // data, at any unclaimed file offset.
+    let host_base = config.places.get("image")
+        .and_then(|p| p.mappings.first().map(|m| m.address + p.offset.unwrap_or(0)));
+
+    // Iterate places in two passes: host place first (so it takes
+    // file_offset 0..host_size), then everything else packed after.
+    let mut place_names: Vec<&str> = by_place.keys().copied().collect();
+    place_names.sort_by_key(|n| if *n == "image" { 0 } else { 1 });
+
+    let mut tail_cursor: u32 = 0;
+    for place_name in place_names {
+        let mut segs = by_place[place_name].clone();
         segs.sort_by_key(|s| s.paddr);
 
         // Check for overlaps within this place.
@@ -88,7 +103,8 @@ pub fn link_image(
         let end = segs.iter().map(|s| s.paddr + s.data.len() as u64).max().unwrap();
         let total = (end - base) as usize;
 
-        // Merge into a contiguous blob (gaps filled with 0xFF).
+        // Merge PT_LOADs in this place into one contiguous blob
+        // (0xFF gap-fill).
         let mut blob = vec![0xFFu8; total];
         for seg in &segs {
             let offset = (seg.paddr - base) as usize;
@@ -96,9 +112,8 @@ pub fn link_image(
         }
 
         // mem_size: include .bss regions in this place.
-        // Find all placed regions that fall within this place's range.
         let (place_start, place_end) = place_ranges.iter()
-            .find(|(_, name)| *name == *place_name)
+            .find(|(_, name)| *name == place_name)
             .map(|((s, e), _)| (*s, *e))
             .unwrap();
 
@@ -110,10 +125,33 @@ pub fn link_image(
 
         let mem_size = (mem_end - base) as u32;
 
-        eprintln!("    place {place_name}: {:#010x} ({total} bytes file, {mem_size} bytes mem)",
-            base);
+        // Compute file_offset.
+        let file_offset = if place_name == "image" {
+            let host = host_base.ok_or_else(|| LinkError::Other(
+                "image place exists in by_place but has no CPU mapping".into()
+            ))?;
+            let off = (base - host) as u32;
+            // Reserve the rest of the image's data region for the host.
+            tail_cursor = off + total as u32;
+            off
+        } else {
+            // Pack RAM-init segments after the image data.
+            let off = (tail_cursor + 3) & !3;
+            tail_cursor = off + total as u32;
+            off
+        };
 
-        builder.add_segment(base as u32, &blob, mem_size);
+        emit(crate::build::BuildEvent::Image(
+            crate::build::ResourceUpdate::Event(crate::build::ImageEvent::PlaceWritten {
+                place: place_name.to_string(),
+                dest: base,
+                file_offset,
+                file_size: total as u32,
+                mem_size,
+            }),
+        ));
+
+        builder.add_segment(base as u32, file_offset, &blob, mem_size);
     }
 
     let places_bin = builder.build();
@@ -122,15 +160,11 @@ pub fn link_image(
     Ok(places_path)
 }
 
-/// Extract a flat binary from an ELF (like `objcopy -O binary`).
-/// Used for the bootloader which runs XIP from flash.
-pub fn extract_flat_binary(
-    artifact: &CompileArtifact,
-    out_dir: &Path,
-) -> Result<PathBuf, LinkError> {
-    let out_path = out_dir.join("bootloader.bin");
-    std::fs::create_dir_all(out_dir).map_err(LinkError::Io)?;
-
+/// Measure the flat-binary size of an ELF (like the length of
+/// `objcopy -O binary` output). Used to populate the ftab's
+/// `imgs[BL].size` field for the bootloader, which now lives inside
+/// places.bin rather than as a separate flashed blob.
+pub fn measure_flat_binary_size(artifact: &CompileArtifact) -> Result<u32, LinkError> {
     let data = std::fs::read(&artifact.elf_path).map_err(LinkError::Io)?;
     let elf = ElfFile32::<Endianness>::parse(&*data).map_err(|e| LinkError::Elf {
         crate_name: artifact.crate_name.clone(),
@@ -147,50 +181,30 @@ pub fn extract_flat_binary(
 
     let mut min_addr = u64::MAX;
     let mut max_addr = 0u64;
-    let mut segments = Vec::new();
+    let mut found = false;
 
     for header in phdrs {
         if header.p_type(endian) != object::elf::PT_LOAD {
             continue;
         }
-        let filesz = header.p_filesz(endian) as usize;
+        let filesz = header.p_filesz(endian) as u64;
         if filesz == 0 {
             continue;
         }
-        let offset = header.p_offset(endian) as usize;
-        let paddr = header.p_paddr(endian) as u64;
-        if offset < 64 {
+        if (header.p_offset(endian) as usize) < 64 {
             continue;
         }
-
-        let seg_data = data
-            .get(offset..offset + filesz)
-            .ok_or_else(|| LinkError::Elf {
-                crate_name: artifact.crate_name.clone(),
-                message: format!(
-                    "segment at offset {offset:#x} size {filesz:#x} extends past EOF"
-                ),
-            })?;
-
+        let paddr = header.p_paddr(endian) as u64;
         min_addr = min_addr.min(paddr);
-        max_addr = max_addr.max(paddr + filesz as u64);
-        segments.push((paddr, seg_data));
+        max_addr = max_addr.max(paddr + filesz);
+        found = true;
     }
 
-    if segments.is_empty() {
+    if !found {
         return Err(LinkError::NoSegments);
     }
 
-    let total = (max_addr - min_addr) as usize;
-    let mut bin = vec![0xFFu8; total];
-    for (addr, seg_data) in &segments {
-        let off = (*addr - min_addr) as usize;
-        bin[off..off + seg_data.len()].copy_from_slice(seg_data);
-    }
-
-    eprintln!("    bootloader: {:#010x} ({total} bytes)", min_addr);
-    std::fs::write(&out_path, &bin).map_err(LinkError::Io)?;
-    Ok(out_path)
+    Ok((max_addr - min_addr) as u32)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

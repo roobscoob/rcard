@@ -93,12 +93,17 @@ static USB_ALLOC: SyncCell<Option<UsbBusAllocator<UsbdBus<UsbInstance>>>> = Sync
 // ---------------------------------------------------------------------------
 
 struct VendorClass<'a, B: usb_device::bus::UsbBus> {
-    /// Interface numbers — one per distinct endpoint group.
-    /// Endpoints are assigned to interfaces by endpoint number:
-    /// EP1 → ifaces[0] (host-driven), EP2 → ifaces[1] (fob-driven), etc.
-    ifaces: [Option<usb_device::bus::InterfaceNumber>; 7],
+    /// Interface numbers keyed by `interface_group`. Endpoints with the
+    /// same group share a USB interface even when they use different
+    /// hardware endpoint numbers (required on shared-FIFO parts like
+    /// sf32lb52x where IN and OUT must live on separate endpoints).
+    ifaces: [Option<(u8, usb_device::bus::InterfaceNumber)>; 7],
     ep_in: [Option<EndpointIn<'a, B>>; 7],
     ep_out: [Option<EndpointOut<'a, B>>; 7],
+    /// Which interface_group each endpoint index belongs to (for descriptor
+    /// generation). Indexed by ep_num-1, mirrors endpoints_in/out.
+    ep_group_in: [Option<u8>; 7],
+    ep_group_out: [Option<u8>; 7],
     /// Identity blob reborrowed from `UsbGlobal` with `'static` lifetime.
     /// Walked on each BOS / vendor-request enumeration.
     identity: DeviceBlob<'static>,
@@ -115,8 +120,33 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
             ifaces: [const { None }; 7],
             ep_in: [const { None }; 7],
             ep_out: [const { None }; 7],
+            ep_group_in: [None; 7],
+            ep_group_out: [None; 7],
             identity,
         };
+
+        // Helper: find or allocate an InterfaceNumber for a given group.
+        fn get_or_alloc_iface(
+            ifaces: &mut [Option<(u8, usb_device::bus::InterfaceNumber)>; 7],
+            alloc: &UsbBusAllocator<UsbdBus<UsbInstance>>,
+            group: u8,
+        ) -> usb_device::bus::InterfaceNumber {
+            for entry in ifaces.iter() {
+                if let Some((g, iface)) = entry {
+                    if *g == group {
+                        return *iface;
+                    }
+                }
+            }
+            let iface = alloc.interface();
+            for entry in ifaces.iter_mut() {
+                if entry.is_none() {
+                    *entry = Some((group, iface));
+                    return iface;
+                }
+            }
+            panic!("too many interface groups");
+        }
 
         for idx in 0..7 {
             let has_in = endpoints_in[idx].is_some();
@@ -128,13 +158,9 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
 
             let ep_num = (idx + 1) as u8;
 
-            // Allocate one interface per endpoint number.
-            // IN + OUT on the same number share an interface.
-            if class.ifaces[idx].is_none() {
-                class.ifaces[idx] = Some(alloc.interface());
-            }
-
             if let Some(config) = &endpoints_in[idx] {
+                get_or_alloc_iface(&mut class.ifaces, alloc, config.interface_group);
+                class.ep_group_in[idx] = Some(config.interface_group);
                 let ep_type = transfer_type(config.transfer_type);
                 let addr =
                     EndpointAddress::from_parts(ep_num as usize, usb_device::UsbDirection::In);
@@ -147,6 +173,8 @@ impl<'a> VendorClass<'a, UsbdBus<UsbInstance>> {
             }
 
             if let Some(config) = &endpoints_out[idx] {
+                get_or_alloc_iface(&mut class.ifaces, alloc, config.interface_group);
+                class.ep_group_out[idx] = Some(config.interface_group);
                 let ep_type = transfer_type(config.transfer_type);
                 let addr =
                     EndpointAddress::from_parts(ep_num as usize, usb_device::UsbDirection::Out);
@@ -180,16 +208,23 @@ impl<B: usb_device::bus::UsbBus> UsbClass<B> for VendorClass<'_, B> {
         &self,
         writer: &mut DescriptorWriter,
     ) -> usb_device::Result<()> {
-        // Each endpoint number gets its own interface descriptor.
-        // Endpoints sharing a number (IN + OUT pair) are grouped.
-        for (idx, iface) in self.ifaces.iter().enumerate() {
-            let Some(iface) = iface else { continue };
-            writer.interface(*iface, 0xFF, 0x00, 0x00)?;
-            if let Some(ep) = &self.ep_out[idx] {
-                writer.endpoint(ep)?;
-            }
-            if let Some(ep) = &self.ep_in[idx] {
-                writer.endpoint(ep)?;
+        // Emit one interface descriptor per interface_group, then all
+        // endpoints belonging to that group (potentially from different
+        // hardware endpoint numbers on shared-FIFO parts).
+        for &entry in self.ifaces.iter() {
+            let Some((group, iface)) = entry else { continue };
+            writer.interface(iface, 0xFF, 0x00, 0x00)?;
+            for idx in 0..7 {
+                if self.ep_group_out[idx] == Some(group) {
+                    if let Some(ep) = &self.ep_out[idx] {
+                        writer.endpoint(ep)?;
+                    }
+                }
+                if self.ep_group_in[idx] == Some(group) {
+                    if let Some(ep) = &self.ep_in[idx] {
+                        writer.endpoint(ep)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -342,7 +377,10 @@ impl UsbGlobal {
             .device_sub_class(dev_subclass)
             .device_protocol(dev_protocol)
             .device_release(bcd)
-            .self_powered(false)
+            .self_powered(true)
+            .max_power(500)
+            .map_err(BuilderErr::from)
+            .log_expect("EP0 alloc failed")
             .max_packet_size_0(64)
             .map_err(BuilderErr::from)
             .log_expect("EP0 alloc failed")
@@ -660,20 +698,6 @@ impl UsbEndpoint for UsbEndpointResource {
         let _ = data.read_range(0, &mut buf[..len]);
 
         let result = ep.write(&buf[..len]);
-
-        // TEMP: log once after the first write call to verify the patched
-        // musb word-wide FIFO write loop is actually compiled and reached.
-        {
-            use core::sync::atomic::{AtomicBool, Ordering};
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                if musb::WORD_WRITE_LOOP_REACHED.load(Ordering::Relaxed) {
-                    info!("{}", "musb: word-wide FIFO patch active");
-                } else {
-                    info!("{}", "musb: word-wide FIFO patch NOT REACHED");
-                }
-            }
-        }
 
         match result {
             Ok(n) => Ok(n as u16),

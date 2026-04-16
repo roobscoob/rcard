@@ -86,12 +86,14 @@ fn init_usart(index: u8, regs: UsartPeri) {
         w.set_m(M::Bit8);
         w.set_ue(true);
         w.set_te(true);
-        // Host channel: enable RX + the RXNE interrupt. The IRQ wakes
-        // sysmodule_usart, which drains RDR into USART2_RX and pushes
-        // the `usart_event` notification.
+        // Host channel: enable RX + RXNE + IDLE interrupts. RXNE
+        // drains each byte into the ring buffer as it arrives (preventing
+        // overrun). IDLE fires once after the last byte of a burst —
+        // that's when we push the notification, instead of per-byte.
         if index == 2 {
             w.set_re(true);
             w.set_rxneie(true);
+            w.set_idleie(true);
         }
     });
 }
@@ -209,11 +211,16 @@ fn main() -> ! {
     ipc::server! {
         Usart: UsartResource,
         @irq(usart2_irq) => || {
-            // Drain the USART2 RX FIFO (really just RDR — no hardware
-            // FIFO on this MCU) into our software ring until RXNE is
-            // clear. Reading RDR is what clears RXNE.
             let regs = sifli_pac::USART2;
-            let mut got_any = false;
+
+            // Check for overrun BEFORE draining — ORE is cleared by
+            // reading ISR then RDR, so we must capture it first.
+            if regs.isr().read().ore() {
+                regs.icr().write(|w| w.set_orecf(true));
+            }
+
+            // Drain all pending bytes into the ring. RXNE fires per-byte
+            // to prevent overrun, but we don't notify here.
             loop {
                 let isr = regs.isr().read();
                 if !isr.rxne() {
@@ -221,13 +228,14 @@ fn main() -> ! {
                 }
                 let b = regs.rdr().read().rdr() as u8;
                 let _ = USART2_RX.with(|ring| ring.push(b));
-                got_any = true;
             }
-            if got_any {
-                // Wake usart_event subscribers. `code = 2` identifies
-                // USART2 (when we later add USART3 RX, code=3 distinguishes).
-                // `refresh` coalesces repeated IRQs so a fast burst
-                // collapses into a single pending notification.
+
+            // Re-read ISR after draining — IDLE may have set during
+            // the drain loop if the burst ended while we were reading.
+            // Checking the fresh ISR instead of the pre-drain snapshot
+            // avoids relying on a second ISR re-entry.
+            if regs.isr().read().idle() {
+                regs.icr().write(|w| w.set_idlecf(true));
                 let _ = Reactor::refresh(
                     notifications::GROUP_ID_USART_EVENT,
                     2,

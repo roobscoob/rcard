@@ -7,7 +7,7 @@ fn firmware_dir() -> &'static Path {
 #[test]
 fn load_fob_config() {
     let config = tfw::config::load(
-        firmware_dir(), "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
     ).expect("failed to load fob config");
 
     assert_eq!(config.name, "rcard");
@@ -36,12 +36,9 @@ fn load_fob_config() {
     assert!(bl.regions.contains_key("code"));
     assert!(bl.regions.contains_key("stack"));
 
-    // Boot config has loader
+    // Boot config has ftab placement
     let boot = config.boot.as_ref().expect("boot config should exist");
-    assert!(boot.loader.offset.is_some());
-
-    // Bootloader place exists
-    assert!(config.places.contains_key("bootloader"));
+    assert!(boot.ftab.offset.is_some());
 
     // Kernel
     assert_eq!(config.kernel.crate_info.package.name, "kernel-sf32lb52");
@@ -54,7 +51,7 @@ fn load_fob_config() {
 #[test]
 fn load_stub_config() {
     let config = tfw::config::load(
-        firmware_dir(), "stub.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/stub.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
     ).expect("failed to load stub config");
 
     let entry_crates: Vec<&str> = config

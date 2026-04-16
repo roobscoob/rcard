@@ -5,13 +5,18 @@ edition = "2021"
 
 [features]
 bare-panics = []
+host = ["ipc/host"]
 
 [dependencies]
 ipc = { path = "../../../modules/ipc" }
-rcard-log = { path = "../../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../../shared/log/macros" }
-userlib.workspace = true
 zerocopy = "0.8"
+
+[target.'cfg(target_os = "none")'.dependencies]
+userlib.workspace = true
+
+[dependencies.rcard-log]
+path = "../../../../shared/log"
 
 [lib]
 test = false

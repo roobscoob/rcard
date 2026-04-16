@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = ["bare-panics"]
-bare-panics = []
+bare-panics = ["ipc/bare-panics"]
 
 [dependencies]
 ipc = { path = "../../modules/ipc" }

@@ -10,13 +10,8 @@ panics-emit-stack-dump = ["rcard-log/panics-emit-stack-dump"]
 [dependencies]
 generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc" }
-once-cell = { path = "../../modules/once_cell" }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
-rcard-log-macros = { path = "../../../shared/log/macros" }
-sysmodule_device_info_api = { path = "../../sysmodule/device_info/api" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
-sysmodule_reactor_api = { path = "../../sysmodule/reactor/api" }
-sysmodule_usb_api = { path = "../../sysmodule/usb/api" }
 userlib.workspace = true
 
 [[bin]]

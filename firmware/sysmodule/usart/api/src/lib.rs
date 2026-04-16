@@ -9,6 +9,9 @@
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum UsartOpenError {

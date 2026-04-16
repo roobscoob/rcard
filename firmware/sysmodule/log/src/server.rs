@@ -1,5 +1,6 @@
 use ipc::Meta;
 use once_cell::GlobalState;
+use rcard_log::formatter::tags::TAG_END_OF_STREAM;
 use rcard_log::{LogLevel, LogMetadata};
 use sysmodule_log_api::LogError;
 
@@ -124,7 +125,9 @@ static LOG_STATE: GlobalState<LogState> = GlobalState::new(LogState::new());
 /// ipc::server dispatch is sequential so these methods never overlap,
 /// and parking the buffer in BSS cuts ~150 bytes off `LogDispatcher::dispatch`'s
 /// stack frame.
-const METHOD_BUF_SIZE: usize = core::mem::size_of::<LogMetadata>() + MAX_INLINE_LOG_SIZE;
+// +1 byte of headroom so `Log::log` can append TAG_END_OF_STREAM after a
+// fully-sized inline payload without truncating caller data.
+const METHOD_BUF_SIZE: usize = core::mem::size_of::<LogMetadata>() + MAX_INLINE_LOG_SIZE + 1;
 static METHOD_BUF: GlobalState<[u8; METHOD_BUF_SIZE]> =
     GlobalState::new([0u8; METHOD_BUF_SIZE]);
 
@@ -163,10 +166,13 @@ impl sysmodule_log_api::Log for LogResource {
             METHOD_BUF.with(|buf| {
                 let meta_bytes = zerocopy::IntoBytes::as_bytes(&metadata);
                 buf[..META_SIZE].copy_from_slice(meta_bytes);
-                let data_len = data.len().min(buf.len() - META_SIZE);
+                // Reserve 1 byte for the appended TAG_END_OF_STREAM terminator.
+                let data_len = data.len().min(buf.len() - META_SIZE - 1);
                 let _ = data.read_range(0, &mut buf[META_SIZE..META_SIZE + data_len]);
-                send_frame(stream_id, &buf[..META_SIZE + data_len]);
-                s.ring.push(log_id, 0, &buf[..META_SIZE + data_len]);
+                let end = META_SIZE + data_len;
+                buf[end] = TAG_END_OF_STREAM;
+                send_frame(stream_id, &buf[..end + 1]);
+                s.ring.push(log_id, 0, &buf[..end + 1]);
             });
         });
         notify_logs(level);
@@ -278,6 +284,13 @@ impl sysmodule_log_api::Log for LogResource {
 
 impl Drop for LogResource {
     fn drop(&mut self) {
-        // No action needed — stream stays in the emulator-side HashMap.
+        // Terminate the stream on the wire and in the ring. The producer
+        // dropping its IPC handle is the "no more data" signal; converting
+        // that into TAG_END_OF_STREAM here is what lets the host decoder
+        // evict the stream, even when the producer aborted mid-format.
+        send_frame(self.stream_id, &[TAG_END_OF_STREAM]);
+        LOG_STATE.with(|s| {
+            s.ring.push(self.metadata.log_id, self.idx, &[TAG_END_OF_STREAM]);
+        });
     }
 }

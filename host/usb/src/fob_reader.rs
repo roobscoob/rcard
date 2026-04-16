@@ -1,34 +1,47 @@
 use device::device::LogSink;
 use device::logs::LogEntry;
-use nusb::transfer::RequestBuffer;
+use nusb::Endpoint;
+use nusb::transfer::{Buffer, Bulk, In};
 use rcard_log::decoder::{Decoder, FeedResult};
 use rcard_log::LogMetadata;
 use rcard_usb_proto::FrameReader;
+use tokio_util::sync::CancellationToken;
 use zerocopy::TryFromBytes;
 
 use crate::error::UsbError;
+use crate::{IN_BUFFER_SIZE, IN_PIPELINE_DEPTH};
 
 const METADATA_SIZE: usize = core::mem::size_of::<LogMetadata>();
 const ENTRY_HEADER: usize = 10; // log_id(8) + data_len(1) + fragment_idx(1)
 
 /// Read frames from the fob-driven bulk IN endpoint and dispatch events.
-pub(crate) async fn run(fob_iface: nusb::Interface, in_endpoint: u8, sink: LogSink) {
+pub(crate) async fn run(
+    mut endpoint: Endpoint<Bulk, In>,
+    sink: LogSink,
+    cancel: CancellationToken,
+) {
     let mut reader = FrameReader::<4096>::new();
 
+    for _ in 0..IN_PIPELINE_DEPTH {
+        endpoint.submit(Buffer::new(IN_BUFFER_SIZE));
+    }
+
     loop {
-        let data = match fob_iface
-            .bulk_in(in_endpoint, RequestBuffer::new(4096))
-            .await
-            .into_result()
-        {
-            Ok(data) => data,
+        let completion = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            c = endpoint.next_complete() => c,
+        };
+
+        let buf = match completion.status {
+            Ok(()) => completion.buffer,
             Err(e) => {
                 sink.error(UsbError::Transfer(e));
                 return;
             }
         };
 
-        reader.push(&data);
+        reader.push(&buf[..buf.len()]);
 
         loop {
             match reader.next_frame() {
@@ -49,6 +62,10 @@ pub(crate) async fn run(fob_iface: nusb::Interface, in_endpoint: u8, sink: LogSi
                 }
             }
         }
+
+        let mut buf = buf;
+        buf.clear();
+        endpoint.submit(buf);
     }
 }
 
@@ -95,6 +112,7 @@ fn parse_log_entries(data: &[u8], sink: &LogSink) {
                         log_id: meta.log_id,
                         log_species: meta.log_species,
                         values,
+                        truncated: false,
                     });
                 }
                 Err(_) => {

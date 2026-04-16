@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 cobs = "0.3"
 device = { path = "../device" }
+ipc-protocol = { path = "../ipc-protocol" }
 rcard-log = { path = "../../shared/log", features = ["alloc"] }
 rcard-usb-proto = { path = "../../shared/usb-proto" }
 serialport = "4"

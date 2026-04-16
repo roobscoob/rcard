@@ -5,7 +5,7 @@ use syn::Ident;
 use crate::lease;
 use crate::parse::{HandleMode, MethodKind, ParsedMethod, ParsedParam};
 use crate::transfer;
-use crate::util::{panic_path, replace_ident_in_type, to_pascal_case};
+use crate::util::{replace_ident_in_type, to_pascal_case};
 use crate::wire_format;
 
 use super::constructs::gen_constructs_map;
@@ -99,7 +99,6 @@ fn gen_constructor(
     ctor_return: &crate::parse::ConstructorReturn,
     err_type: &TokenStream2,
 ) -> TokenStream2 {
-    let _p = panic_path();
     let ctor_server_expr = quote! { server.get() };
     let handle_transfer_stmts =
         transfer::gen_handle_transfer_stmts(non_lease_params, &ctor_server_expr, err_type);
@@ -140,29 +139,14 @@ fn gen_constructor(
             #lease_arr
             let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
             let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-            let (rc, len) = ipc::kern::sys_send(
+            let len = ipc::call_send(
+                server_id,
                 server.get(),
                 opcode,
                 argbuffer,
                 retbuffer,
                 &mut leases,
-            ).map_err(|dead| {
-                server_id.set(server.get().with_generation(dead.new_generation()));
-                #err_type::from_wire(ipc::Error::ServerDied)
-            })?;
-            if rc == ipc::ACCESS_VIOLATION {
-                #_p!(
-                    "ipc: server {} rejected our message: access violation \
-                     (this task is not authorized to use this server)",
-                    server.get(),
-                );
-            }
-            if rc != ipc::kern::ResponseCode::SUCCESS {
-                #_p!(
-                    "ipc: server {} sent unexpected non-SUCCESS response code",
-                    server.get(),
-                );
-            }
+            ).map_err(#err_type::from_wire)?;
             #parse_and_map
         }
     }
@@ -192,7 +176,7 @@ fn gen_message(
     let handle_expr = quote! { self.handle.get() };
     let serialize = wire_format::gen_serialize_wire(&wire_names, &wire_types, Some(&handle_expr));
     let lease_arr = lease::gen_lease_array(lease_params);
-    let send_body = gen_send_body(kind, method_id_expr, &lease_arr);
+    let call_body = gen_instance_call_body(kind, method_id_expr, &lease_arr, err_type);
 
     if let Some((trait_name, generic_ident)) = constructs {
         let handle_type = format_ident!("{}Handle", trait_name);
@@ -223,11 +207,7 @@ fn gen_message(
             {
                 #handle_transfer_stmts
                 #serialize
-                #send_body
-                let (rc, len) = send_result.map_err(|dead| {
-                    S::server_id().set(self.server.get().with_generation(dead.new_generation()));
-                    #err_type::from_wire(ipc::Error::HandleLost)
-                })?;
+                #call_body
                 let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
                 wire_result.map(|v| { #map_handles }).map_err(#err_type::from_wire)
             }
@@ -244,11 +224,7 @@ fn gen_message(
             pub fn #method_name(&self, #(#sig_params),*) #ret_type {
                 #handle_transfer_stmts
                 #serialize
-                #send_body
-                let (rc, len) = send_result.map_err(|dead| {
-                    S::server_id().set(self.server.get().with_generation(dead.new_generation()));
-                    #err_type::from_wire(ipc::Error::HandleLost)
-                })?;
+                #call_body
                 let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
                 wire_result.map_err(#err_type::from_wire)
             }
@@ -279,7 +255,7 @@ fn gen_destructor(
     let handle_expr = quote! { self.handle.get() };
     let serialize = wire_format::gen_serialize_wire(&wire_names, &wire_types, Some(&handle_expr));
     let lease_arr = lease::gen_lease_array(lease_params);
-    let send_body = gen_send_body(kind, method_id_expr, &lease_arr);
+    let call_body = gen_instance_call_body(kind, method_id_expr, &lease_arr, err_type);
     let parse_reply = gen_parse_reply(return_type, quote! { self.server.get() });
 
     let ret_type = match return_type {
@@ -292,11 +268,7 @@ fn gen_destructor(
             self.destroyed.set(true);
             #handle_transfer_stmts
             #serialize
-            #send_body
-            let (rc, len) = send_result.map_err(|dead| {
-                    S::server_id().set(self.server.get().with_generation(dead.new_generation()));
-                    #err_type::from_wire(ipc::Error::HandleLost)
-                })?;
+            #call_body
             let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
             wire_result.map_err(#err_type::from_wire)
         }
@@ -344,28 +316,32 @@ fn gen_static_message(
             let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
                 unsafe { core::mem::MaybeUninit::uninit().assume_init() };
             let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
-            let (rc, len) = ipc::kern::sys_send(
+            let len = ipc::call_send(
+                server_id,
                 server_id.get(),
                 opcode,
                 argbuffer,
                 retbuffer,
                 &mut leases,
-            ).map_err(|dead| {
-                server_id.set(server_id.get().with_generation(dead.new_generation()));
-                #err_type::from_wire(ipc::Error::ServerDied)
-            })?;
+            ).map_err(#err_type::from_wire)?;
             let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
             wire_result.map_err(#err_type::from_wire)
         }
     }
 }
 
-/// Generate the `sys_send` call + retbuffer setup for instance methods
-/// (message and destructor).
-fn gen_send_body(
+/// Build the post-serialize portion of instance-method bodies (`gen_message`
+/// and `gen_destructor`). Emits `lease_arr` + opcode + retbuf alloc +
+/// `call_send` invocation. On `ipc::Error::ServerDied` the caller's
+/// mapping converts it to `HandleLost` (an instance-scoped death means the
+/// handle key is gone); this mapping is uniform across all instance methods.
+///
+/// Produces a `let len: usize = ...` binding the reply length.
+fn gen_instance_call_body(
     kind: u8,
     method_id_expr: &TokenStream2,
     lease_arr: &TokenStream2,
+    err_type: &TokenStream2,
 ) -> TokenStream2 {
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
     quote! {
@@ -375,12 +351,13 @@ fn gen_send_body(
         let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
             unsafe { core::mem::MaybeUninit::uninit().assume_init() };
         let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
-        let send_result = ipc::kern::sys_send(
+        let len = ipc::call_send(
+            S::server_id(),
             self.server.get(),
             opcode,
             argbuffer,
             retbuffer,
             &mut leases,
-        );
+        ).map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
     }
 }

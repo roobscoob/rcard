@@ -1,53 +1,39 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
-use super::types::{extract_option_inner, extract_result_types};
-
-/// Generate code to write a return value into `__reply_buf` at offset `__off`,
-/// handling `Option<T>` and `Result<T, E>` with tag+payload encoding.
+/// Generate code that encodes a return value into `__reply_buf` at
+/// offset `__off`, via postcard.
 ///
-/// `__reply_buf` is `[MaybeUninit<u8>; N]`. The generated code writes bytes and
-/// updates `__off`.
-pub fn gen_encode_return_value(rt: &syn::Type, value_expr: TokenStream2) -> TokenStream2 {
-    if extract_option_inner(rt).is_some() {
-        quote! {
-            match #value_expr {
-                Some(ref __val) => {
-                    ipc::wire::set_uninit(&mut __reply_buf, __off, 0u8); // Some
-                    __off += 1;
-                    __off += ipc::wire::write_uninit(&mut __reply_buf[__off..], __val);
+/// The caller supplies a `__reply_buf: [MaybeUninit<u8>; N]` and a
+/// mutable `__off: usize`. We cast the uninit tail to `&mut [u8]` for
+/// postcard to write into — sound because postcard only *writes* to
+/// the buffer, never reads uninitialized bytes.
+///
+/// No custom Option/Result tag handling: postcard serializes those
+/// natively via serde's variant-index encoding. Both sides of the
+/// wire change together, so the tag-byte mismatch versus the old
+/// hand-rolled encoding is internally consistent.
+pub fn gen_encode_return_value(_rt: &syn::Type, value_expr: TokenStream2) -> TokenStream2 {
+    quote! {
+        {
+            // SAFETY: postcard::to_slice only writes to the buffer.
+            // `MaybeUninit<u8>` has the same layout as `u8`, and we
+            // only treat the written prefix as initialized afterward
+            // via the caller's `assume_init_slice` call.
+            let __tail: &mut [u8] = unsafe {
+                core::slice::from_raw_parts_mut(
+                    __reply_buf.as_mut_ptr().add(__off) as *mut u8,
+                    __reply_buf.len() - __off,
+                )
+            };
+            match ipc::__postcard::to_slice(&(#value_expr), __tail) {
+                Ok(slice) => {
+                    __off += slice.len();
                 }
-                None => {
-                    ipc::wire::set_uninit(&mut __reply_buf, __off, 1u8); // None
-                    __off += 1;
-                }
-            }
-        }
-    } else if let Some((ok_ty, _err_ty)) = extract_result_types(rt) {
-        // Check if Ok type is () — don't write anything for unit
-        let is_unit = matches!(ok_ty, syn::Type::Tuple(t) if t.elems.is_empty());
-        let write_ok = if is_unit {
-            quote! {}
-        } else {
-            quote! { __off += ipc::wire::write_uninit(&mut __reply_buf[__off..], __ok_val); }
-        };
-        quote! {
-            match #value_expr {
-                Ok(ref __ok_val) => {
-                    ipc::wire::set_uninit(&mut __reply_buf, __off, 0u8); // Ok
-                    __off += 1;
-                    #write_ok
-                }
-                Err(ref __err_val) => {
-                    ipc::wire::set_uninit(&mut __reply_buf, __off, 1u8); // Err
-                    __off += 1;
-                    __off += ipc::wire::write_uninit(&mut __reply_buf[__off..], __err_val);
+                Err(_) => {
+                    ipc::__ipc_panic!("postcard reply encode failed");
                 }
             }
-        }
-    } else {
-        quote! {
-            __off += ipc::wire::write_uninit(&mut __reply_buf[__off..], &#value_expr);
         }
     }
 }

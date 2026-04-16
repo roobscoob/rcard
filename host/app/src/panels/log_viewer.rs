@@ -66,16 +66,19 @@ pub fn show(ui: &mut egui::Ui, dev: &DeviceHandle, state: &AppState) {
 
                 match &log.contents {
                     LogContents::Structured(entry) => {
-                        // Source column.
+                        // Source column. sysmodule_* tasks are core services —
+                        // strip the prefix and paint them blue; everything else
+                        // is application code, painted green.
                         row.col(|ui| {
                             let source = metadata
                                 .and_then(|m| m.task_names.get(entry.source as usize))
                                 .map(|s| s.as_str())
                                 .unwrap_or("?");
-                            ui.colored_label(
-                                egui::Color32::from_rgb(0x80, 0x87, 0xA2),
-                                source,
-                            );
+                            let (display, color) = match source.strip_prefix("sysmodule_") {
+                                Some(rest) => (rest, theme::ACCENT),
+                                None => (source, theme::INFO),
+                            };
+                            ui.colored_label(color, display);
                         });
                         let (color, label) = level_style(entry.level);
                         row.col(|ui| { ui.colored_label(color, label); });

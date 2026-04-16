@@ -2,7 +2,7 @@ mod decode;
 mod deserialize;
 mod encode;
 mod serialize;
-mod types;
+pub(crate) mod types;
 
 pub use decode::gen_decode_return_value;
 pub use deserialize::gen_deserialize_args;

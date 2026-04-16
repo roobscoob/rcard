@@ -4,7 +4,7 @@
 use generated::peers::PEERS;
 use generated::slots::SLOTS;
 use once_cell::GlobalState;
-use rcard_log::{error, info, warn, OptionExt, ResultExt};
+use rcard_log::{error, info, warn, OptionExt};
 use rcard_usb_proto::ipc_request::LeaseKind;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -50,39 +50,41 @@ const USART_TRANSPORT_TID: ipc::kern::TaskId = match USART_TRANSPORT_TASK {
     None => ABSENT_PEER_SENTINEL,
 };
 
-sysmodule_host_transport_api::bind_host_transport!(UsbTransport = USB_TRANSPORT_TID);
-sysmodule_host_transport_api::bind_host_transport!(UsartTransport = USART_TRANSPORT_TID);
+// Each binding lives in its own module because the macro generates a
+// struct with a fixed name (`HostTransportServer`). Two invocations in
+// the same scope would collide.
+mod usb_transport_binding {
+    sysmodule_host_transport_api::bind_host_transport!(UsbTransport = super::USB_TRANSPORT_TID);
+}
+use usb_transport_binding::UsbTransport;
+
+mod usart_transport_binding {
+    sysmodule_host_transport_api::bind_host_transport!(UsartTransport = super::USART_TRANSPORT_TID);
+}
+use usart_transport_binding::UsartTransport;
 
 const LEASE_POOL_SIZE: usize = rcard_usb_proto::LEASE_POOL_SIZE;
 const MAX_MESSAGE: usize = 256;
-const MAX_LEASES: usize = 4;
-const MAX_FRAME: usize = 8704;
+const MAX_LEASES: usize = rcard_usb_proto::MAX_LEASES;
+const MAX_FRAME: usize = rcard_usb_proto::MAX_DECODED_FRAME;
 
 // ---------------------------------------------------------------------------
-// Static buffers
+// Static buffer
 //
-// The tunnel is synchronous — one IPC request at a time. These statics are
-// only accessed from handle_host_request(), which is never reentrant (it
-// runs inside the reactor-wake closure of the server loop).
+// The tunnel is synchronous — one IPC request at a time. A single buffer
+// serves all four phases of the request lifecycle:
+//
+//   1. Fetch:   transport writes the incoming frame into BUF
+//   2. Pool:    lease payloads are compacted in-place within BUF
+//   3. Gather:  write-lease results are gathered to the TAIL of BUF
+//   4. Reply:   IpcReply is encoded into the HEAD of BUF (split_at_mut
+//               keeps the writeback tail disjoint from the reply head)
+//
+// Lifetimes are strictly sequential — no two phases overlap. This
+// replaces the former FETCH_BUF + REPLY_BUF + POOL + WRITEBACK (4×8 KB).
 // ---------------------------------------------------------------------------
 
-/// Staged incoming request. Populated from `Transport::fetch_pending_request`
-/// before dispatch.
-static FETCH_BUF: GlobalState<[u8; MAX_FRAME]> = GlobalState::new([0u8; MAX_FRAME]);
-
-/// Encoded outgoing reply. Handed back to the transport via
-/// `Transport::deliver_reply` after dispatch.
-static REPLY_BUF: GlobalState<[u8; MAX_FRAME]> = GlobalState::new([0u8; MAX_FRAME]);
-
-/// Lease data pool. Before sys_send, Read/ReadWrite lease payloads are
-/// copied in from the incoming request. After sys_send, Write/ReadWrite
-/// regions contain the target server's writeback.
-static POOL: GlobalState<[u8; LEASE_POOL_SIZE]> = GlobalState::new([0u8; LEASE_POOL_SIZE]);
-
-/// Staging area for writeback data. `IpcReply` needs the writeback
-/// payloads as a single contiguous slice, so after sys_send we gather
-/// the Write/ReadWrite regions out of POOL in order.
-static WRITEBACK: GlobalState<[u8; LEASE_POOL_SIZE]> = GlobalState::new([0u8; LEASE_POOL_SIZE]);
+static BUF: GlobalState<[u8; MAX_FRAME]> = GlobalState::new([0u8; MAX_FRAME]);
 
 // ---------------------------------------------------------------------------
 // Tunnel dispatch core (moved verbatim from the old usb_protocol_host)
@@ -116,28 +118,29 @@ fn encode_tunnel_error(
     rcard_usb_proto::simple::encode_simple(&msg, reply_buf, seq).unwrap_or(0)
 }
 
-/// Dispatch one wire frame. Parses the `IpcRequest`, forwards it via
-/// `sys_send` to the target, encodes the `IpcReply`, and writes the
-/// encoded bytes into `reply_buf`. Returns a `DispatchOutcome` telling the
-/// caller how many bytes of `reply_buf` to hand to `deliver_reply`.
+/// Dispatch one wire frame using a single shared buffer.
+///
+/// Phases (all sequential, non-overlapping within `buf`):
+///   1. Parse the fetch frame already in `buf[..fetch_len]`
+///   2. Copy args to stack, compact lease payloads in-place in `buf`
+///   3. sys_send with leases pointing into `buf`
+///   4. Gather writebacks to the tail of `buf`, split_at_mut, encode
+///      the reply into the head
 fn dispatch_tunneled_request(
-    fetch_bytes: &[u8],
-    reply_buf: &mut [u8; MAX_FRAME],
+    buf: &mut [u8; MAX_FRAME],
+    fetch_len: usize,
 ) -> DispatchOutcome {
-    // Re-parse the frame out of FETCH_BUF. The transport validated it
-    // as an IpcRequest before staging it, but we do the framed decode
-    // ourselves here so we don't have to marshal parsed references
-    // across an IPC boundary.
+    // ── 1. Parse ───────────────────────────────────────────────────────
     let mut reader = rcard_usb_proto::FrameReader::<{ MAX_FRAME }>::new();
-    reader.push(fetch_bytes);
+    reader.push(&buf[..fetch_len]);
 
-    let (view_seq, view_len) = match reader.next_frame() {
+    let view_seq = match reader.next_frame() {
         Ok(Some(frame)) => {
             if frame.as_ipc_request().is_none() {
                 warn!("host_proxy: non-IpcRequest frame");
                 return DispatchOutcome::Skip;
             }
-            (frame.header.seq, frame.header.frame_size())
+            frame.header.seq
         }
         _ => {
             warn!("host_proxy: frame reader failed");
@@ -145,81 +148,91 @@ fn dispatch_tunneled_request(
         }
     };
 
-    // Re-fetch the frame now that we've committed to processing it —
-    // next_frame borrows the reader, so we can't hold `frame` across
-    // reader operations.
     let Ok(Some(frame)) = reader.next_frame() else {
         return DispatchOutcome::Skip;
     };
     let Some(view) = frame.as_ipc_request() else {
         return DispatchOutcome::Skip;
     };
-    let _ = view_len;
     let request_seq = view_seq;
 
     let target = ipc::kern::TaskId::from(view.task_id);
     let opcode = ipc::opcode(view.resource_kind, view.method);
     let lease_count = view.lease_count().min(MAX_LEASES);
 
-    // ── 1. Copy args to stack ──────────────────────────────────────────
+    // ── 2. Copy args to stack, record lease layout ─────────────────────
     let mut args = [0u8; MAX_MESSAGE];
     let args_data = view.args();
     let args_len = args_data.len().min(MAX_MESSAGE);
     args[..args_len].copy_from_slice(&args_data[..args_len]);
 
-    // ── 2. Populate lease pool ─────────────────────────────────────────
     let mut slots: [LeaseSlot; MAX_LEASES] = [
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
     ];
-    let mut pool_end = 0usize;
 
-    let pool_ok = POOL.with(|pool| {
-        for i in 0..lease_count {
-            let Some(desc) = view.lease(i) else { return false };
-            let len = desc.length as usize;
-
-            if pool_end + len > LEASE_POOL_SIZE {
-                return false;
+    // Record where each lease's data lives in the original frame, then
+    // compact all lease payloads into buf[0..pool_end]. Source offsets
+    // are always ahead of the destination cursor (frame header + args +
+    // descriptors precede lease data), so the forward copy is safe.
+    let mut src_offsets: [(usize, usize); MAX_LEASES] = [(0, 0); MAX_LEASES];
+    for i in 0..lease_count {
+        let Some(desc) = view.lease(i) else {
+            let n = encode_tunnel_error(
+                request_seq,
+                rcard_usb_proto::messages::TunnelErrorCode::LeasePoolFull,
+                buf,
+            );
+            return DispatchOutcome::Error { len: n };
+        };
+        let len = desc.length as usize;
+        if desc.kind.has_request_data() {
+            if let Some(data) = view.lease_data(i) {
+                let frame_offset = data.as_ptr() as usize - buf.as_ptr() as usize;
+                src_offsets[i] = (frame_offset, data.len());
             }
-
-            slots[i] = LeaseSlot {
-                kind: desc.kind,
-                offset: pool_end,
-                length: len,
-            };
-
-            if desc.kind.has_request_data() {
-                if let Some(data) = view.lease_data(i) {
-                    pool[pool_end..pool_end + data.len()].copy_from_slice(data);
-                }
-            } else {
-                for b in &mut pool[pool_end..pool_end + len] {
-                    *b = 0;
-                }
-            }
-
-            pool_end += len;
         }
-        true
-    });
+        slots[i] = LeaseSlot { kind: desc.kind, offset: 0, length: len };
+    }
 
-    if pool_ok != Some(true) {
-        let n = encode_tunnel_error(
-            request_seq,
-            rcard_usb_proto::messages::TunnelErrorCode::LeasePoolFull,
-            reply_buf,
-        );
-        return DispatchOutcome::Error { len: n };
+    // Done reading from FrameReader / view — buf is now free for reuse.
+    drop(reader);
+
+    // Compact lease data into buf[0..pool_end].
+    let mut pool_end = 0usize;
+    for i in 0..lease_count {
+        let len = slots[i].length;
+        if pool_end + len > LEASE_POOL_SIZE {
+            let n = encode_tunnel_error(
+                request_seq,
+                rcard_usb_proto::messages::TunnelErrorCode::LeasePoolFull,
+                buf,
+            );
+            return DispatchOutcome::Error { len: n };
+        }
+
+        slots[i].offset = pool_end;
+
+        if slots[i].kind.has_request_data() {
+            let (src_off, src_len) = src_offsets[i];
+            let copy_len = src_len.min(len);
+            buf.copy_within(src_off..src_off + copy_len, pool_end);
+        } else {
+            for b in &mut buf[pool_end..pool_end + len] {
+                *b = 0;
+            }
+        }
+
+        pool_end += len;
     }
 
     // ── 3. Build leases and call sys_send ──────────────────────────────
     let mut kernel_reply = [0u8; MAX_MESSAGE];
 
-    let send_result = POOL.with(|pool| {
-        let mut remaining = &mut pool[..pool_end];
+    let send_result = {
+        let mut remaining = &mut buf[..pool_end];
         let mut leases: [ipc::kern::Lease; MAX_LEASES] = [
             ipc::kern::Lease::no_access(&[]),
             ipc::kern::Lease::no_access(&[]),
@@ -247,56 +260,43 @@ fn dispatch_tunneled_request(
             &mut kernel_reply,
             &mut leases[..lease_count],
         )
-    });
-
-    let Some(send_result) = send_result else {
-        let n = encode_tunnel_error(
-            request_seq,
-            rcard_usb_proto::messages::TunnelErrorCode::Internal,
-            reply_buf,
-        );
-        return DispatchOutcome::Error { len: n };
     };
 
-    // ── 4. Encode reply ────────────────────────────────────────────────
+    // ── 4. Gather writebacks to tail, encode reply into head ───────────
     match send_result {
         Ok((rc, reply_len)) => {
-            let wb_len = POOL.with(|pool| {
-                WRITEBACK.with(|wb| {
-                    let mut cursor = 0usize;
-                    for i in 0..lease_count {
-                        if slots[i].kind.has_reply_data() {
-                            let off = slots[i].offset;
-                            let len = slots[i].length;
-                            wb[cursor..cursor + len].copy_from_slice(&pool[off..off + len]);
-                            cursor += len;
-                        }
-                    }
-                    cursor
-                })
-            });
+            // Gather write-lease regions to the tail of buf. Iterate in
+            // reverse so rightward copies don't clobber source data.
+            let mut wb_total = 0usize;
+            for i in 0..lease_count {
+                if slots[i].kind.has_reply_data() {
+                    wb_total += slots[i].length;
+                }
+            }
 
-            let Some(wb_len) = wb_len.flatten() else {
-                let n = encode_tunnel_error(
-                    request_seq,
-                    rcard_usb_proto::messages::TunnelErrorCode::Internal,
-                    reply_buf,
-                );
-                return DispatchOutcome::Error { len: n };
-            };
+            let wb_start = MAX_FRAME - wb_total;
+            let mut wb_cursor = MAX_FRAME;
+            for i in (0..lease_count).rev() {
+                if slots[i].kind.has_reply_data() {
+                    let len = slots[i].length;
+                    wb_cursor -= len;
+                    let src = slots[i].offset;
+                    buf.copy_within(src..src + len, wb_cursor);
+                }
+            }
 
             let effective_reply_len = reply_len.max(1);
 
-            let encoded = WRITEBACK.with(|wb| {
-                let reply = rcard_usb_proto::IpcReply {
-                    rc: rc.0,
-                    return_value: &kernel_reply[..effective_reply_len],
-                    lease_writeback: &wb[..wb_len],
-                };
-                reply.encode_into(reply_buf, request_seq).unwrap_or(0)
-            });
+            // split_at_mut keeps the borrow checker happy: reply encoding
+            // writes into head, reads writeback from tail.
+            let (reply_buf, wb_buf) = buf.split_at_mut(wb_start);
 
-            match encoded {
+            let reply = rcard_usb_proto::IpcReply {
+                rc: rc.0,
+                return_value: &kernel_reply[..effective_reply_len],
+                lease_writeback: &wb_buf[..wb_total],
+            };
+            match reply.encode_into(reply_buf, request_seq) {
                 Some(n) if n > 0 => DispatchOutcome::Reply { len: n },
                 _ => {
                     let n = encode_tunnel_error(
@@ -312,7 +312,7 @@ fn dispatch_tunneled_request(
             let n = encode_tunnel_error(
                 request_seq,
                 rcard_usb_proto::messages::TunnelErrorCode::TaskDead,
-                reply_buf,
+                buf,
             );
             DispatchOutcome::Error { len: n }
         }
@@ -352,62 +352,52 @@ fn handle_host_request(sender: u16, _code: u32) {
         return;
     };
 
-    // 1. Fetch the staged request from the transport that fired.
-    let request_len = FETCH_BUF
-        .with(|fetch| {
+    BUF.with(|buf| {
+        // 1. Fetch the staged request into BUF.
+        let request_len = {
             let result = match transport {
-                Transport::Usb => UsbTransport::fetch_pending_request(fetch),
-                Transport::Usart => UsartTransport::fetch_pending_request(fetch),
+                Transport::Usb => UsbTransport::fetch_pending_request(buf),
+                Transport::Usart => UsartTransport::fetch_pending_request(buf),
             };
             match result {
                 Ok(Ok(len)) => len as usize,
                 Ok(Err(e)) => {
                     error!("host_proxy: fetch_pending_request failed: {}", e);
-                    0
+                    return;
                 }
                 Err(e) => {
                     error!("host_proxy: fetch IPC failed: {}", e);
-                    0
+                    return;
                 }
             }
-        })
-        .log_unwrap();
+        };
 
-    if request_len == 0 {
-        return;
-    }
-
-    // 2. Run the tunneled dispatch against the staged request, encoding
-    //    the reply into REPLY_BUF.
-    let outcome = FETCH_BUF
-        .with(|fetch| {
-            REPLY_BUF
-                .with(|reply| dispatch_tunneled_request(&fetch[..request_len], reply))
-                .log_unwrap()
-        })
-        .log_unwrap();
-
-    // 3. Hand the encoded reply back to the originating transport.
-    match outcome {
-        DispatchOutcome::Reply { len } | DispatchOutcome::Error { len } if len > 0 => {
-            REPLY_BUF
-                .with(|reply| {
-                    let deliver_result = match transport {
-                        Transport::Usb => UsbTransport::deliver_reply(&reply[..len]),
-                        Transport::Usart => UsartTransport::deliver_reply(&reply[..len]),
-                    };
-                    match deliver_result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => error!("host_proxy: deliver_reply failed: {}", e),
-                        Err(e) => error!("host_proxy: deliver IPC failed: {}", e),
-                    }
-                })
-                .log_unwrap();
+        if request_len == 0 {
+            return;
         }
-        _ => {
-            // Skip — nothing to deliver.
+
+        // 2. Dispatch: parse → pool-compact → sys_send → gather wb →
+        //    encode reply, all within BUF.
+        let outcome = dispatch_tunneled_request(buf, request_len);
+
+        // 3. Hand the encoded reply back to the originating transport.
+        // BUF[..len] now holds the reply frame.
+        match outcome {
+            DispatchOutcome::Reply { len } | DispatchOutcome::Error { len } if len > 0 => {
+                let deliver_result = match transport {
+                    Transport::Usb => UsbTransport::deliver_reply(&buf[..len]),
+                    Transport::Usart => UsartTransport::deliver_reply(&buf[..len]),
+                };
+                match deliver_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!("host_proxy: deliver_reply failed: {}", e),
+                    Err(e) => error!("host_proxy: deliver IPC failed: {}", e),
+                }
+            }
+            _ => {}
         }
-    }
+    })
+    .log_unwrap();
 }
 
 // ---------------------------------------------------------------------------

@@ -113,6 +113,16 @@ fn write_tasks(out_dir: &PathBuf, config: &Config) {
         writeln!(f, "    \"{name}\",").unwrap();
     }
     writeln!(f, "];").unwrap();
+    writeln!(f).unwrap();
+
+    // Per-task index constants — used by `ipc::server!` to emit
+    // task_id into `.ipc_meta` server records so the host can route
+    // IPC calls to the correct task.
+    for (i, name) in config.tasks.iter().enumerate() {
+        let screaming = name.replace('-', "_").to_uppercase();
+        writeln!(f, "#[allow(dead_code)]").unwrap();
+        writeln!(f, "pub const TASK_ID_{screaming}: u16 = {i};").unwrap();
+    }
 }
 
 fn write_notifications(out_dir: &PathBuf, config: &Config) {

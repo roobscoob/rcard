@@ -21,7 +21,7 @@ fun ctx => {
   uses_notifications = ["host_request"],
   regions = {
     code  = { place = ctx.places.image },
-    stack = { place = ctx.places.task_ram, size = lib.kiB 8 },
+    stack = { place = ctx.places.task_ram, size = lib.kiB 16 },
     data  = { place = ctx.places.task_ram },
   },
 }

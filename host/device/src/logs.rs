@@ -77,4 +77,8 @@ pub struct LogEntry {
     pub log_species: u64,
     /// Decoded argument values from the binary payload.
     pub values: Vec<OwnedValue>,
+    /// The stream ended without a `TAG_END_OF_STREAM` terminator —
+    /// `values` is whatever was decodable before the host gave up
+    /// waiting (stream-timeout eviction).
+    pub truncated: bool,
 }

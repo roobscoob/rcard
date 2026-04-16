@@ -13,6 +13,7 @@ pub mod log_metadata;
 pub mod metadata;
 pub mod pack;
 pub mod renode;
+pub mod schema_dump;
 
 /// Shorten an absolute path to a project-relative one.
 pub fn shorten_path(path: &str) -> String {

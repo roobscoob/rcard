@@ -6,98 +6,282 @@ use crate::codegen::CodegenError;
 use crate::compile::CompileError;
 use crate::config::{AppConfig, ConfigError};
 use crate::ipc_metadata::IpcMetadataError;
-use crate::layout::{Layout, LayoutError};
+use crate::layout::LayoutError;
 use crate::link::LinkError;
 use crate::linker::LinkerError;
 use crate::log_metadata::MetadataError;
 use crate::pack::PackError;
 
-// ── Build events ────────────────────────────────────────────────────────────
+// ── Resource system ────────────────────────────────────────────────────────
+//
+// Build progress is modeled as a set of **resources**, each with its own
+// state machine.  Every update is self-contained: it names the resource
+// that changed, and whether it transitioned to a new **state** (durable —
+// the resource *is* this) or an **event** occurred (transient — something
+// *happened*).
+//
+// Resources:
+//   Build      — the overall pipeline (singleton)
+//   Crate      — a firmware crate compiled for the embedded target
+//   HostCrate  — a crate compiled and run on the host (e.g. schema dumper)
+//   Memory     — a named memory place on the board
+//   Image      — the output firmware image (singleton)
 
-/// Top-level build stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stage {
-    Config,
-    Layout,
-    Linker,
-    Codegen,
-    Compile,
-    LogMetadata,
-    IpcMetadata,
-    Link,
-    Pack,
+/// A resource defines its own state and event types.
+pub trait Resource: 'static {
+    /// Durable state — the resource *is* this.
+    type State: std::fmt::Debug;
+    /// Transient event — something *happened* to this resource.
+    type Event: std::fmt::Debug;
 }
 
-/// Compile sub-phase within the Compile stage.
+/// An update to a resource: either a state transition or a transient event.
+#[derive(Debug)]
+pub enum ResourceUpdate<R: Resource> {
+    /// The resource transitioned to a new state.
+    State(R::State),
+    /// A transient event occurred while in the current state.
+    Event(R::Event),
+}
+
+// ── Build resource (singleton) ─────────────────────────────────────────────
+
+/// The overall build pipeline.
+pub struct Build;
+
+impl Resource for Build {
+    type State = BuildState;
+    type Event = ();
+}
+
+/// Major phases of the build pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildState {
+    /// Evaluating Nickel config, solving initial layout,
+    /// generating linker scripts and codegen source.
+    Planning,
+    /// Building all task crates through build/measure/link passes.
+    CompilingTasks,
+    /// All task regions measured; re-solving the memory layout
+    /// with actual sizes.
+    Organizing { regions_placed: usize },
+    /// Building kernel and bootloader crates.
+    CompilingApp,
+    /// Scraping log/IPC metadata from ELFs, running the schema dumper.
+    ExtractingMetadata,
+    /// Assembling the firmware image and writing the archive.
+    Packing,
+    /// Build finished successfully.
+    Done,
+}
+
+// ── Crate resource (firmware crate) ────────────────────────────────────────
+
+/// What role a firmware crate plays in the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompilePhase {
-    PartialLink,
-    Sizing,
-    FinalLink,
+pub enum CrateKind {
+    Task,
     Kernel,
     Bootloader,
 }
 
-/// A segment in the memory map visualization.
+/// A firmware crate compiled for the embedded target.
 #[derive(Debug, Clone)]
-pub struct MemSegment {
-    /// Memory region name (e.g. "flash", "ram").
-    pub memory: String,
-    /// Owner task name, or "(unused)" for free space.
-    pub owner: String,
-    /// Region name within the owner (e.g. "text", "data"). None for unused.
-    pub region: Option<String>,
-    /// CPU base address.
-    pub base: u64,
-    /// Size in bytes.
-    pub size: u64,
-    /// Alignment waste (gap before this segment).
-    pub lost: u64,
+pub struct Crate {
+    pub name: String,
+    pub kind: CrateKind,
 }
 
-/// Structured event emitted during a build.
-/// Consumers can pattern-match to render progress however they want.
+impl Resource for Crate {
+    type State = CrateState;
+    type Event = CrateEvent;
+}
+
+/// Durable states — what pass this crate is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrateState {
+    /// Cargo is building this crate into a relocatable object.
+    Building,
+    /// The relocatable object is being linked at temporary addresses
+    /// to measure how much memory its code and data actually need.
+    Measuring,
+    /// The crate is being linked at its final memory addresses.
+    Linking,
+    /// Final ELF produced, ready for image assembly.
+    Linked,
+}
+
+/// Transient events — things that happen while in a state.
 #[derive(Debug)]
-pub enum BuildEvent {
-    /// A top-level stage is starting.
-    StageStart { stage: Stage },
-
-    /// A compile sub-phase is starting.
-    PhaseStart { phase: CompilePhase },
-
-    /// A task is being compiled in the given phase.
-    TaskCompiling { task: String, phase: CompilePhase },
-
-    /// A deferred region was measured during the sizing phase.
-    RegionMeasured { task: String, region: String, size: u64 },
-
-    /// All deferred regions have been resolved into the layout.
-    LayoutResolved { total_regions: usize },
-
-    /// Memory map segments, ready for visualization.
-    MemoryMap { segments: Vec<MemSegment> },
-
-    /// A raw cargo message. Call `.decode()` for structured access.
+pub enum CrateEvent {
+    /// A memory region was measured during the Measuring state.
+    Sized { region: String, size: u64 },
+    /// Cargo emitted a compiler message (warning, error, etc).
     CargoMessage(escargot::Message),
+    /// Cargo failed while building this crate.
+    CargoError(escargot::error::CargoError),
+}
 
-    /// The flat binary was produced.
-    ImageLinked { size: u64 },
+// ── HostCrate resource ─────────────────────────────────────────────────────
 
-    /// The firmware archive was written.
-    Packed { path: PathBuf },
+/// A crate compiled and run on the host (e.g. the schema dumper).
+/// Different lifecycle from firmware crates — no sizing or
+/// address-specific linking.
+#[derive(Debug, Clone)]
 
-    /// The build completed successfully.
+pub struct HostCrate {
+    pub name: String,
+}
+
+impl Resource for HostCrate {
+    type State = HostCrateState;
+    type Event = HostCrateEvent;
+}
+
+/// Durable states for a host-target crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostCrateState {
+    /// Being compiled for the host target.
+    Building,
+    /// Compiled, now executing.
+    Running,
+    /// Finished executing.
     Done,
 }
 
-/// Callback for structured build events.
+/// Transient events for a host-target crate.
+#[derive(Debug)]
+pub enum HostCrateEvent {
+    /// Cargo emitted a compiler message.
+    CargoMessage(escargot::Message),
+    /// Cargo failed.
+    CargoError(escargot::error::CargoError),
+}
+
+// ── Memory resource ────────────────────────────────────────────────────────
+
+/// A named memory place on the board (e.g. `"sram_fast_dctm"`, `"image"`).
+/// Place names come from `config.places` — the layout names assigned in
+/// `.ncl` files.  The resource identity is where the allocation *actually
+/// landed*, which may differ from where it was *requested* if
+/// alternatives/overflow were used.
+#[derive(Debug, Clone)]
+pub struct Memory {
+    pub place: String,
+}
+
+/// No states — unit type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoState;
+
+impl Resource for Memory {
+    type State = NoState;
+    type Event = MemoryEvent;
+}
+
+/// Transient events on a memory place.
+#[derive(Debug, Clone)]
+pub enum MemoryEvent {
+    /// A region was allocated in this memory place.
+    Allocated {
+        /// Crate name, `"kernel"`, or `"bootloader"`.
+        owner: String,
+        /// Region name: `"code"`, `"data"`, `"stack"`, etc.
+        region: String,
+        /// CPU address where the region was placed.
+        base: u64,
+        /// Size in bytes.
+        size: u64,
+        /// Context about the original request.
+        request: AllocationRequest,
+    },
+}
+
+/// Context about the original region request that led to an allocation.
+#[derive(Debug, Clone)]
+pub struct AllocationRequest {
+    /// Place name where the region was requested to go.
+    /// When this differs from the Memory resource's place name,
+    /// the allocation overflowed to an alternative.
+    pub requested_place: String,
+    /// Size from the request, if specified. `None` = sized by linker (deferred).
+    pub requested_size: Option<u64>,
+    /// Alignment constraint in bytes.
+    pub align: Option<u64>,
+    /// Whether this region is shared with other tasks.
+    pub shared: bool,
+}
+
+// ── Image resource (singleton) ─────────────────────────────────────────────
+
+/// The output firmware image being assembled.
+#[derive(Debug, Clone)]
+pub struct Image;
+
+impl Resource for Image {
+    type State = ImageState;
+    type Event = ImageEvent;
+}
+
+/// Durable states for the firmware image.
+#[derive(Debug, Clone)]
+pub enum ImageState {
+    /// The flat binary image (`places.bin`) was assembled.
+    Assembled { size: u64 },
+    /// The `.tfw` archive was written to disk.
+    Archived { path: PathBuf },
+}
+
+/// Transient events during image assembly.
+#[derive(Debug, Clone)]
+pub enum ImageEvent {
+    /// A memory place was written into the output image.
+    PlaceWritten {
+        place: String,
+        dest: u64,
+        file_offset: u32,
+        file_size: u32,
+        mem_size: u32,
+    },
+}
+
+// ── Type-erased event stream ───────────────────────────────────────────────
+
+/// Concrete event type sent through the callback channel.
+/// Wraps each resource's updates into a single enum for type erasure.
+#[derive(Debug)]
+pub enum BuildEvent {
+    /// The overall build pipeline changed state.
+    Build(BuildState),
+    /// A firmware crate was updated.
+    Crate {
+        name: String,
+        kind: CrateKind,
+        update: ResourceUpdate<Crate>,
+    },
+    /// A host-target crate was updated.
+    HostCrate {
+        name: String,
+        update: ResourceUpdate<HostCrate>,
+    },
+    /// A memory place received an allocation.
+    Memory {
+        place: String,
+        update: ResourceUpdate<Memory>,
+    },
+    /// The output image was updated.
+    Image(ResourceUpdate<Image>),
+}
+
+/// Callback for build events.
 pub type EventFn<'a> = &'a dyn Fn(BuildEvent);
 
 fn noop(_: BuildEvent) {}
 
 // ── Build pipeline ──────────────────────────────────────────────────────────
 
-/// Full build pipeline: config → layout → linker → codegen → compile → link → pack.
+/// Full build pipeline: plan → compile tasks → organize → compile app →
+/// extract metadata → pack.
 pub fn build(
     firmware_dir: &Path,
     root_ncl: &str,
@@ -113,85 +297,153 @@ pub fn build(
     let work_dir = match work_dir {
         Some(p) => p.to_path_buf(),
         None => {
-            _tmp = tempfile::tempdir().map_err(|e| BuildError::Compile(
-                crate::compile::CompileError::Io(e),
-            ))?;
+            _tmp = tempfile::tempdir()
+                .map_err(|e| BuildError::Compile(crate::compile::CompileError::Io(e)))?;
             _tmp.path().to_path_buf()
         }
     };
     let linker_dir = work_dir.join("linker");
     let img_dir = work_dir.join("img");
-    let meta_dir = work_dir.join("log_meta");
     let log_metadata_path = work_dir.join("log-metadata.json");
     let ipc_metadata_path = work_dir.join("ipc-metadata.json");
     let config_json_path = work_dir.join("config.json");
 
-    // 1. Config
-    emit(BuildEvent::StageStart { stage: Stage::Config });
+    // ── Plan ───────────────────────────────────────────────────────────
+    // Evaluate Nickel config, solve initial layout, generate linker
+    // scripts and codegen source.
+
+    emit(BuildEvent::Build(BuildState::Planning));
+
     let config = crate::config::load(firmware_dir, root_ncl, board_ncl, layout_ncl)
         .map_err(BuildError::Config)?;
 
-    // 2. Layout
-    emit(BuildEvent::StageStart { stage: Stage::Layout });
-    let mut layout = crate::layout::solve(&config)
-        .map_err(BuildError::Layout)?;
+    let reservations = crate::layout::compute_reservations(&config);
+    let mut layout = crate::layout::solve(&config, &reservations).map_err(BuildError::Layout)?;
 
-    // 3. Linker scripts
-    emit(BuildEvent::StageStart { stage: Stage::Linker });
-    crate::linker::generate(&config, &layout, &linker_dir)
-        .map_err(BuildError::Linker)?;
+    // Emit Memory events for fixed-size allocations placed during initial solve.
+    emit_memory_allocations(&layout.placed, &config, emit);
 
-    // Generate build ID once — shared between codegen and archive.
+    crate::linker::generate(&config, &layout, &linker_dir).map_err(BuildError::Linker)?;
+
     let build_id = uuid::Uuid::new_v4().to_string();
 
-    // 4. Codegen
-    emit(BuildEvent::StageStart { stage: Stage::Codegen });
-    crate::codegen::emit(&config, &build_id, &config_json_path)
-        .map_err(BuildError::Codegen)?;
+    crate::codegen::emit(&config, &build_id, &config_json_path).map_err(BuildError::Codegen)?;
 
-    // 5. Compile
-    emit(BuildEvent::StageStart { stage: Stage::Compile });
+    // ── Compile tasks ──────────────────────────────────────────────────
+    // Build all task crates through build/measure/link passes.
+
+    emit(BuildEvent::Build(BuildState::CompilingTasks));
+
     let mut artifacts = crate::compile::compile_all(
-        firmware_dir, &config, &mut layout, &linker_dir, &work_dir, emit,
-    ).map_err(BuildError::Compile)?;
+        firmware_dir,
+        &config,
+        &mut layout,
+        &reservations,
+        &linker_dir,
+        &work_dir,
+        emit,
+    )
+    .map_err(BuildError::Compile)?;
 
-    // 5b. Memory map
-    emit(BuildEvent::MemoryMap { segments: compute_segments(&config, &layout) });
+    // Organizing and CompilingApp events are emitted inside compile_all
+    // at the correct pipeline boundaries.
 
     // Separate bootloader artifact from firmware artifacts.
-    let bl_artifact_idx = artifacts.iter()
+    let bl_artifact_idx = artifacts
+        .iter()
         .position(|a| a.kind == crate::compile::ArtifactKind::Bootloader);
     let bl_artifact = bl_artifact_idx.map(|i| artifacts.remove(i));
 
-    // 6. Log metadata
-    emit(BuildEvent::StageStart { stage: Stage::LogMetadata });
+    // ── Extract metadata ───────────────────────────────────────────────
+    // Scrape log/IPC metadata from ELFs, run the schema dumper.
+
+    emit(BuildEvent::Build(BuildState::ExtractingMetadata));
+
     let task_names: Vec<String> = artifacts
         .iter()
         .filter(|a| a.kind == crate::compile::ArtifactKind::Task)
         .map(|a| a.crate_name.clone())
         .collect();
-    let log_bundle = crate::log_metadata::scrape(&task_names, &artifacts)
-        .map_err(BuildError::Metadata)?;
-    crate::log_metadata::emit(&log_bundle, &log_metadata_path)
-        .map_err(BuildError::Metadata)?;
+    let log_bundle =
+        crate::log_metadata::scrape(&task_names, &artifacts).map_err(BuildError::Metadata)?;
+    crate::log_metadata::emit(&log_bundle, &log_metadata_path).map_err(BuildError::Metadata)?;
 
-    // 6b. IPC metadata — scrape `.ipc_meta` sections from task ELFs.
-    emit(BuildEvent::StageStart { stage: Stage::IpcMetadata });
-    let ipc_bundle = crate::ipc_metadata::scrape(&artifacts)
-        .map_err(BuildError::IpcMetadata)?;
-    crate::ipc_metadata::emit(&ipc_bundle, &ipc_metadata_path)
-        .map_err(BuildError::IpcMetadata)?;
+    let mut ipc_bundle =
+        crate::ipc_metadata::scrape(&artifacts).map_err(BuildError::IpcMetadata)?;
 
-    // 7. Link
-    emit(BuildEvent::StageStart { stage: Stage::Link });
-    let final_bin = crate::link::link_image(&artifacts, &config, &layout, &img_dir)
+    let generated_config = crate::codegen::build_config(&config, &build_id);
+    for server in ipc_bundle.servers.values_mut() {
+        if let Some(&idx) = generated_config.task_indices.get(&server.task) {
+            server.task_id = Some(idx as u16);
+        }
+    }
+
+    // Schema dump — compile a host binary to extract postcard-schema types.
+    let api_crates: Vec<crate::schema_dump::ApiCrate> = ipc_bundle
+        .resources
+        .values()
+        .filter_map(|r| {
+            let crate_path = r.crate_path.as_ref()?;
+            let crate_name = r.crate_name.as_ref()?;
+            Some(crate::schema_dump::ApiCrate {
+                package: crate_name.clone(),
+                path: std::path::PathBuf::from(crate_path),
+                resource_names: vec![r.name.clone()],
+            })
+        })
+        .collect();
+
+    let mut deduped: std::collections::BTreeMap<String, crate::schema_dump::ApiCrate> =
+        std::collections::BTreeMap::new();
+    for api in api_crates {
+        deduped
+            .entry(api.package.clone())
+            .and_modify(|existing| {
+                existing.resource_names.extend(api.resource_names.clone());
+            })
+            .or_insert(api);
+    }
+    let api_crates: Vec<_> = deduped.into_values().collect();
+
+    if !api_crates.is_empty() {
+        emit(BuildEvent::HostCrate {
+            name: "ipc-schema-dumper".into(),
+            update: ResourceUpdate::State(HostCrateState::Building),
+        });
+        match crate::schema_dump::run(&api_crates, &work_dir) {
+            Ok(schema_json) => {
+                emit(BuildEvent::HostCrate {
+                    name: "ipc-schema-dumper".into(),
+                    update: ResourceUpdate::State(HostCrateState::Running),
+                });
+                if let Ok(schemas) = serde_json::from_str::<serde_json::Value>(&schema_json) {
+                    ipc_bundle.schemas = Some(schemas);
+                }
+                emit(BuildEvent::HostCrate {
+                    name: "ipc-schema-dumper".into(),
+                    update: ResourceUpdate::State(HostCrateState::Done),
+                });
+            }
+            Err(e) => {
+                return Err(BuildError::SchemaDump(e));
+            }
+        }
+    }
+
+    crate::ipc_metadata::emit(&ipc_bundle, &ipc_metadata_path).map_err(BuildError::IpcMetadata)?;
+
+    // ── Pack ───────────────────────────────────────────────────────────
+    // Assemble the firmware image and write the archive.
+
+    emit(BuildEvent::Build(BuildState::Packing));
+
+    let final_bin = crate::link::link_image(&artifacts, &config, &layout, &img_dir, emit)
         .map_err(BuildError::Link)?;
 
-    let bootloader_bin = if let Some(ref bl_art) = bl_artifact {
-        Some(crate::link::extract_flat_binary(bl_art, &img_dir)
-            .map_err(BuildError::Link)?)
+    let bootloader_size = if let Some(ref bl_art) = bl_artifact {
+        crate::link::measure_flat_binary_size(bl_art).map_err(BuildError::Link)?
     } else {
-        None
+        0
     };
 
     // Re-add bootloader for ELF packing.
@@ -199,13 +451,11 @@ pub fn build(
         artifacts.push(bl_art);
     }
 
-    let bin_size = std::fs::metadata(&final_bin)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    emit(BuildEvent::ImageLinked { size: bin_size });
+    let bin_size = std::fs::metadata(&final_bin).map(|m| m.len()).unwrap_or(0);
+    emit(BuildEvent::Image(ResourceUpdate::State(
+        ImageState::Assembled { size: bin_size },
+    )));
 
-    // 8. Pack
-    emit(BuildEvent::StageStart { stage: Stage::Pack });
     let build_meta = crate::build_metadata::BuildMetadata::from_build(
         &build_id,
         &config.name,
@@ -215,86 +465,125 @@ pub fn build(
         firmware_dir,
     );
     crate::pack::pack(
-        &config, &artifacts, &final_bin,
-        bootloader_bin.as_deref(),
+        &config,
+        &layout,
+        &artifacts,
+        &final_bin,
+        bootloader_size,
         Some(&log_metadata_path),
         Some(&ipc_metadata_path),
         Some(&build_meta),
         out_path,
-    ).map_err(BuildError::Pack)?;
+    )
+    .map_err(BuildError::Pack)?;
 
-    emit(BuildEvent::Packed { path: out_path.to_path_buf() });
-    emit(BuildEvent::Done);
+    emit(BuildEvent::Image(ResourceUpdate::State(
+        ImageState::Archived {
+            path: out_path.to_path_buf(),
+        },
+    )));
+    emit(BuildEvent::Build(BuildState::Done));
     Ok(out_path.to_path_buf())
 }
 
-// ── Memory map ─────────────────────────────────────────────────────────
+// ── Memory event helpers ──────────────────────────────────────────────
 
-/// Build memory map segments from the finalized layout and config.
-/// Groups allocations by place, computes alignment gaps, and adds
-/// "(unused)" segments for remaining free space.
-fn compute_segments(config: &AppConfig, layout: &Layout) -> Vec<MemSegment> {
-    let mut segments = Vec::new();
-
-    // Deduplicate places that map to the same CPU address range so we don't
-    // print the same physical region multiple times.
-    let mut seen_ranges: BTreeMap<(u64, u64), String> = BTreeMap::new();
-
-    for (place_name, place) in &config.places {
+/// Find the place name from `config.places` that contains the given CPU address.
+fn find_place_name(config: &AppConfig, addr: u64) -> Option<String> {
+    for (name, place) in &config.places {
         if place.unmapped || place.mappings.is_empty() {
             continue;
         }
-        let cpu_base = match crate::layout::resolve_cpu_address(place, false) {
-            Some(addr) => addr,
-            None => continue,
-        };
-        let cpu_end = cpu_base + place.size;
-
-        // Skip if we already rendered this exact address range.
-        if let std::collections::btree_map::Entry::Vacant(e) = seen_ranges.entry((cpu_base, cpu_end)) {
-            e.insert(place_name.clone());
-        } else {
-            continue;
-        }
-
-        // Collect allocations that fall within this place.
-        let mut allocs: Vec<(&str, &str, &crate::layout::Allocation)> = layout
-            .placed
-            .iter()
-            .filter(|(_, a)| a.base >= cpu_base && a.base < cpu_end)
-            .map(|((owner, region), a)| (owner.as_str(), region.as_str(), a))
-            .collect();
-        allocs.sort_by_key(|(_, _, a)| a.base);
-
-        let mut cursor = cpu_base;
-        for (owner, region, alloc) in &allocs {
-            let lost = alloc.base - cursor;
-            segments.push(MemSegment {
-                memory: place_name.clone(),
-                owner: owner.to_string(),
-                region: Some(region.to_string()),
-                base: alloc.base,
-                size: alloc.size,
-                lost,
-            });
-            cursor = alloc.base + alloc.size;
-        }
-
-        // Unused tail.
-        let remaining = cpu_end.saturating_sub(cursor);
-        if remaining > 0 {
-            segments.push(MemSegment {
-                memory: place_name.clone(),
-                owner: "(unused)".to_string(),
-                region: None,
-                base: cursor,
-                size: remaining,
-                lost: 0,
-            });
+        let offset = place.offset.unwrap_or(0);
+        for mapping in &place.mappings {
+            let start = mapping.address + offset;
+            let end = start + place.size;
+            if addr >= start && addr < end {
+                return Some(name.clone());
+            }
         }
     }
+    None
+}
 
-    segments
+/// Look up the `RegionRequest` for a given (owner, region) pair from the config.
+fn find_region_request<'a>(
+    config: &'a AppConfig,
+    owner: &str,
+    region: &str,
+) -> Option<&'a crate::config::RegionRequest> {
+    if owner == "kernel" {
+        return config.kernel.regions.get(region);
+    }
+    if owner == "bootloader" {
+        if let Some(bl) = &config.bootloader {
+            return bl.regions.get(region);
+        }
+        return None;
+    }
+    // Walk task tree.
+    fn find_in_tasks<'a>(
+        entries: &'a [crate::config::TaskConfig],
+        owner: &str,
+        region: &str,
+    ) -> Option<&'a crate::config::RegionRequest> {
+        for task in entries {
+            if task.crate_info.package.name == owner {
+                return task.regions.get(region);
+            }
+            if let Some(req) = find_in_tasks(&task.depends_on, owner, region) {
+                return Some(req);
+            }
+        }
+        None
+    }
+    find_in_tasks(&config.entries, owner, region)
+}
+
+/// Emit Memory::Allocated events for all entries in `placed`.
+pub fn emit_memory_allocations(
+    placed: &BTreeMap<(String, String), crate::layout::Allocation>,
+    config: &AppConfig,
+    emit: EventFn<'_>,
+) {
+    for ((owner, region), alloc) in placed {
+        if alloc.size == 0 {
+            continue;
+        }
+        let actual_place =
+            find_place_name(config, alloc.base).unwrap_or_else(|| "unknown".into());
+
+        let request = if let Some(req) = find_region_request(config, owner, region) {
+            AllocationRequest {
+                requested_place: req
+                    .place
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| actual_place.clone()),
+                requested_size: req.size,
+                align: req.align,
+                shared: req.shared,
+            }
+        } else {
+            AllocationRequest {
+                requested_place: actual_place.clone(),
+                requested_size: None,
+                align: None,
+                shared: false,
+            }
+        };
+
+        emit(BuildEvent::Memory {
+            place: actual_place,
+            update: ResourceUpdate::Event(MemoryEvent::Allocated {
+                owner: owner.clone(),
+                region: region.clone(),
+                base: alloc.base,
+                size: alloc.size,
+                request,
+            }),
+        });
+    }
 }
 
 // ── Error types ─────────────────────────────────────────────────────────────
@@ -315,6 +604,8 @@ pub enum BuildError {
     Metadata(#[from] MetadataError),
     #[error("ipc metadata: {0}")]
     IpcMetadata(#[from] IpcMetadataError),
+    #[error("schema dump: {0}")]
+    SchemaDump(#[from] crate::schema_dump::SchemaDumpError),
     #[error("link: {0}")]
     Link(#[from] LinkError),
     #[error("pack: {0}")]

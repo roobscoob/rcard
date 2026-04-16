@@ -5,6 +5,7 @@ fun ctx => {
   priority = lib.workgroup.sysmodule,
   depends_on = [
     ctx.tasks.sysmodule_log,
+    ctx.tasks.sysmodule_reactor,
     ctx.tasks.sysmodule_usb,
     ctx.tasks.sysmodule_usb_protocol,
   ],

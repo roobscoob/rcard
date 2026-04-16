@@ -34,6 +34,13 @@ pub fn resource_record(
 
     let methods_json: Vec<Value> = methods.iter().map(method_record).collect();
 
+    // CARGO_MANIFEST_DIR and CARGO_PKG_NAME are set by Cargo for the
+    // crate being compiled (the api crate). The proc macro reads them
+    // at expansion time so the scraper can locate the crate on disk
+    // and the schema dump tool can depend on it by package name.
+    let crate_path = std::env::var("CARGO_MANIFEST_DIR").ok();
+    let crate_name = std::env::var("CARGO_PKG_NAME").ok();
+
     json!({
         "type": kind_label,
         "name": trait_name.to_string(),
@@ -42,6 +49,8 @@ pub fn resource_record(
         "clone": clone,
         "implements": implements,
         "methods": methods_json,
+        "crate_path": crate_path,
+        "crate_name": crate_name,
     })
 }
 

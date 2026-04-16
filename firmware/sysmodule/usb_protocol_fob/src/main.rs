@@ -9,7 +9,8 @@ use sysmodule_usb_protocol_fob_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
-sysmodule_log_api::panic_handler!(to Log);
+sysmodule_log_api::panic_handler!(to Log; cleanup Reactor);
+sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
 sysmodule_usb_api::bind_usb_endpoint!(UsbEndpoint = SLOTS.sysmodule_usb);
 sysmodule_usb_protocol_api::bind_usb_protocol_manager!(
@@ -37,7 +38,8 @@ fn write_usb(data: &[u8]) -> Result<(), FobSendError> {
             Ok(Ok(n)) => offset += n as usize,
             Ok(Err(UsbError::EndpointBusy)) => continue,
             Ok(Err(UsbError::Disconnected)) => return Err(FobSendError::Disconnected),
-            _ => return Err(FobSendError::Disconnected),
+            Ok(Err(_)) => return Err(FobSendError::Disconnected),
+            Err(e) => panic!("USB IPC died: {:?}", e),
         }
     }
     Ok(())
@@ -94,6 +96,7 @@ fn main() -> ! {
             transfer_type: TransferType::Bulk,
             max_packet_size: 64,
             interval: 0,
+            interface_group: 1,
         },
     )
     .log_expect("EP OUT IPC failed")
@@ -103,11 +106,12 @@ fn main() -> ! {
     let ep_in = UsbEndpoint::open(
         handles.ep_in,
         EndpointConfig {
-            number: 2,
+            number: 6,
             direction: Direction::In,
             transfer_type: TransferType::Bulk,
             max_packet_size: 64,
             interval: 0,
+            interface_group: 1,
         },
     )
     .log_expect("EP IN IPC failed")

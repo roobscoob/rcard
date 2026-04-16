@@ -129,6 +129,7 @@ impl FirmwareHandle {
 pub enum KnownCapability {
     SifliDebug,
     Ipc,
+    UsbIpc,
 }
 
 // ── Device ──────────────────────────────────────────────────────────────
@@ -172,6 +173,10 @@ pub struct DeviceHandle {
     /// land in correct device-emission order because each adapter stamps
     /// its logs at first-byte-receipt before they reach the main thread.
     pub log_buffer: Vec<Log>,
+    /// IPC schema registry — loaded from the matched firmware's tfw
+    /// metadata when `DeviceReportedBuildId` fires. `None` if no tfw
+    /// matched or if the tfw had no schema data.
+    pub ipc_registry: Option<std::sync::Arc<ipc_runtime::Registry>>,
 }
 
 impl DeviceHandle {
@@ -192,6 +197,7 @@ impl DeviceHandle {
             adapter_ids,
             firmware_id,
             log_buffer: Vec::new(),
+            ipc_registry: None,
         }
     }
 
@@ -548,7 +554,9 @@ impl AppState {
     /// Determine the flash method for a device based on its capabilities.
     pub fn flash_method_for_device(&self, device_id: DeviceId) -> Option<FlashMethod> {
         let dev = self.devices.get(&device_id)?;
-        if dev.capabilities.contains(&KnownCapability::Ipc) {
+        if dev.capabilities.contains(&KnownCapability::UsbIpc)
+            || dev.capabilities.contains(&KnownCapability::Ipc)
+        {
             Some(FlashMethod::Usb)
         } else if dev.capabilities.contains(&KnownCapability::SifliDebug) {
             Some(FlashMethod::SifliDebug)
@@ -990,6 +998,37 @@ impl AppState {
                     }
                 }
                 crate::bridge::Event::FlashProgress { device_id, phase } => {
+                    // Smoke test: when the stub is up (Done), try an IPC
+                    // call to Log::log to verify the end-to-end path.
+                    if matches!(&phase, crate::bridge::FlashPhase::Done) {
+                        eprintln!("[flash] stub up — testing IPC call to Log::log");
+                        let test_args = ipc_runtime::IpcValue::Struct(indexmap::indexmap! {
+                            "level".into() => ipc_runtime::IpcValue::Enum {
+                                variant: "Info".into(),
+                                payload: vec![],
+                            },
+                            "species".into() => ipc_runtime::IpcValue::U64(0),
+                            "argument_stream".into() => ipc_runtime::IpcValue::Bytes(vec![]),
+                        });
+                        match self.ipc_call(device_id, "Log", "log", test_args) {
+                            Ok(rx) => {
+                                eprintln!("[flash] IPC call sent, awaiting reply...");
+                                std::thread::spawn(move || {
+                                    match rx.blocking_recv() {
+                                        Ok(Ok(result)) => eprintln!(
+                                            "[flash] IPC reply: rc={} return={} bytes",
+                                            result.rc,
+                                            result.return_value.len(),
+                                        ),
+                                        Ok(Err(e)) => eprintln!("[flash] IPC transport error: {e}"),
+                                        Err(_) => eprintln!("[flash] IPC reply channel dropped (timeout?)"),
+                                    }
+                                });
+                            }
+                            Err(e) => eprintln!("[flash] IPC call failed: {e}"),
+                        }
+                    }
+
                     match &self.flash_modal {
                         Some(FlashModalState::Picker { firmware_id, selected_device })
                             if *selected_device == Some(device_id) =>
@@ -1054,6 +1093,40 @@ impl AppState {
                     if let Some(fw_id) = matched_fw_id {
                         if let Some(dev) = self.devices.get_mut(&device_id) {
                             dev.firmware_id = Some(fw_id);
+
+                            // Build IPC registry from the firmware's schema metadata.
+                            if let Some(fw) = self.firmware.get(&fw_id) {
+                                if fw.metadata.ipc.is_none() {
+                                    eprintln!("[ipc] firmware matched but tfw has no ipc metadata");
+                                } else if fw.metadata.ipc.as_ref().unwrap().schemas.is_none() {
+                                    eprintln!(
+                                        "[ipc] firmware matched but tfw has no schema data \
+                                         (rebuild firmware to populate ipc.schemas)"
+                                    );
+                                }
+                                if let Some(ref ipc) = fw.metadata.ipc {
+                                    if let Some(ref schemas) = ipc.schemas {
+                                        // Serialize server metadata to JSON for the registry
+                                        // to resolve task_ids.
+                                        let servers_json =
+                                            serde_json::to_value(&ipc.servers).ok();
+                                        match ipc_runtime::Registry::from_schemas_json(
+                                            schemas,
+                                            servers_json.as_ref(),
+                                        ) {
+                                            Ok(registry) => {
+                                                dev.ipc_registry =
+                                                    Some(std::sync::Arc::new(registry));
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "warning: failed to build IPC registry: {e}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1083,6 +1156,40 @@ impl AppState {
     /// Unregister a serial port and stop its connection loop. Also removes
     /// it from the persistent registry so it won't auto-register on next
     /// startup.
+    /// Send an IPC call to a device. Returns a oneshot receiver for the
+    /// result. The caller awaits or polls the receiver.
+    pub fn ipc_call(
+        &self,
+        device_id: DeviceId,
+        resource: &str,
+        method: &str,
+        args: ipc_runtime::IpcValue,
+    ) -> Result<
+        tokio::sync::oneshot::Receiver<Result<usb::IpcCallResult, String>>,
+        String,
+    > {
+        let dev = self
+            .devices
+            .get(&device_id)
+            .ok_or("device not found")?;
+        let registry = dev
+            .ipc_registry
+            .as_ref()
+            .ok_or("no IPC registry loaded for this device")?;
+
+        let encoded = registry
+            .encode_call(resource, method, args)
+            .map_err(|e| e.to_string())?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = self.cmd_tx.send(crate::bridge::Command::IpcCall {
+            device_id,
+            call: encoded,
+            reply: tx,
+        });
+        Ok(rx)
+    }
+
     pub fn unregister_serial(&mut self, index: usize) {
         if index >= self.serial_ports.len() {
             return;

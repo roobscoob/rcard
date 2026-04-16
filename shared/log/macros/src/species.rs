@@ -11,8 +11,10 @@ use syn::{Expr, LitStr, Path, Token};
 /// (e.g. `ipc::__rcard_log`).
 ///
 /// `emit_stack_dump` is a boolean literal (`true` or `false`).  When `true`,
-/// a stack dump is captured and appended to the log entry before
-/// `TAG_END_OF_STREAM`.
+/// a stack dump is captured and appended to the log entry. The
+/// `TAG_END_OF_STREAM` terminator is appended by the log server, not the
+/// producer — so aborts mid-format (panics during `Format`, aborted stack
+/// captures) cannot strand a stream on the host decoder.
 pub struct SpeciesInput {
     pub krate: Path,
     pub level: Expr,
@@ -109,7 +111,6 @@ pub fn expand_species(input: SpeciesInput) -> TokenStream {
                 #krate::formatter::Format::format(&(#args), &mut __f);
             )*
             #stack_dump_code
-            __f.write_end_of_stream();
             drop(__writer);
         }
     }

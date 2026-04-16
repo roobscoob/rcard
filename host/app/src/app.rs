@@ -506,8 +506,10 @@ impl eframe::App for RcardApp {
                                     | FlashPhase::Done
                                     | FlashPhase::Failed { .. }
                             );
-                            let show_logs =
-                                matches!(phase, FlashPhase::Booting | FlashPhase::Done);
+                            let show_logs = matches!(
+                                phase,
+                                FlashPhase::Booting | FlashPhase::Done | FlashPhase::Failed { .. }
+                            );
 
                             use egui_taffy::taffy::prelude::*;
                             use egui_taffy::{tui as taffy_tui, TuiBuilderLogic};

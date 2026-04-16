@@ -13,6 +13,8 @@ panics-emit-stack-dump = ["writer"]
 zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
 rcard-log-macros = { path = "macros" }
 userlib = { path = "../../firmware/hubris/userlib", optional = true }
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard-schema = { version = "0.2", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 rcard-log = { path = ".", features = ["writer"] }

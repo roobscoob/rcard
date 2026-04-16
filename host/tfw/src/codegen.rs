@@ -81,14 +81,9 @@ pub struct FilesystemEntry {
 pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
     let all_tasks = layout::collect_tasks(config);
 
-    // Build ordered task list sorted by priority then name.
-    let mut task_list: Vec<(&str, u32)> = all_tasks
-        .iter()
-        .map(|(name, task)| (*name, task.priority))
-        .collect();
-    task_list.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-
-    let tasks: Vec<String> = task_list.iter().map(|(name, _)| name.to_string()).collect();
+    // Canonical ordering: (workgroup, dep_depth, name).
+    let task_names = layout::ordered_task_names(&all_tasks);
+    let tasks: Vec<String> = task_names.iter().map(|name| name.to_string()).collect();
     let task_indices: BTreeMap<String, usize> = tasks
         .iter()
         .enumerate()

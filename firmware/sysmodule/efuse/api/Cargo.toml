@@ -5,13 +5,15 @@ edition = "2021"
 
 [features]
 bare-panics = []
+host = ["ipc/host"]
 
 [dependencies]
 ipc = { path = "../../../modules/ipc" }
 rcard-log = { path = "../../../../shared/log" }
 rcard-log-macros = { path = "../../../../shared/log/macros" }
-userlib.workspace = true
 zerocopy = "0.8"
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard-schema = { version = "0.2", default-features = false, features = ["derive"] }
 
 [lib]
 test = false
@@ -19,3 +21,6 @@ bench = false
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "none")'.dependencies]
+userlib.workspace = true

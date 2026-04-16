@@ -1,133 +1,64 @@
-use std::collections::HashMap;
-use std::time::Duration;
+//! USB IPC transport — thin wrapper around [`ipc_protocol::IpcProtocol`]
+//! that sends frames via USB bulk-OUT and fulfills replies from the
+//! host-driven bulk-IN reader.
 
-use nusb::transfer::TransferError;
-use rcard_usb_proto::messages::tunnel_error::TunnelErrorCode;
-use rcard_usb_proto::{FrameWriter, IpcRequest};
-use tokio::sync::{Mutex, oneshot};
+use std::sync::Arc;
 
-/// Default timeout for IPC calls.
-const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+use nusb::Endpoint;
+use nusb::transfer::{Buffer, Bulk, Out};
+use rcard_usb_proto::IpcRequest;
+use tokio::sync::Mutex;
 
-/// Result of a successful IPC call.
-#[derive(Clone, Debug)]
-pub struct IpcCallResult {
-    /// Kernel response code.
-    pub rc: u32,
-    /// Serialized return value.
-    pub return_value: Vec<u8>,
-    /// Concatenated writeback data for Write/ReadWrite leases.
-    pub lease_writeback: Vec<u8>,
-}
+// Re-export the protocol types so existing consumers don't break.
+pub use ipc_protocol::{IpcCallResult, IpcError, IpcProtocol, ResolvedResponse};
 
-/// Errors from an IPC call.
-#[derive(Debug)]
-pub enum IpcError {
-    /// No response within the timeout.
-    Timeout,
-    /// Device returned a tunnel-level error (dispatch failed).
-    TunnelError(TunnelErrorCode),
-    /// USB transfer error.
-    Usb(TransferError),
-    /// The response channel was dropped (reader task died).
-    Disconnected,
-    /// Failed to encode the request frame.
-    Encode,
-    /// The fob responded with an unrecognized frame type.
-    UnexpectedFrame,
-}
-
-impl std::fmt::Display for IpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout => write!(f, "IPC call timed out"),
-            Self::TunnelError(code) => write!(f, "tunnel error: {code:?}"),
-            Self::Usb(e) => write!(f, "USB transfer error: {e}"),
-            Self::Disconnected => write!(f, "IPC response channel disconnected"),
-            Self::Encode => write!(f, "failed to encode IPC request"),
-            Self::UnexpectedFrame => write!(f, "fob responded with unrecognized frame"),
-        }
-    }
-}
-
-impl std::error::Error for IpcError {}
-
-/// Resolved IPC response.
-pub(crate) enum ResolvedResponse {
-    Reply(IpcCallResult),
-    TunnelError(TunnelErrorCode),
-    UnexpectedFrame,
-}
-
-/// IPC capability — send requests to firmware tasks over the host-driven
-/// USB endpoint.
-///
-/// The host-driven reader task fulfills pending requests by calling
-/// `resolve()`.
+/// USB-specific IPC capability. Wraps an `IpcProtocol` with exclusive
+/// ownership of the bulk-OUT endpoint for sending.
 pub struct Ipc {
-    writer: Mutex<FrameWriter>,
-    pending: Mutex<HashMap<u16, oneshot::Sender<ResolvedResponse>>>,
-    host_out: nusb::Interface,
-    out_endpoint: u8,
+    protocol: Arc<IpcProtocol>,
+    /// Mutex-guarded because `Endpoint::submit` / `next_complete`
+    /// require `&mut self`, and multiple IPC callers may race.
+    out_endpoint: Mutex<Endpoint<Bulk, Out>>,
 }
 
 impl Ipc {
-    pub(crate) fn new(host_iface: nusb::Interface, out_endpoint: u8) -> Self {
+    pub(crate) fn new(out_endpoint: Endpoint<Bulk, Out>) -> Self {
         Ipc {
-            writer: Mutex::new(FrameWriter::new()),
-            pending: Mutex::new(HashMap::new()),
-            host_out: host_iface,
-            out_endpoint,
+            protocol: Arc::new(IpcProtocol::new()),
+            out_endpoint: Mutex::new(out_endpoint),
         }
+    }
+
+    /// The underlying protocol handler — shared with the reader task
+    /// so it can call `resolve()` when reply frames arrive.
+    pub fn protocol(&self) -> &Arc<IpcProtocol> {
+        &self.protocol
     }
 
     /// Send an IPC request and wait for the response.
     pub async fn call(&self, req: &IpcRequest<'_>) -> Result<IpcCallResult, IpcError> {
-        let (tx, rx) = oneshot::channel();
+        self.protocol
+            .call(req, |frame_bytes| async move {
+                let mut buf = Buffer::new(frame_bytes.len());
+                buf.extend_from_slice(&frame_bytes);
 
-        // Encode and send.
-        let mut buf = [0u8; 4096];
-        let (seq, n) = {
-            let mut writer = self.writer.lock().await;
-            let seq = writer.current_seq();
-            let n = writer
-                .write_ipc_request(req, &mut buf)
-                .ok_or(IpcError::Encode)?;
-            (seq, n)
-        };
-
-        // Register pending before sending to avoid race.
-        self.pending.lock().await.insert(seq, tx);
-
-        // Send over USB.
-        self.host_out
-            .bulk_out(self.out_endpoint, buf[..n].to_vec())
+                let mut ep = self.out_endpoint.lock().await;
+                ep.submit(buf);
+                let completion = ep.next_complete().await;
+                completion.status.map_err(|e| e.to_string())
+            })
             .await
-            .into_result()
-            .map_err(IpcError::Usb)?;
-
-        // Wait for response with timeout.
-        let response = match tokio::time::timeout(CALL_TIMEOUT, rx).await {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(_)) => return Err(IpcError::Disconnected),
-            Err(_) => {
-                // Clean up the pending entry on timeout.
-                self.pending.lock().await.remove(&seq);
-                return Err(IpcError::Timeout);
-            }
-        };
-
-        match response {
-            ResolvedResponse::Reply(result) => Ok(result),
-            ResolvedResponse::TunnelError(code) => Err(IpcError::TunnelError(code)),
-            ResolvedResponse::UnexpectedFrame => Err(IpcError::UnexpectedFrame),
-        }
     }
 
     /// Called by the host-driven reader task to fulfill a pending request.
     pub(crate) async fn resolve(&self, seq: u16, response: ResolvedResponse) {
-        if let Some(tx) = self.pending.lock().await.remove(&seq) {
-            let _ = tx.send(response);
-        }
+        self.protocol.resolve(seq, response).await;
+    }
+
+    /// Mark this transport dead. Callers still awaiting replies see
+    /// `IpcError::Disconnected` (via the dropped oneshot); subsequent
+    /// `call()` invocations fail fast with `IpcError::TransportClosed`.
+    pub async fn poison(&self) {
+        self.protocol.poison().await;
     }
 }

@@ -4,43 +4,62 @@ use quote::quote;
 use super::types::wire_type_for;
 use crate::parse::ParsedParam;
 
-/// Generate sequential zerocopy reads for message arguments on the server side.
+/// Deserialize method arguments via postcard.
 ///
-/// Emits a series of `ipc::wire::read::<T>(__buf)` calls, threading the
-/// remaining buffer through each read.
+/// Emits a single `postcard::from_bytes` call that decodes a tuple of
+/// `(handle?, args...)` — matching the shape serialized by
+/// `gen_serialize_wire`. The tuple is then destructured into named
+/// bindings. Byte layout is defined by postcard's serde tuple impl,
+/// not by memory layout — target-agnostic.
 ///
-/// Returns `(deserialize_stmts, destructure_stmts)`. The destructure half is
-/// currently empty since variables are bound inline, but the pair is kept for
-/// future flexibility.
+/// Returns `(deserialize_stmts, destructure_stmts)`. Unlike the old
+/// zerocopy path which threaded `__buf` through per-field reads, the
+/// destructure happens inline in a single `let` binding, so the
+/// second return is empty.
 pub fn gen_deserialize_args(
     non_lease_params: &[&ParsedParam],
     include_handle: bool,
 ) -> (TokenStream2, TokenStream2) {
-    let mut reads = Vec::new();
+    // Early-out: no args at all (no handle, no params) — nothing to decode.
+    if !include_handle && non_lease_params.is_empty() {
+        return (
+            quote! {
+                let _ = msg.raw_data();
+            },
+            quote! {},
+        );
+    }
 
-    reads.push(quote! { let mut __buf = msg.raw_data(); });
-
+    // Build the tuple type annotation: (HandleTy?, ArgTy1, ArgTy2, ...).
+    let mut tuple_types: Vec<TokenStream2> = Vec::new();
     if include_handle {
-        reads.push(quote! {
-            let Some((handle, __rest)) = ipc::wire::read::<ipc::RawHandle>(__buf) else {
-                reply.reply_error(ipc::MALFORMED_MESSAGE, &[]);
-                return;
-            };
-            __buf = __rest;
-        });
+        tuple_types.push(quote! { ipc::RawHandle });
     }
-
     for p in non_lease_params {
-        let pname = &p.name;
-        let ty = wire_type_for(p);
-        reads.push(quote! {
-            let Some((#pname, __rest)) = ipc::wire::read::<#ty>(__buf) else {
-                reply.reply_error(ipc::MALFORMED_MESSAGE, &[]);
-                return;
-            };
-            __buf = __rest;
-        });
+        tuple_types.push(wire_type_for(p));
     }
 
-    (quote! { #(#reads)* }, quote! {})
+    // Matching bindings: (handle_bind?, pname1, pname2, ...).
+    let mut binding_idents: Vec<TokenStream2> = Vec::new();
+    if include_handle {
+        binding_idents.push(quote! { handle });
+    }
+    for p in non_lease_params {
+        let n = &p.name;
+        binding_idents.push(quote! { #n });
+    }
+
+    let deserialize = quote! {
+        let __buf = msg.raw_data();
+        let ( #( #binding_idents ,)* ): ( #( #tuple_types ,)* ) =
+            match ipc::__postcard::from_bytes(__buf) {
+                Ok(t) => t,
+                Err(_) => {
+                    reply.reply_error(ipc::MALFORMED_MESSAGE, &[]);
+                    return;
+                }
+            };
+    };
+
+    (deserialize, quote! {})
 }

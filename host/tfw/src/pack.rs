@@ -7,6 +7,7 @@ use zip::ZipWriter;
 use crate::build_metadata::BuildMetadata;
 use crate::compile::CompileArtifact;
 use crate::config::AppConfig;
+use crate::layout::Layout;
 
 // ── ftab constants (SiFli SF32LB52) ──────────────────────────────────────────
 
@@ -63,8 +64,13 @@ fn build_ftab(ftab_base: u32, firmware_flash_addr: u32, firmware_size: u32) -> V
 }
 
 /// Build the ftab binary from the config's boot section.
-/// The ftab points the bootrom at the bootloader partition.
-fn build_ftab_from_config(config: &AppConfig, bootloader_bin_size: u32) -> Option<Vec<u8>> {
+/// The ftab points the bootrom at wherever the layout placed the
+/// bootloader's code region — which now sits inside places.bin.
+fn build_ftab_from_config(
+    config: &AppConfig,
+    layout: &Layout,
+    bootloader_bin_size: u32,
+) -> Option<Vec<u8>> {
     let boot = config.boot.as_ref()?;
 
     let ftab_place = &boot.ftab;
@@ -74,10 +80,10 @@ fn build_ftab_from_config(config: &AppConfig, bootloader_bin_size: u32) -> Optio
         .unwrap_or(0x12000000) as u32;
     let ftab_flash_addr = flash_base + ftab_offset as u32;
 
-    // The loader partition contains the bootloader binary.
-    let loader_place = &boot.loader;
-    let loader_offset = loader_place.offset.unwrap_or(0);
-    let loader_flash_addr = flash_base + loader_offset as u32;
+    let loader_flash_addr = layout
+        .placed
+        .get(&("bootloader".to_string(), "code".to_string()))?
+        .base as u32;
 
     Some(build_ftab(ftab_flash_addr, loader_flash_addr, bootloader_bin_size))
 }
@@ -85,8 +91,8 @@ fn build_ftab_from_config(config: &AppConfig, bootloader_bin_size: u32) -> Optio
 /// Pack the build output into a `.tfw` archive.
 ///
 /// The archive contains:
-/// - `places.bin` — the firmware image (partition table + RAM-loadable segments)
-/// - `bootloader.bin` — the XIP bootloader binary (if present)
+/// - `places.bin` — the firmware image (partition table + RAM-loadable segments,
+///   including the bootloader's XIP segment)
 /// - `ftab.bin` — the SiFli partition table (if boot config exists)
 /// - `renode_platform.repl` — emulator platform description
 /// - `config.json` — full app config for host tools
@@ -95,9 +101,10 @@ fn build_ftab_from_config(config: &AppConfig, bootloader_bin_size: u32) -> Optio
 /// - `ipc-metadata.json` — IPC resource / interface / server definitions
 pub fn pack(
     config: &AppConfig,
+    layout: &Layout,
     artifacts: &[CompileArtifact],
     places_bin: &Path,
-    bootloader_bin: Option<&Path>,
+    bootloader_size: u32,
     log_metadata: Option<&Path>,
     ipc_metadata: Option<&Path>,
     build_metadata: Option<&BuildMetadata>,
@@ -116,19 +123,8 @@ pub fn pack(
     zip.start_file("places.bin", opts).map_err(PackError::Zip)?;
     zip.write_all(&places_data).map_err(PackError::Io)?;
 
-    // bootloader.bin (if present)
-    let bl_size = if let Some(bl_path) = bootloader_bin {
-        let bl_data = std::fs::read(bl_path).map_err(PackError::Io)?;
-        let size = bl_data.len() as u32;
-        zip.start_file("bootloader.bin", opts).map_err(PackError::Zip)?;
-        zip.write_all(&bl_data).map_err(PackError::Io)?;
-        size
-    } else {
-        0
-    };
-
     // ftab.bin (if boot config exists)
-    if let Some(ftab) = build_ftab_from_config(config, bl_size) {
+    if let Some(ftab) = build_ftab_from_config(config, layout, bootloader_size) {
         zip.start_file("ftab.bin", opts).map_err(PackError::Zip)?;
         zip.write_all(&ftab).map_err(PackError::Io)?;
     }

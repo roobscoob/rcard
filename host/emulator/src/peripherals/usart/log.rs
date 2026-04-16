@@ -15,6 +15,9 @@ pub enum UsartLogKind {
 pub struct LogStream {
     pub metadata: LogMetadata,
     pub values: Vec<OwnedValue>,
+    /// True iff the host evicted this stream on a timeout instead of
+    /// receiving a `TAG_END_OF_STREAM` terminator.
+    pub truncated: bool,
 }
 
 impl core::fmt::Debug for UsartLogKind {

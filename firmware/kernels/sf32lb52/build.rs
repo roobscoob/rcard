@@ -21,10 +21,18 @@ fn main() {
 
     // Generate pin configuration code from config.json pin_assignments
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let work_dir = manifest_dir
-        .ancestors()
-        .find(|p| p.join(".work").exists())
-        .map(|p| p.join(".work"));
+    let json_path = if let Ok(path) = env::var("TFW_CONFIG_JSON") {
+        PathBuf::from(path)
+    } else {
+        manifest_dir
+            .ancestors()
+            .find(|p| p.join(".work").exists())
+            .map(|p| p.join(".work").join("config.json"))
+            .unwrap_or_else(|| manifest_dir.join(".work").join("config.json"))
+    };
+
+    println!("cargo::rerun-if-env-changed=TFW_CONFIG_JSON");
+    println!("cargo:rerun-if-changed={}", json_path.display());
 
     let mut pin_code = String::new();
     writeln!(pin_code, "/// Apply all board pin assignments.").unwrap();
@@ -34,32 +42,27 @@ fn main() {
     writeln!(pin_code, "/// Writes to HPSYS_PINMUX and HPSYS_CFG registers.").unwrap();
     writeln!(pin_code, "pub unsafe fn apply_pin_config() {{").unwrap();
 
-    if let Some(work_dir) = work_dir {
-        let json_path = work_dir.join("config.json");
-        println!("cargo:rerun-if-changed={}", json_path.display());
+    if json_path.exists() {
+        let content = fs::read_to_string(&json_path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-        if json_path.exists() {
-            let content = fs::read_to_string(&json_path).unwrap();
-            let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        if let Some(pin_assignments) = root.get("pin_assignments").and_then(|v| v.as_object()) {
+            for (peripheral_name, signals) in pin_assignments {
+                let signals = signals.as_object().unwrap();
 
-            if let Some(pin_assignments) = root.get("pin_assignments").and_then(|v| v.as_object()) {
-                for (peripheral_name, signals) in pin_assignments {
-                    let signals = signals.as_object().unwrap();
+                // Determine peripheral kind and instance from the name
+                // e.g. "usart1" -> kind="usart", instance="1"
+                // e.g. "display_en" -> kind="gpio", instance from "direction" field
+                let (kind, instance) = parse_peripheral_name(peripheral_name, signals);
 
-                    // Determine peripheral kind and instance from the name
-                    // e.g. "usart1" -> kind="usart", instance="1"
-                    // e.g. "display_en" -> kind="gpio", instance from "direction" field
-                    let (kind, instance) = parse_peripheral_name(peripheral_name, signals);
+                for (signal, pin_value) in signals {
+                    if signal == "direction" { continue; }
+                    let pin = pin_value.as_str().unwrap();
+                    let pin_num = pin.strip_prefix("PA").unwrap().parse::<u32>().unwrap();
 
-                    for (signal, pin_value) in signals {
-                        if signal == "direction" { continue; }
-                        let pin = pin_value.as_str().unwrap();
-                        let pin_num = pin.strip_prefix("PA").unwrap().parse::<u32>().unwrap();
-
-                        let writes = gen_pin_writes(pin_num, &kind, instance.as_deref(), signal);
-                        for line in &writes {
-                            writeln!(pin_code, "    {line}").unwrap();
-                        }
+                    let writes = gen_pin_writes(pin_num, &kind, instance.as_deref(), signal);
+                    for line in &writes {
+                        writeln!(pin_code, "    {line}").unwrap();
                     }
                 }
             }

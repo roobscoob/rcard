@@ -1,11 +1,18 @@
-#![no_std]
+#![cfg_attr(target_os = "none", no_std)]
 
 /// Maximum size of a Hubris message or reply buffer, in bytes.
 pub const HUBRIS_MESSAGE_SIZE_LIMIT: usize = 256;
 
+// Kernel-adjacent modules — firmware only. On host targets (used by
+// the schema-dump tool and host/ipc-runtime) these are elided entirely
+// so the crate compiles without userlib/generated.
+#[cfg(target_os = "none")]
 pub mod kern;
+#[cfg(target_os = "none")]
 pub mod dispatch;
+#[cfg(target_os = "none")]
 pub mod call;
+
 pub mod wire;
 
 /// IPC-layer error returned to all callers.
@@ -47,32 +54,46 @@ pub enum Error {
 /// `ResponseCode` sent by the server when a client message is malformed
 /// (bad size, bad contents, or bad leases, or unknown kind byte).
 /// The client's generated code panics on any non-SUCCESS response code.
+#[cfg(target_os = "none")]
 pub const MALFORMED_MESSAGE: kern::ResponseCode = kern::ResponseCode(1);
 
 /// `ResponseCode` sent by the server when a client is not in the server's
 /// runtime ACL (i.e. the task did not declare `uses-sysmodule` for this server).
 /// The client's generated code panics on this response code.
+#[cfg(target_os = "none")]
 pub const ACCESS_VIOLATION: kern::ResponseCode = kern::ResponseCode(2);
 
 
+#[cfg(target_os = "none")]
 pub mod alloc_take;
+#[cfg(target_os = "none")]
 mod arena;
 mod dyn_handle;
+#[cfg(target_os = "none")]
 pub mod errors;
 mod handle;
+#[cfg(target_os = "none")]
 mod server;
+#[cfg(target_os = "none")]
 pub use generated::tasks::TASK_COUNT;
 
+#[cfg(target_os = "none")]
 pub use arena::{AllocError, Arena, CloneError, SharedArena};
 pub use dyn_handle::DynHandle;
 pub use handle::{
     ACQUIRE_METHOD, CANCEL_TRANSFER_METHOD, CLONE_METHOD, IMPLICIT_DESTROY_METHOD,
-    NOTIFY_DEAD_METHOD, PREPARE_TRANSFER_METHOD, TRY_DROP_METHOD, Meta,
+    NOTIFY_DEAD_METHOD, PREPARE_TRANSFER_METHOD, TRY_DROP_METHOD,
     RawHandle, opcode, split_opcode,
 };
+// `Meta` requires `kern::TaskId`, firmware-only.
+#[cfg(target_os = "none")]
+pub use handle::Meta;
 pub use ipc_macros::{
     __check_uses, allocation, interface, notification_handler, resource, server,
 };
+#[cfg(target_os = "none")]
+pub use call::call_send;
+#[cfg(target_os = "none")]
 pub use server::{ResourceDispatch, Server};
 
 /// Trait used by generated dispatcher code to extract a resource from a
@@ -116,6 +137,10 @@ pub trait Transferable {
 /// Clones this handle for `new_owner` by sending a `0xFD` message to the
 /// handle's server. Does NOT consume `self`. Returns a `DynHandle` with the
 /// new handle key.
+///
+/// Firmware-only: the `TaskId` and `CloneError` types live in kernel-adjacent
+/// modules that are elided on host targets.
+#[cfg(target_os = "none")]
 pub trait Cloneable {
     fn clone_for(&self, new_owner: kern::TaskId) -> Result<DynHandle, CloneError>;
 }
@@ -126,13 +151,18 @@ pub trait Cloneable {
 /// On first `get()`, asks the kernel for the peer's current generation via
 /// `sys_refresh_task_id`. This ensures the first IPC call uses the correct
 /// generation even if the peer has restarted since this task was compiled.
+///
+/// Firmware-only.
+#[cfg(target_os = "none")]
 pub struct StaticTaskId {
     id: core::cell::UnsafeCell<kern::TaskId>,
     refreshed: core::cell::Cell<bool>,
 }
 
+#[cfg(target_os = "none")]
 unsafe impl Sync for StaticTaskId {}
 
+#[cfg(target_os = "none")]
 impl StaticTaskId {
     pub const fn new(id: kern::TaskId) -> Self {
         Self {
@@ -160,8 +190,80 @@ impl StaticTaskId {
     }
 }
 
+// ── Schema export types ───────────────────────────────────────────────
+//
+// These are referenced by the macro-emitted `__ipc_schema` module so
+// the schema-dump tool can iterate every resource's methods, params,
+// and their postcard-schema NamedType descriptors.
+
+/// Descriptor for one IPC method in a resource trait.
+#[cfg_attr(feature = "host", derive(serde::Serialize))]
+pub struct MethodDesc {
+    pub name: &'static str,
+    pub id: u8,
+    pub kind: &'static str,
+    pub params: &'static [ParamDesc],
+    pub lease_params: &'static [LeaseParamDesc],
+    #[cfg_attr(feature = "host", serde(serialize_with = "serialize_opt_schema"))]
+    pub return_schema: Option<&'static postcard_schema::schema::NamedType>,
+}
+
+/// A non-lease parameter's schema.
+#[cfg_attr(feature = "host", derive(serde::Serialize))]
+pub struct ParamDesc {
+    pub name: &'static str,
+    #[cfg_attr(feature = "host", serde(serialize_with = "serialize_schema"))]
+    pub schema: &'static postcard_schema::schema::NamedType,
+}
+
+/// A lease parameter — no schema (it's just bytes), just the name and direction.
+#[cfg_attr(feature = "host", derive(serde::Serialize))]
+pub struct LeaseParamDesc {
+    pub name: &'static str,
+    pub mutable: bool,
+}
+
+/// Descriptor for a whole resource's method table.
+#[cfg_attr(feature = "host", derive(serde::Serialize))]
+pub struct ResourceDesc {
+    pub name: &'static str,
+    pub kind: u8,
+    pub methods: &'static [MethodDesc],
+}
+
+// Host-only: serialize `&'static NamedType` by converting to
+// `OwnedNamedType` (which derives Serialize) on the fly.
+#[cfg(feature = "host")]
+fn serialize_schema<S: serde::Serializer>(
+    schema: &&'static postcard_schema::schema::NamedType,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    use postcard_schema::schema::owned::OwnedNamedType;
+    let owned = OwnedNamedType::from(*schema);
+    serde::Serialize::serialize(&owned, ser)
+}
+
+#[cfg(feature = "host")]
+fn serialize_opt_schema<S: serde::Serializer>(
+    schema: &Option<&'static postcard_schema::schema::NamedType>,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    use postcard_schema::schema::owned::OwnedNamedType;
+    let owned = schema.map(OwnedNamedType::from);
+    serde::Serialize::serialize(&owned, ser)
+}
+
 #[doc(hidden)]
 pub use rcard_log as __rcard_log;
+
+/// Re-exports for macro-generated code. Consumer crates should not rely
+/// on these directly; they're an implementation detail.
+#[doc(hidden)]
+pub use postcard as __postcard;
+#[doc(hidden)]
+pub use postcard_schema as __postcard_schema;
+#[doc(hidden)]
+pub use serde as __serde;
 
 /// Panic macro used by generated IPC client/server code.
 /// By default uses `rcard_log::panic!` for structured logging visibility.

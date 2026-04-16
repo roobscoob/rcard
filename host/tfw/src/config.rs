@@ -97,16 +97,25 @@ pub struct Place {
     /// Access goes through a driver (ACL only, no linker section).
     #[serde(default)]
     pub unmapped: bool,
+    /// Alternative places to try if this one is full. Populated by
+    /// `lib.or` / `lib.prefer` in layout .ncl files.
+    #[serde(default)]
+    pub alternatives: Vec<Place>,
+    /// Place name from `config.places`. Not set by Nickel — populated by
+    /// [`stamp_place_names`] after deserialization so that downstream code
+    /// (layout solver, event emitters) can refer to the place by name.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 // -- Boot config --
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 pub struct BootConfig {
-    /// Place where the ftab (partition table) is written.
+    /// Place where the ftab (partition table) is written. The ftab's
+    /// boot target is derived from the bootloader's code region
+    /// placement in the layout.
     pub ftab: Place,
-    /// Place where the bootloader lives (ftab points here).
-    pub loader: Place,
 }
 
 // -- Bootloader --
@@ -319,11 +328,78 @@ pub fn load(
     let tasks = discover_tasks(firmware_dir);
     let shim = build_shim(firmware_dir, root_ncl, board_ncl, layout_ncl, &tasks);
 
-    let config: AppConfig =
+    let mut config: AppConfig =
         nickel_lang_core::deserialize::from_str(&shim)
             .map_err(|e| ConfigError::Eval(ConfigEvalError::from(e)))?;
 
+    stamp_place_names(&mut config);
+
     Ok(config)
+}
+
+/// Walk all `Place` structs in the config and stamp each with the name
+/// of the matching entry from `config.places`. Matching is by identity:
+/// same size, same offset, same first mapping address.
+fn stamp_place_names(config: &mut AppConfig) {
+    // Build lookup: (size, offset, first_mapping_addr) → place name.
+    let lookup: BTreeMap<(u64, u64, u64), String> = config
+        .places
+        .iter()
+        .filter_map(|(name, place)| {
+            let addr = place.mappings.first().map(|m| m.address).unwrap_or(0);
+            Some(((place.size, place.offset.unwrap_or(0), addr), name.clone()))
+        })
+        .collect();
+
+    fn stamp(place: &mut Place, lookup: &BTreeMap<(u64, u64, u64), String>) {
+        if place.name.is_none() {
+            let addr = place.mappings.first().map(|m| m.address).unwrap_or(0);
+            let key = (place.size, place.offset.unwrap_or(0), addr);
+            if let Some(name) = lookup.get(&key) {
+                place.name = Some(name.clone());
+            }
+        }
+        for alt in &mut place.alternatives {
+            stamp(alt, lookup);
+        }
+    }
+
+    fn stamp_regions(
+        regions: &mut BTreeMap<String, RegionRequest>,
+        lookup: &BTreeMap<(u64, u64, u64), String>,
+    ) {
+        for req in regions.values_mut() {
+            stamp(&mut req.place, lookup);
+        }
+    }
+
+    // Stamp top-level places.
+    for (name, place) in &mut config.places {
+        place.name = Some(name.clone());
+        for alt in &mut place.alternatives {
+            stamp(alt, &lookup);
+        }
+    }
+
+    // Stamp kernel regions.
+    stamp_regions(&mut config.kernel.regions, &lookup);
+
+    // Stamp bootloader regions.
+    if let Some(bl) = &mut config.bootloader {
+        stamp_regions(&mut bl.regions, &lookup);
+    }
+
+    // Stamp task regions (recursive).
+    fn stamp_tasks(
+        entries: &mut [TaskConfig],
+        lookup: &BTreeMap<(u64, u64, u64), String>,
+    ) {
+        for task in entries {
+            stamp_regions(&mut task.regions, lookup);
+            stamp_tasks(&mut task.depends_on, lookup);
+        }
+    }
+    stamp_tasks(&mut config.entries, &lookup);
 }
 
 #[derive(Debug, thiserror::Error)]

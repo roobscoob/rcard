@@ -24,6 +24,11 @@ pub struct IpcMetadataBundle {
     /// Every `ipc::server!` call site, keyed by task name. Tells the
     /// host which task serves which resource traits.
     pub servers: BTreeMap<String, ServerEntry>,
+    /// Full postcard-schema type descriptions for every method's
+    /// params and return types. Populated by the schema dump tool
+    /// at build time. `None` if schema dump was skipped or failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +45,13 @@ pub struct ResourceEntry {
     #[serde(default)]
     pub implements: Option<String>,
     pub methods: Vec<MethodEntry>,
+    /// Filesystem path to the api crate that defined this resource
+    /// (from `CARGO_MANIFEST_DIR` at firmware compile time).
+    #[serde(default)]
+    pub crate_path: Option<String>,
+    /// Cargo package name of the api crate (from `CARGO_PKG_NAME`).
+    #[serde(default)]
+    pub crate_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +87,11 @@ pub struct ParamEntry {
 pub struct ServerEntry {
     pub task: String,
     pub serves: Vec<String>,
+    /// Task index (position in the firmware's task table). Populated by
+    /// the build pipeline from the codegen step's `task_indices` map.
+    /// The host uses this as `IpcRequest.task_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<u16>,
 }
 
 /// Scrape `.ipc_meta` sections from every task ELF and collate.
@@ -139,6 +156,7 @@ pub fn scrape(artifacts: &[CompileArtifact]) -> Result<IpcMetadataBundle, IpcMet
     Ok(IpcMetadataBundle {
         resources,
         servers,
+        schemas: None,
     })
 }
 

@@ -3,8 +3,7 @@ let lib = import "../lib.ncl" in
 fun memory =>
   let flash = lib.partition memory.mpi2 [
     { name = "sec_config", size = lib.kiB 20 },
-    { name = "bootloader", size = lib.kiB 16 },
-    { name = "image",      size = lib.kiB 368 },
+    { name = "image",      size = lib.kiB 384 },
     { name = "logs",       size = lib.miB 1 },
     { name = "fs_main",    size = lib.miB 1 },
   ] in
@@ -13,7 +12,6 @@ fun memory =>
     kernel_ram = memory.sram_fast_dctm,
     task_ram   = memory.sram_bulk,
     sec_config = flash.sec_config,
-    bootloader = flash.bootloader,
     image      = flash.image,
     logs       = flash.logs & { unmapped = true },
     fs_main    = flash.fs_main & { unmapped = true },

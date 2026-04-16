@@ -5,13 +5,26 @@ edition = "2021"
 
 [features]
 bare-panics = []
+host = ["ipc/host"]
 
 [dependencies]
 ipc = { path = "../../../modules/ipc" }
-rcard-log = { path = "../../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../../shared/log/macros" }
-userlib.workspace = true
 zerocopy = "0.8"
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard-schema = { version = "0.2", default-features = false, features = ["derive"] }
+
+# Firmware: rcard-log with the `writer` feature (provides LogWriter,
+# used by the panic_handler! macro) + userlib (provides sys_panic).
+# Neither is needed on host — the panic_handler! macro is only expanded
+# in firmware task binaries.
+[target.'cfg(target_os = "none")'.dependencies]
+rcard-log = { path = "../../../../shared/log", features = ["writer"] }
+userlib.workspace = true
+
+# Host: rcard-log without writer — just the type definitions (LogLevel etc.).
+[target.'cfg(not(target_os = "none"))'.dependencies]
+rcard-log = { path = "../../../../shared/log" }
 
 [lib]
 test = false

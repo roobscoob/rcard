@@ -139,7 +139,7 @@ pub fn gen_client(
             ($name:ident = $slot:expr) => {
                 #peer_guard
                 #[doc(hidden)]
-                struct #binding_struct_name;
+                pub struct #binding_struct_name;
                 impl $crate::#mod_name::#server_trait_name for #binding_struct_name {
                     fn task_id() -> ipc::kern::TaskId { $slot }
                     fn server_id() -> &'static ipc::StaticTaskId {
@@ -147,7 +147,7 @@ pub fn gen_client(
                         &SERVER_ID
                     }
                 }
-                type $name = $crate::#mod_name::#handle_name<#binding_struct_name>;
+                pub type $name = $crate::#mod_name::#handle_name<#binding_struct_name>;
             };
         }
 

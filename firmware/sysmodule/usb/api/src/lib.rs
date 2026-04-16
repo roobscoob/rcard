@@ -15,6 +15,9 @@
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum UsbError {
@@ -53,6 +56,9 @@ pub enum BuilderError {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum BusState {
@@ -81,6 +87,9 @@ pub enum BusState {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum Direction {
@@ -101,6 +110,9 @@ pub enum Direction {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum TransferType {
@@ -126,6 +138,9 @@ pub enum TransferType {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct FixedDeviceConfig {
@@ -840,6 +855,9 @@ impl<'a> Iterator for TlvIter<'a> {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct EndpointConfig {
@@ -850,6 +868,9 @@ pub struct EndpointConfig {
     pub max_packet_size: u16,
     /// Polling interval for interrupt/isochronous (ignored for bulk).
     pub interval: u8,
+    /// Endpoints with the same `interface_group` share a USB interface
+    /// descriptor. Group 0 = host-driven channel, group 1 = fob-driven, etc.
+    pub interface_group: u8,
 }
 
 /// Opaque handle returned by `UsbBus::take_endpoint_handle`.
@@ -866,6 +887,9 @@ pub struct EndpointConfig {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(transparent)]
 pub struct EndpointHandle(pub u32);

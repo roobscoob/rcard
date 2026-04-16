@@ -12,6 +12,9 @@ pub use rcard_log::LogLevel;
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum LogError {
@@ -67,7 +70,8 @@ macro_rules! panic_handler {
                     let mut writer = rcard_log::LogWriter::new(rcard_log::LogLevel::Panic, 0);
                     let mut f = rcard_log::formatter::Formatter::new(&mut writer);
                     rcard_log::formatter::Format::format(&msg, &mut f);
-                    f.write_end_of_stream();
+                    // LogWriter's drop closes the stream; the log server
+                    // appends TAG_END_OF_STREAM on the wire.
                 }
             }
 

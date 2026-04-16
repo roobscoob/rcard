@@ -144,6 +144,23 @@ pub trait Device: Send + Sync {
 
     /// List connected adapters.
     fn adapters(&self) -> Vec<(AdapterId, &dyn Adapter)>;
+
+    /// Attach an adapter after the device has been created. Registers
+    /// its capabilities and emits `AdapterConnected`. Default impl is a
+    /// no-op for device kinds that don't support dynamic attachment
+    /// (e.g. emulators with a fixed adapter set).
+    fn attach_adapter(&mut self, _adapter: Box<dyn Adapter>) {}
+
+    /// Detach an adapter by id. Removes its capabilities and emits
+    /// `AdapterDisconnected`. Default impl is a no-op.
+    fn detach_adapter(&mut self, _id: AdapterId) {}
+
+    /// Hand out a `LogSink` bound to this device's broadcast channel,
+    /// tagged with the given `AdapterId`. Returns `None` if the device
+    /// doesn't expose a sink (e.g. emulator-internal devices).
+    fn log_sink(&self, _adapter: AdapterId) -> Option<LogSink> {
+        None
+    }
 }
 
 /// Extension trait for ergonomic typed capability queries.

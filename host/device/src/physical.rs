@@ -44,11 +44,17 @@ impl PhysicalDevice {
 
     /// Attach an adapter. Registers its capabilities and emits AdapterConnected.
     pub fn attach(&mut self, adapter: impl Adapter) {
+        self.attach_boxed(Box::new(adapter));
+    }
+
+    /// Boxed variant — used when attaching through the `Device` trait
+    /// object where the concrete adapter type has been erased.
+    pub fn attach_boxed(&mut self, adapter: Box<dyn Adapter>) {
         let id = adapter.id();
         for (type_id, value) in adapter.capabilities() {
             self.capabilities.register_raw(id, type_id, value);
         }
-        self.adapters.insert(id, Box::new(adapter));
+        self.adapters.insert(id, adapter);
         let _ = self.events_tx.send(DeviceEvent::AdapterConnected(id));
     }
 
@@ -63,6 +69,18 @@ impl PhysicalDevice {
 impl Device for PhysicalDevice {
     fn subscribe(&self) -> broadcast::Receiver<DeviceEvent> {
         self.events_tx.subscribe()
+    }
+
+    fn attach_adapter(&mut self, adapter: Box<dyn Adapter>) {
+        self.attach_boxed(adapter);
+    }
+
+    fn detach_adapter(&mut self, id: AdapterId) {
+        self.detach(id);
+    }
+
+    fn log_sink(&self, adapter: AdapterId) -> Option<LogSink> {
+        Some(PhysicalDevice::log_sink(self, adapter))
     }
 
     fn query_capability(&self, type_id: TypeId) -> Option<Arc<dyn Any + Send + Sync>> {

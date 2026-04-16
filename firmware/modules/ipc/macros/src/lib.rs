@@ -10,6 +10,7 @@ mod client;
 mod lease;
 mod metadata_json;
 mod parse;
+mod schema_export;
 mod section;
 mod server;
 mod server_macro;
@@ -20,7 +21,7 @@ mod wire_format;
 use client::{gen_client, gen_dyn_client};
 use parse::{InterfaceAttr, MethodKind, ResourceAttr, parse_methods};
 use server::{gen_constants, gen_dispatcher, gen_operation_enum, gen_server_trait, gen_wiring_macro};
-use util::to_screaming_snake_case;
+use util::{cfg_gate_firmware_only, to_screaming_snake_case};
 
 // ===========================================================================
 // #[ipc::resource(...)]
@@ -70,15 +71,37 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let meta_json = metadata_json::resource_record(trait_name, &methods, &attrs, false);
     let meta_section = section::emit(&trait_name.to_string(), &meta_json);
+    let schema_export = schema_export::gen_schema_export(trait_name, &methods, &attrs);
 
-    let output = quote! {
+    // The server trait, op enum, and constants are pure type-level
+    // content that compiles on any target. The dispatcher, client, and
+    // wiring macro reference kernel-only types (sys_send, StaticTaskId,
+    // Meta with TaskId, ACCESS_VIOLATION, etc.) and are firmware-only.
+    //
+    // Each firmware-only chunk is emitted with an individual
+    // `#[cfg(target_os = "none")]` attribute so host builds elide them
+    // cleanly while keeping the items at module scope when present.
+    // The op enum and constants are pure type-level content that
+    // compiles on any target — the host needs them for method-ID lookup.
+    //
+    // The server trait, dispatcher, client, and wiring macro reference
+    // kernel-only types (Meta, dispatch::LeaseBorrow, sys_send,
+    // StaticTaskId, ACCESS_VIOLATION, etc.) and are firmware-only.
+    // Each individual item gets its own `#[cfg(target_os = "none")]`
+    // via cfg_gate_firmware_only.
+    let firmware_only = cfg_gate_firmware_only(quote! {
         #server_trait
-        #op_enum
         #dispatcher
         #client
-        #constants
         #wiring_macro
+    });
+
+    let output = quote! {
+        #op_enum
+        #constants
         #meta_section
+        #schema_export
+        #firmware_only
     };
 
     output.into()

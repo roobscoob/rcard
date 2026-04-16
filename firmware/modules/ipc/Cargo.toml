@@ -9,13 +9,37 @@ bench = false
 
 [features]
 dangerously_enable_uart3_debugging = []
+# Enable alloc-requiring schema serialization (OwnedNamedType).
+# The schema-dump tool and host/ipc-runtime enable this; firmware
+# builds leave it off.
+host = ["postcard-schema/alloc", "postcard-schema/use-std"]
+# Route panics from ipc runtime bodies (e.g. `call_send` rc-checks)
+# through bare `core::panic!` instead of `rcard_log::panic!`. Needed
+# by tasks that can't recurse through rcard_log (log itself, early
+# boot). Task-level `bare-panics` only affects macro-generated call
+# sites; this flag covers panics that live inside the ipc rlib.
+bare-panics = []
 
 [dependencies]
-userlib.workspace = true
 zerocopy = { version = "0.8.40", features = ["derive"] }
 ipc-macros = { path = "macros" }
+postcard = { version = "1.1", default-features = false }
+postcard-schema = { version = "0.2", default-features = false, features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+
+# Firmware-only deps — kernel syscalls and build-time task list. Host
+# targets (used by the schema-dump tool and host/ipc-runtime) don't
+# link these; the corresponding ipc-crate modules are cfg-gated.
+[target.'cfg(target_os = "none")'.dependencies]
+userlib.workspace = true
 generated = { path = "../generated" }
-rcard-log = { path = "../../../shared/log", features = ["userlib"] }
+rcard-log = { path = "../../../shared/log", features = ["userlib", "writer"] }
+
+# Host-only: plain rcard-log without the userlib feature, so the panic
+# macro still resolves on host builds. The `__rcard_log` re-export
+# points at this when compiling for a non-firmware target.
+[target.'cfg(not(target_os = "none"))'.dependencies]
+rcard-log = { path = "../../../shared/log" }
 
 [lints]
 workspace = true

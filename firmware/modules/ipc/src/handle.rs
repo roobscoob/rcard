@@ -10,6 +10,9 @@
     zerocopy::FromBytes,
     zerocopy::Immutable,
     zerocopy::KnownLayout,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(transparent)]
 pub struct RawHandle(pub u64);
@@ -53,6 +56,11 @@ pub const TRY_DROP_METHOD: u8 = 0xF9;
 pub const NOTIFY_DEAD_METHOD: u8 = 0xF8;
 
 /// Metadata about the incoming message, passed to handler methods.
+///
+/// Firmware-only: `Meta` carries a kernel `TaskId` and is produced by
+/// the server dispatcher. Host builds elide it since they never
+/// run a dispatcher.
+#[cfg(target_os = "none")]
 #[derive(Copy, Clone, Debug)]
 pub struct Meta {
     pub sender: crate::kern::TaskId,

@@ -369,7 +369,10 @@ version = "0.1.0"
 dependencies = [
  "generated",
  "ipc-macros",
+ "postcard",
+ "postcard-schema",
  "rcard-log",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -576,6 +579,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
+name = "postcard"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6764c3b5dd454e283a30e6dfe78e9b31096d9e32036b5d1eaac7a6119ccb9a24"
+dependencies = [
+ "cobs",
+ "serde",
+]
+
+[[package]]
+name = "postcard-derive"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0232bd009a197ceec9cc881ba46f727fcd8060a2d8d6a9dde7a69030a6fe2bb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "postcard-schema"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9475666d89f42231a0a57da32d5f6ca7f9b5cd4c335ea1fe8f3278215b7a21ff"
+dependencies = [
+ "postcard-derive",
+ "serde",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -631,7 +665,9 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 name = "rcard-log"
 version = "0.1.0"
 dependencies = [
+ "postcard-schema",
  "rcard-log-macros",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -856,13 +892,8 @@ version = "0.1.0"
 dependencies = [
  "generated",
  "ipc",
- "once-cell",
  "rcard-log",
- "rcard-log-macros",
- "sysmodule_device_info_api",
  "sysmodule_log_api",
- "sysmodule_reactor_api",
- "sysmodule_usb_api",
  "userlib",
 ]
 
@@ -982,8 +1013,10 @@ name = "sysmodule_efuse_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
  "rcard-log-macros",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1038,7 +1071,9 @@ name = "sysmodule_host_transport_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1067,8 +1102,10 @@ name = "sysmodule_log_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
  "rcard-log-macros",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1146,6 +1183,8 @@ name = "sysmodule_reactor_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1216,7 +1255,9 @@ name = "sysmodule_usart_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1243,8 +1284,10 @@ name = "sysmodule_usb_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
  "rcard-log-macros",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1270,7 +1313,9 @@ name = "sysmodule_usb_protocol_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
+ "serde",
  "sysmodule_usb_api",
  "userlib",
  "zerocopy",
@@ -1287,6 +1332,7 @@ dependencies = [
  "rcard-log-macros",
  "rcard-usb-proto",
  "sysmodule_log_api",
+ "sysmodule_reactor_api",
  "sysmodule_usb_api",
  "sysmodule_usb_protocol_api",
  "sysmodule_usb_protocol_fob_api",
@@ -1298,7 +1344,9 @@ name = "sysmodule_usb_protocol_fob_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
+ "serde",
  "userlib",
  "zerocopy",
 ]

@@ -16,6 +16,9 @@ pub const NOTIFICATION_BIT: u32 = 1 << 31;
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct Notification {
@@ -38,6 +41,9 @@ pub struct Notification {
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum OverflowStrategy {
@@ -57,6 +63,9 @@ pub enum OverflowStrategy {
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum ReactorError {

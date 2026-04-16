@@ -9,7 +9,7 @@ fun ctx => {
   ],
   regions = {
     code  = { place = ctx.places.image },
-    stack = { place = ctx.places.task_ram, size = lib.kiB 2 },
+    stack = { place = ctx.places.task_ram, size = lib.kiB 4 },
     data  = { place = ctx.places.task_ram },
   },
 }

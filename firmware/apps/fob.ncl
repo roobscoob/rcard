@@ -22,7 +22,6 @@ fun args =>
 
     boot = {
       ftab = args.places.sec_config,
-      loader = args.places.bootloader,
     },
 
     notifications = {

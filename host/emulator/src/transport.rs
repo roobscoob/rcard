@@ -145,6 +145,7 @@ fn bridge_logs(
                     log_id: stream.metadata.log_id,
                     log_species: stream.metadata.log_species,
                     values: stream.values,
+                    truncated: stream.truncated,
                 });
             }
         }

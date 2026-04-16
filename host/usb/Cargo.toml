@@ -5,8 +5,11 @@ edition = "2024"
 
 [dependencies]
 device = { path = "../device" }
+ipc-protocol = { path = "../ipc-protocol" }
 rcard-usb-proto = { path = "../../shared/usb-proto", features = ["std"] }
 rcard-log = { path = "../../shared/log", features = ["alloc"] }
-nusb = "0.1"
+nusb = { version = "0.2", features = ["tokio"] }
+futures-util = { version = "0.3", default-features = false }
 zerocopy = "0.8"
-tokio = { version = "1", features = ["sync", "rt", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+tokio-util = "0.7"

@@ -7,6 +7,46 @@
 
 use crate::kern;
 
+/// One-shot client IPC call. Consolidates `sys_send` + rc-checks + dead-gen
+/// update into a single concrete fn so the macros don't paste this stanza
+/// into every generated method body.
+///
+/// On `TaskDeath`, refreshes `server_id` with the kernel-supplied new
+/// generation and returns `Err(Error::ServerDied)` so the caller's normal
+/// `from_wire` mapping kicks in. On `ACCESS_VIOLATION` or any non-`SUCCESS`
+/// response code, panics via `__ipc_panic!` — these are programming errors
+/// (task ACL misconfigured, malformed opcode), not recoverable conditions.
+///
+/// Returns the number of bytes written into `retbuf` on success.
+pub fn call_send(
+    server_id: &'static crate::StaticTaskId,
+    target: kern::TaskId,
+    opcode: u16,
+    argbuf: &[u8],
+    retbuf: &mut [u8],
+    leases: &mut [kern::Lease<'_>],
+) -> Result<usize, crate::Error> {
+    let (rc, len) = kern::sys_send(target, opcode, argbuf, retbuf, leases).map_err(|dead| {
+        server_id.set(target.with_generation(dead.new_generation()));
+        crate::Error::ServerDied
+    })?;
+    if rc == crate::ACCESS_VIOLATION {
+        crate::__ipc_panic!(
+            "ipc: server {} rejected our message: access violation \
+             (this task is not authorized to use this server)",
+            target,
+        );
+    }
+    if rc != kern::ResponseCode::SUCCESS {
+        crate::__ipc_panic!(
+            "ipc: server {} sent unexpected non-SUCCESS response code: {}",
+            target,
+            rc.0
+        );
+    }
+    Ok(len)
+}
+
 /// Maximum number of leases per IPC call.
 const MAX_LEASES: usize = 4;
 
