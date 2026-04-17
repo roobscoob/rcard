@@ -9,6 +9,9 @@
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum MpiOpenError {
@@ -25,6 +28,9 @@ pub enum MpiOpenError {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum EraseError {
@@ -42,6 +48,9 @@ pub enum EraseError {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum LineMode {
@@ -67,6 +76,9 @@ pub enum LineMode {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum AddrSize {
@@ -90,6 +102,9 @@ pub enum AddrSize {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum ClockPolarity {
@@ -109,6 +124,9 @@ pub enum ClockPolarity {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct MpiConfig {
@@ -138,6 +156,9 @@ pub struct MpiConfig {
     zerocopy::KnownLayout,
     zerocopy::Immutable,
     rcard_log::Format,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct JedecId {

@@ -1,7 +1,13 @@
 #![no_std]
 
+// `ring` uses `storage_api::StorageDyn` and `Storage` is the `#[ipc::interface]`
+// trait — both are firmware-only. The schema dumper compiles this crate on the
+// host target just to read the schema-export const for `Partition`.
+#[cfg(target_os = "none")]
 pub mod ring;
-pub use storage_api::{Geometry, Storage, StorageError};
+pub use storage_api::{Geometry, StorageError};
+#[cfg(target_os = "none")]
+pub use storage_api::Storage;
 
 include!(concat!(env!("OUT_DIR"), "/partition_names.rs"));
 
@@ -14,6 +20,9 @@ include!(concat!(env!("OUT_DIR"), "/partition_names.rs"));
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum AcquireError {

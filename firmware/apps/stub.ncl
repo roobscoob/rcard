@@ -55,5 +55,8 @@ fun args =>
       args.tasks.sysmodule_usb_protocol,
       args.tasks.sysmodule_usb_protocol_host,
       args.tasks.sysmodule_usb_protocol_fob,
+      # We want to include the storage sysmodule in the stub firmware so 
+      # that we can flash the main firmware to the device over USB
+      args.tasks.sysmodule_storage,
     ],
   }

@@ -15,6 +15,9 @@
 //! feeding received frames into `resolve`.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -212,5 +215,89 @@ impl IpcProtocol {
         } else {
             false
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FrameSender + Ipc — unified capability for the host application
+// ---------------------------------------------------------------------------
+
+/// Per-transport "put these encoded frame bytes on the wire" hook.
+///
+/// Each adapter (USB bulk-OUT, USART2 COBS+TYPE_IPC_REQUEST, …) provides
+/// one of these. `Ipc` then composes it with `IpcProtocol` to produce a
+/// uniform `call(req)` API regardless of which wire is in use.
+///
+/// `bytes` is owned (`Vec<u8>`) because the common transports want to take
+/// ownership: nusb's bulk submission keeps the buffer alive across the
+/// transfer, and the serial path COBS-wraps into a fresh allocation.
+pub trait FrameSender: Send + Sync + 'static {
+    fn send_frame<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+/// Unified IPC capability registered by every transport adapter. Consumers
+/// look it up with `device.get::<Ipc>()` instead of branching on which
+/// wire the device is currently reachable over.
+///
+/// When more than one transport is registered for the same device (e.g.
+/// USB *and* USART2 both attached), the highest `priority()` wins — see
+/// [`Ipc::pick`].
+pub struct Ipc {
+    label: &'static str,
+    priority: u8,
+    protocol: Arc<IpcProtocol>,
+    sender: Arc<dyn FrameSender>,
+}
+
+impl Ipc {
+    /// `label` is a short tag for log lines (`"usb"`, `"usart2"`).
+    /// `priority` selects the preferred transport when multiple are
+    /// available — higher wins. `protocol` must be the same `IpcProtocol`
+    /// instance the transport's reader task calls `resolve()` on.
+    pub fn new(
+        label: &'static str,
+        priority: u8,
+        protocol: Arc<IpcProtocol>,
+        sender: Arc<dyn FrameSender>,
+    ) -> Self {
+        Self {
+            label,
+            priority,
+            protocol,
+            sender,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.label
+    }
+
+    pub fn priority(&self) -> u8 {
+        self.priority
+    }
+
+    /// The shared protocol handle. Adapters keep a clone of this and pass
+    /// it into their reader task so reply frames can be matched back to
+    /// pending callers via `protocol.resolve()`.
+    pub fn protocol(&self) -> &Arc<IpcProtocol> {
+        &self.protocol
+    }
+
+    /// Send a request and await the reply.
+    pub async fn call(&self, req: &IpcRequest<'_>) -> Result<IpcCallResult, IpcError> {
+        let sender = Arc::clone(&self.sender);
+        self.protocol
+            .call(req, move |bytes| async move {
+                sender.send_frame(bytes).await
+            })
+            .await
+    }
+
+    /// Mark the underlying transport dead — see `IpcProtocol::poison`.
+    pub async fn poison(&self) {
+        self.protocol.poison().await;
     }
 }

@@ -12,6 +12,8 @@ ipc = { path = "../../../modules/ipc" }
 rcard-log = { path = "../../../../shared/log" }
 zerocopy = "0.8"
 storage_api = { path = "../../../modules/storage_api" }
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard-schema = { version = "0.2", default-features = false, features = ["derive"] }
 
 [target.'cfg(target_os = "none")'.dependencies]
 userlib.workspace = true

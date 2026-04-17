@@ -130,75 +130,90 @@ fn dispatch_tunneled_request(
     buf: &mut [u8; MAX_FRAME],
     fetch_len: usize,
 ) -> DispatchOutcome {
-    // ── 1. Parse ───────────────────────────────────────────────────────
-    let mut reader = rcard_usb_proto::FrameReader::<{ MAX_FRAME }>::new();
-    reader.push(&buf[..fetch_len]);
-
-    let view_seq = match reader.next_frame() {
-        Ok(Some(frame)) => {
-            if frame.as_ipc_request().is_none() {
-                warn!("host_proxy: non-IpcRequest frame");
-                return DispatchOutcome::Skip;
-            }
-            frame.header.seq
-        }
-        _ => {
-            warn!("host_proxy: frame reader failed");
-            return DispatchOutcome::Skip;
-        }
-    };
-
-    let Ok(Some(frame)) = reader.next_frame() else {
+    // ── 1. Parse directly from `buf`. ──────────────────────────────────
+    //
+    // The frame is already fully assembled by usb_protocol_host before
+    // being handed to us, so we don't need a FrameReader (which would
+    // copy bytes into its own buffer and leave `view.lease_data(i)`
+    // pointing outside `buf`, breaking the offset math in the compact
+    // pass below).
+    let Ok(header) = rcard_usb_proto::FrameHeader::decode(&buf[..fetch_len]) else {
+        warn!("host_proxy: bad frame header");
         return DispatchOutcome::Skip;
     };
-    let Some(view) = frame.as_ipc_request() else {
+    let frame_total = header.frame_size();
+    if frame_total > fetch_len {
+        warn!("host_proxy: truncated frame");
         return DispatchOutcome::Skip;
-    };
-    let request_seq = view_seq;
-
-    let target = ipc::kern::TaskId::from(view.task_id);
-    let opcode = ipc::opcode(view.resource_kind, view.method);
-    let lease_count = view.lease_count().min(MAX_LEASES);
+    }
+    let request_seq = header.seq;
 
     // ── 2. Copy args to stack, record lease layout ─────────────────────
+    //
+    // The view borrows `buf` immutably. We pull everything we need out
+    // into owned locals inside an inner scope so the borrow ends before
+    // the compact pass below re-borrows `buf` mutably. Bad-lease errors
+    // are recorded as a flag and encoded after the scope ends, for the
+    // same reason.
     let mut args = [0u8; MAX_MESSAGE];
-    let args_data = view.args();
-    let args_len = args_data.len().min(MAX_MESSAGE);
-    args[..args_len].copy_from_slice(&args_data[..args_len]);
-
     let mut slots: [LeaseSlot; MAX_LEASES] = [
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
     ];
-
-    // Record where each lease's data lives in the original frame, then
-    // compact all lease payloads into buf[0..pool_end]. Source offsets
-    // are always ahead of the destination cursor (frame header + args +
-    // descriptors precede lease data), so the forward copy is safe.
     let mut src_offsets: [(usize, usize); MAX_LEASES] = [(0, 0); MAX_LEASES];
-    for i in 0..lease_count {
-        let Some(desc) = view.lease(i) else {
-            let n = encode_tunnel_error(
-                request_seq,
-                rcard_usb_proto::messages::TunnelErrorCode::LeasePoolFull,
-                buf,
-            );
-            return DispatchOutcome::Error { len: n };
-        };
-        let len = desc.length as usize;
-        if desc.kind.has_request_data() {
-            if let Some(data) = view.lease_data(i) {
-                let frame_offset = data.as_ptr() as usize - buf.as_ptr() as usize;
-                src_offsets[i] = (frame_offset, data.len());
-            }
-        }
-        slots[i] = LeaseSlot { kind: desc.kind, offset: 0, length: len };
-    }
 
-    // Done reading from FrameReader / view — buf is now free for reuse.
-    drop(reader);
+    let (target, opcode, lease_count, args_len, bad_lease) = {
+        let frame = rcard_usb_proto::RawFrame {
+            header,
+            payload: &buf[rcard_usb_proto::HEADER_SIZE..frame_total],
+        };
+        let Some(view) = frame.as_ipc_request() else {
+            warn!("host_proxy: non-IpcRequest frame");
+            return DispatchOutcome::Skip;
+        };
+
+        let target = ipc::kern::TaskId::from(view.task_id);
+        let opcode = ipc::opcode(view.resource_kind, view.method);
+        let lease_count = view.lease_count().min(MAX_LEASES);
+
+        let args_data = view.args();
+        let args_len = args_data.len().min(MAX_MESSAGE);
+        args[..args_len].copy_from_slice(&args_data[..args_len]);
+
+        // Record where each lease's data lives in the original frame, so
+        // the compact pass can copy it forward into buf[0..pool_end].
+        // Source offsets are always ahead of the destination cursor
+        // (frame header + args + descriptors precede lease data), so the
+        // forward copy is safe.
+        let mut bad_lease = false;
+        for i in 0..lease_count {
+            let Some(desc) = view.lease(i) else {
+                bad_lease = true;
+                break;
+            };
+            let len = desc.length as usize;
+            if desc.kind.has_request_data() {
+                if let Some(data) = view.lease_data(i) {
+                    let frame_offset = data.as_ptr() as usize - buf.as_ptr() as usize;
+                    src_offsets[i] = (frame_offset, data.len());
+                }
+            }
+            slots[i] = LeaseSlot { kind: desc.kind, offset: 0, length: len };
+        }
+
+        (target, opcode, lease_count, args_len, bad_lease)
+    };
+
+    if bad_lease {
+        let n = encode_tunnel_error(
+            request_seq,
+            rcard_usb_proto::messages::TunnelErrorCode::LeasePoolFull,
+            buf,
+        );
+        return DispatchOutcome::Error { len: n };
+    }
 
     // Compact lease data into buf[0..pool_end].
     let mut pool_end = 0usize;

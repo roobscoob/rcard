@@ -8,6 +8,9 @@
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum StorageErrorKind {
@@ -24,6 +27,9 @@ pub enum StorageErrorKind {
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct StorageError {
@@ -61,6 +67,9 @@ impl StorageError {
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct Geometry {

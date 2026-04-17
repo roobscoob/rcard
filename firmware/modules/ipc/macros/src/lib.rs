@@ -135,12 +135,21 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let meta_json = metadata_json::resource_record(trait_name, &methods, &attrs, true);
     let meta_section = section::emit(&trait_name.to_string(), &meta_json);
+    let schema_export = schema_export::gen_schema_export(trait_name, &methods, &attrs);
+
+    // server_trait references `Meta` (firmware-only) and client uses
+    // dispatch/call_send (firmware-only). Gate both per-item so host
+    // builds (schema-dump, host/ipc-runtime) elide them cleanly.
+    let firmware_only = cfg_gate_firmware_only(quote! {
+        #server_trait
+        #client
+    });
 
     let output = quote! {
-        #server_trait
         #op_enum
-        #client
         #meta_section
+        #schema_export
+        #firmware_only
     };
 
     output.into()

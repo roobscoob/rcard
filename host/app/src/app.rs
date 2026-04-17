@@ -399,12 +399,15 @@ impl eframe::App for RcardApp {
 
                                     if let Some(_) = selected_device {
                                         tui.ui(|ui| match method {
-                                            Some(FlashMethod::Usb) => {
+                                            Some(FlashMethod::Ipc { transport }) => {
                                                 ui.horizontal(|ui| {
                                                     ui.colored_label(theme::INFO, icon::USB);
                                                     ui.colored_label(
                                                         theme::INFO,
-                                                        "USB (via existing firmware)",
+                                                        format!(
+                                                            "{} (via existing firmware IPC)",
+                                                            transport.to_uppercase(),
+                                                        ),
                                                     );
                                                 });
                                             }
@@ -445,6 +448,26 @@ impl eframe::App for RcardApp {
                                         .add_empty();
 
                                         if let Some(device_id) = selected_device {
+                                            // Temporary: manual MoshiMoshi probe trigger.
+                                            // Bypasses the auto-fire-on-connect behavior
+                                            // so we can re-fire without restarting the app.
+                                            tui.ui(|ui| {
+                                                let moshi_btn = egui::Button::new("MoshiMoshi");
+                                                if ui
+                                                    .add_enabled(
+                                                        matches!(method, Some(FlashMethod::Ipc { .. })),
+                                                        moshi_btn,
+                                                    )
+                                                    .on_hover_text(
+                                                        "Fire a MoshiMoshi probe on USART2 \
+                                                         (manual re-trigger for the USART1 hello)."
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.state.send_moshi_moshi(device_id);
+                                                }
+                                            });
+
                                             tui.ui(|ui| {
                                                 let flash_btn = egui::Button::new(
                                                     egui::RichText::new(format!(
@@ -591,6 +614,24 @@ impl eframe::App for RcardApp {
                                             ..Default::default()
                                         })
                                         .add_empty();
+
+                                        // Temporary: MoshiMoshi re-trigger button.
+                                        // Most useful while the flash is mid-flight
+                                        // (waiting for USB reattach after stub boot) —
+                                        // lets us probe without cancelling the flow.
+                                        tui.ui(|ui| {
+                                            if ui
+                                                .button("MoshiMoshi")
+                                                .on_hover_text(
+                                                    "Fire a MoshiMoshi probe on USART2 \
+                                                     (manual re-trigger for the USART1 hello)."
+                                                )
+                                                .clicked()
+                                            {
+                                                self.state.send_moshi_moshi(device_id);
+                                            }
+                                        });
+
                                         let label =
                                             if phase_terminal { "Close" } else { "Cancel" };
                                         if tui.ui_add(egui::Button::new(label)).clicked() {

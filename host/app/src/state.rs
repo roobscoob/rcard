@@ -125,11 +125,16 @@ impl FirmwareHandle {
 /// Known capabilities that the GUI tracks for display and decision-making.
 /// These mirror what the real capability system provides, but are just
 /// presence flags — the actual capability objects live on the bridge.
+///
+/// `Ipc` is the abstract "IPC tunnel reachable" signal regardless of wire.
+/// The specific wire (USB / USART2 / future BLE) is recorded separately on
+/// each `AdapterHandle::ipc_transport` so callers can both decide on
+/// presence (`has_capability(Ipc)`) and display the actual transport
+/// (`flash_method_for_device` walks the contributing adapters).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KnownCapability {
     SifliDebug,
     Ipc,
-    UsbIpc,
 }
 
 // ── Device ──────────────────────────────────────────────────────────────
@@ -162,8 +167,12 @@ pub struct DeviceHandle {
     pub phase: DevicePhase,
     /// Chip UID if identified via SifliDebug.
     pub uid: Option<ChipUid>,
-    /// Known capabilities on this device.
-    pub capabilities: HashSet<KnownCapability>,
+    /// Known capabilities on this device, indexed by the adapter that
+    /// contributed them. Per-adapter so they revoke automatically when the
+    /// adapter goes away — `AdapterRemoved` just drops the entry, no
+    /// recompute needed. Use [`DeviceHandle::has_capability`] to check
+    /// presence across all adapters.
+    pub capabilities: HashMap<AdapterId, HashSet<KnownCapability>>,
     /// Adapter IDs associated with this device.
     pub adapter_ids: Vec<AdapterId>,
     /// The firmware this device is running, if known.
@@ -184,7 +193,6 @@ impl DeviceHandle {
         id: DeviceId,
         name: String,
         kind: DeviceKind,
-        adapter_ids: Vec<AdapterId>,
         firmware_id: Option<FirmwareId>,
     ) -> Self {
         DeviceHandle {
@@ -193,12 +201,18 @@ impl DeviceHandle {
             kind,
             phase: DevicePhase::Unknown,
             uid: None,
-            capabilities: HashSet::new(),
-            adapter_ids,
+            capabilities: HashMap::new(),
+            adapter_ids: Vec::new(),
             firmware_id,
             log_buffer: Vec::new(),
             ipc_registry: None,
         }
+    }
+
+    /// True if any currently-attached adapter on this device provides
+    /// the given capability.
+    pub fn has_capability(&self, cap: KnownCapability) -> bool {
+        self.capabilities.values().any(|set| set.contains(&cap))
     }
 
     pub fn push_log(&mut self, log: Log) {
@@ -222,11 +236,24 @@ impl DeviceHandle {
 pub struct AdapterHandle {
     pub id: AdapterId,
     pub display_name: String,
+    /// If this adapter contributes `KnownCapability::Ipc`, the transport
+    /// label (e.g. `"usb"`, `"usart2"`) and its priority — same priority
+    /// the bridge's `crate::ipc::pick` uses when multiple Ipc adapters
+    /// are attached. `None` for non-IPC adapters (SifliDebug, USART1).
+    pub ipc_transport: Option<(&'static str, u8)>,
 }
 
 impl AdapterHandle {
-    pub fn new(id: AdapterId, display_name: String) -> Self {
-        AdapterHandle { id, display_name }
+    pub fn new(
+        id: AdapterId,
+        display_name: String,
+        ipc_transport: Option<(&'static str, u8)>,
+    ) -> Self {
+        AdapterHandle {
+            id,
+            display_name,
+            ipc_transport,
+        }
     }
 }
 
@@ -279,8 +306,12 @@ pub struct FileDragState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlashMethod {
-    /// Device has USB — flash stub via existing firmware's USB, then flash target via stub.
-    Usb,
+    /// Device has an IPC tunnel — flash stub via the existing firmware's
+    /// IPC, then flash target via stub. `transport` is the wire the IPC
+    /// will actually use (`"usb"`, `"usart2"`, …) — the picker resolves
+    /// the same way the bridge's `crate::ipc::pick` does, so the label is
+    /// truthful, not just a guess.
+    Ipc { transport: &'static str },
     /// Device has USART1 only — flash stub via SifliDebug, then flash target via stub USB.
     SifliDebug,
 }
@@ -535,6 +566,28 @@ impl AppState {
         }
     }
 
+    /// Clean up devices that lost all adapters: delete ephemeral/emulator
+    /// devices, reset persistent devices to phase Unknown.
+    fn cleanup_orphaned_devices(&mut self) {
+        let to_remove: Vec<DeviceId> = self
+            .devices
+            .iter()
+            .filter(|(_, dev)| {
+                matches!(dev.kind, DeviceKind::Ephemeral | DeviceKind::Emulator)
+                    && dev.adapter_ids.is_empty()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for device_id in to_remove {
+            self.remove_device(device_id);
+        }
+        for dev in self.devices.values_mut() {
+            if dev.kind == DeviceKind::Persistent && dev.adapter_ids.is_empty() {
+                dev.phase = DevicePhase::Unknown;
+            }
+        }
+    }
+
     /// Disconnect a device (clear adapters, reset phase) without removing it.
     fn disconnect_device(&mut self, device_id: DeviceId) {
         if let Some(dev) = self.devices.get_mut(&device_id) {
@@ -552,13 +605,26 @@ impl AppState {
     }
 
     /// Determine the flash method for a device based on its capabilities.
+    ///
+    /// For `FlashMethod::Ipc`, walks every adapter that contributes the
+    /// `Ipc` capability on this device and picks the highest-priority
+    /// `ipc_transport` — same ranking the bridge applies in
+    /// `crate::ipc::pick`, so the displayed transport matches the wire
+    /// that an actual IPC call would land on.
     pub fn flash_method_for_device(&self, device_id: DeviceId) -> Option<FlashMethod> {
         let dev = self.devices.get(&device_id)?;
-        if dev.capabilities.contains(&KnownCapability::UsbIpc)
-            || dev.capabilities.contains(&KnownCapability::Ipc)
-        {
-            Some(FlashMethod::Usb)
-        } else if dev.capabilities.contains(&KnownCapability::SifliDebug) {
+        if dev.has_capability(KnownCapability::Ipc) {
+            let transport = dev
+                .capabilities
+                .iter()
+                .filter(|(_, set)| set.contains(&KnownCapability::Ipc))
+                .filter_map(|(adapter_id, _)| self.adapters.get(adapter_id))
+                .filter_map(|a| a.ipc_transport)
+                .max_by_key(|(_, prio)| *prio)
+                .map(|(label, _)| label)
+                .unwrap_or("?");
+            Some(FlashMethod::Ipc { transport })
+        } else if dev.has_capability(KnownCapability::SifliDebug) {
             Some(FlashMethod::SifliDebug)
         } else {
             None
@@ -799,86 +865,68 @@ impl AppState {
                 crate::bridge::Event::AdapterCreated {
                     adapter_id,
                     display_name,
+                    ipc_transport,
                 } => {
                     self.adapters.insert(
                         adapter_id,
-                        AdapterHandle::new(adapter_id, display_name),
+                        AdapterHandle::new(adapter_id, display_name, ipc_transport),
                     );
                 }
                 crate::bridge::Event::AdapterRemoved { adapter_id } => {
                     self.adapters.remove(&adapter_id);
-                    // Remove this adapter from any devices that reference it.
+                    // Defensive: strip this adapter from any devices that
+                    // still reference it (covers abrupt port loss where
+                    // AdapterUnbound didn't fire first).
                     for dev in self.devices.values_mut() {
                         dev.adapter_ids.retain(|id| *id != adapter_id);
+                        dev.capabilities.remove(&adapter_id);
                     }
-                    // Cleanup: delete ephemeral and emulator devices with no adapters.
-                    // Only persistent devices survive disconnection.
-                    let to_remove: Vec<DeviceId> = self
-                        .devices
-                        .iter()
-                        .filter(|(_, dev)| {
-                            matches!(dev.kind, DeviceKind::Ephemeral | DeviceKind::Emulator)
-                                && dev.adapter_ids.is_empty()
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
-                    for device_id in to_remove {
-                        self.remove_device(device_id);
-                    }
-                    // Persistent devices with no adapters → disconnected.
-                    for dev in self.devices.values_mut() {
-                        if dev.kind == DeviceKind::Persistent && dev.adapter_ids.is_empty() {
-                            dev.phase = DevicePhase::Unknown;
-                        }
-                    }
+                    self.cleanup_orphaned_devices();
                 }
                 crate::bridge::Event::DeviceCreated {
                     device_id,
                     name,
                     kind,
-                    adapter_ids,
-                    capabilities,
                     firmware_id,
                 } => {
-                    // Idempotent: two adapters on the same chip (e.g. USART1
-                    // and USART2) both fire `DeviceCreated` for the same
-                    // persistent `DeviceId` resolved through the shared
-                    // `persistent_devices` registry. Treat the second call
-                    // as "attach this adapter + merge capabilities" rather
-                    // than replacing the whole handle — otherwise the
-                    // existing `log_buffer` and peer adapter bindings get
-                    // wiped.
-                    let is_emulator;
-                    if let Some(existing) = self.devices.get_mut(&device_id) {
-                        is_emulator = existing.kind == DeviceKind::Emulator;
-                        for id in adapter_ids {
-                            if !existing.adapter_ids.contains(&id) {
-                                existing.adapter_ids.push(id);
-                            }
-                        }
-                        existing.capabilities.extend(capabilities);
-                        // Upgrade ephemeral → persistent if the new binding
-                        // carries a stronger kind. Persistent > Ephemeral;
-                        // don't downgrade.
-                        if existing.kind == DeviceKind::Ephemeral
-                            && kind == DeviceKind::Persistent
-                        {
-                            existing.kind = DeviceKind::Persistent;
-                            existing.name = name;
-                        }
-                        if existing.firmware_id.is_none() {
-                            existing.firmware_id = firmware_id;
-                        }
-                    } else {
-                        let mut dev = DeviceHandle::new(
-                            device_id, name, kind, adapter_ids, firmware_id,
+                    // Idempotent: if the device already exists (e.g. a
+                    // second adapter resolved the same chip UID), this is
+                    // a no-op. Adapter bindings arrive via AdapterBound.
+                    if !self.devices.contains_key(&device_id) {
+                        let dev = DeviceHandle::new(
+                            device_id,
+                            name,
+                            kind,
+                            firmware_id,
                         );
-                        dev.capabilities = capabilities.into_iter().collect();
-                        is_emulator = dev.kind == DeviceKind::Emulator;
+                        let is_emulator = dev.kind == DeviceKind::Emulator;
                         self.devices.insert(device_id, dev);
+                        // Auto-open emulator devices on creation.
+                        if is_emulator {
+                            self.open_device(device_id);
+                        }
                     }
-
-                    // Update serial config if this came from a serial connection.
+                }
+                crate::bridge::Event::DeviceDeleted { device_id } => {
+                    self.remove_device(device_id);
+                }
+                crate::bridge::Event::AdapterBound {
+                    adapter_id,
+                    device_id,
+                    capabilities,
+                } => {
+                    if let Some(dev) = self.devices.get_mut(&device_id) {
+                        if !dev.adapter_ids.contains(&adapter_id) {
+                            dev.adapter_ids.push(adapter_id);
+                        }
+                        let cap_set: HashSet<KnownCapability> =
+                            capabilities.into_iter().collect();
+                        dev.capabilities
+                            .entry(adapter_id)
+                            .or_default()
+                            .extend(cap_set);
+                    }
+                    // Link serial config to the device if applicable.
                     for cfg in &mut self.serial_ports {
                         if cfg.device_id.is_none()
                             && cfg.status == SerialPortStatus::DeviceDetected
@@ -887,13 +935,22 @@ impl AppState {
                             break;
                         }
                     }
-                    // Auto-open emulator devices on creation.
-                    if is_emulator {
-                        self.open_device(device_id);
-                    }
                 }
-                crate::bridge::Event::DeviceDeleted { device_id } => {
-                    self.remove_device(device_id);
+                crate::bridge::Event::AdapterUnbound {
+                    adapter_id,
+                    device_id,
+                } => {
+                    if let Some(dev) = self.devices.get_mut(&device_id) {
+                        dev.adapter_ids.retain(|id| *id != adapter_id);
+                        dev.capabilities.remove(&adapter_id);
+                    }
+                    // Clear serial config if it pointed at the unbound device.
+                    for cfg in &mut self.serial_ports {
+                        if cfg.device_id == Some(device_id) {
+                            cfg.device_id = None;
+                        }
+                    }
+                    self.cleanup_orphaned_devices();
                 }
                 crate::bridge::Event::Log { device, log } => {
                     if let Some(dev) = self.devices.get_mut(&device) {
@@ -1165,7 +1222,7 @@ impl AppState {
         method: &str,
         args: ipc_runtime::IpcValue,
     ) -> Result<
-        tokio::sync::oneshot::Receiver<Result<usb::IpcCallResult, String>>,
+        tokio::sync::oneshot::Receiver<Result<crate::ipc::IpcCallResult, String>>,
         String,
     > {
         let dev = self
@@ -1188,6 +1245,16 @@ impl AppState {
             reply: tx,
         });
         Ok(rx)
+    }
+
+    /// Fire a one-shot MoshiMoshi probe on the device's USART2. Used as a
+    /// manual diagnostic to re-trigger the USART1 hello without restarting
+    /// the app. No-op if the bridge can't find the device or its
+    /// `SerialSender` capability — errors surface in bridge stderr.
+    pub fn send_moshi_moshi(&self, device_id: DeviceId) {
+        let _ = self
+            .cmd_tx
+            .send(crate::bridge::Command::SendMoshiMoshi { device_id });
     }
 
     pub fn unregister_serial(&mut self, index: usize) {

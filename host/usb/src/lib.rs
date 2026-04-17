@@ -13,8 +13,13 @@ use nusb::transfer::{Bulk, In, Out};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub use ipc::{Ipc, IpcCallResult, IpcError};
+pub use ipc::{IpcCallResult, IpcError, IpcProtocol, UsbSender};
 pub use hotplug::{FobEvent, watch_fobs};
+
+/// Priority of the USB transport relative to other `ipc_protocol::Ipc`
+/// providers — higher wins. USB is preferred over USART2 because it's
+/// faster and less likely to drop bytes under load.
+pub const USB_IPC_PRIORITY: u8 = 10;
 
 /// USB VID/PID for rcard fobs.
 pub const USB_VID: u16 = 0x16D0;
@@ -36,12 +41,12 @@ const IN_PIPELINE_DEPTH: usize = 2;
 
 /// USB adapter — connects to a fob over USB.
 ///
-/// Provides the `Ipc` capability on the host-driven channel, and pushes
-/// fob-driven events (logs, etc.) into the device's LogSink.
+/// Provides the `ipc_protocol::Ipc` capability on the host-driven channel,
+/// and pushes fob-driven events (logs, etc.) into the device's LogSink.
 pub struct Usb {
     id: AdapterId,
     serial: String,
-    ipc: Arc<Ipc>,
+    ipc: Arc<ipc_protocol::Ipc>,
     cancel: CancellationToken,
     host_task: Option<JoinHandle<()>>,
     fob_task: Option<JoinHandle<()>>,
@@ -97,13 +102,20 @@ impl Usb {
             .endpoint(fob_in_addr)
             .map_err(ConnectError::Claim)?;
 
-        let ipc = Arc::new(Ipc::new(host_out));
+        let protocol = Arc::new(IpcProtocol::new());
+        let sender: Arc<dyn ipc_protocol::FrameSender> = Arc::new(UsbSender::new(host_out));
+        let ipc = Arc::new(ipc_protocol::Ipc::new(
+            "usb",
+            USB_IPC_PRIORITY,
+            protocol.clone(),
+            sender,
+        ));
 
         let cancel = CancellationToken::new();
 
         let host_task = tokio::spawn(host_reader(
             host_in,
-            ipc.clone(),
+            protocol.clone(),
             sink.clone(),
             cancel.clone(),
         ));
@@ -152,7 +164,7 @@ impl Adapter for Usb {
     }
 
     fn capabilities(&self) -> Vec<(TypeId, Arc<dyn Any + Send + Sync>)> {
-        vec![(TypeId::of::<Ipc>(), self.ipc.clone())]
+        vec![(TypeId::of::<ipc_protocol::Ipc>(), self.ipc.clone())]
     }
 }
 
@@ -205,7 +217,7 @@ impl std::error::Error for ConnectError {}
 /// error instead of a silent timeout.
 async fn host_reader(
     mut endpoint: nusb::Endpoint<Bulk, In>,
-    ipc: Arc<Ipc>,
+    protocol: Arc<IpcProtocol>,
     sink: LogSink,
     cancel: CancellationToken,
 ) {
@@ -254,7 +266,7 @@ async fn host_reader(
                         } else {
                             ResolvedResponse::UnexpectedFrame
                         };
-                        ipc.resolve(seq, resolved).await;
+                        protocol.resolve(seq, resolved).await;
                     }
 
                     reader.consume(size);
@@ -280,7 +292,7 @@ async fn host_reader(
     }
 
     // Transport gone — fail every pending IPC call with a typed error.
-    ipc.poison().await;
+    protocol.poison().await;
 }
 
 // ── Endpoint discovery ───────────────────────────────────────────────────

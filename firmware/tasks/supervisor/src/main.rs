@@ -13,6 +13,16 @@ const FAULT_NOTIFICATION: u32 = 1;
 /// Well-known operation code for drop reports from the reactor.
 const OP_DROP_REPORT: u16 = 0xDEAD;
 
+/// Well-known operation code for `sysmodule_log` to push a pre-formatted
+/// text line out on USART1. ACL'd to that single peer below; other senders
+/// are rejected with a visible breadcrumb on the wire.
+const OP_EMIT_LOG: u16 = 0xE10C;
+
+/// Maximum bytes a single `OP_EMIT_LOG` message will write to USART1.
+/// Anything beyond this is silently truncated. Sized to comfortably hold
+/// the `hello uid=… build=…\r\n` payload (~80 bytes) plus a margin.
+const EMIT_LOG_MAX: usize = 256;
+
 fn usart() -> sifli_pac::usart::Usart {
     sifli_pac::USART1
 }
@@ -119,6 +129,39 @@ fn handle_drop_report(sender: userlib::TaskId, data: &[u8]) {
     usart_write_bytes(b" pri=");
     usart_write_u32(priority as u32);
     usart_write_bytes(b"\r\n");
+    userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
+}
+
+/// Forward a pre-formatted text payload from `sysmodule_log` to USART1.
+///
+/// ACL'd to the single peer declared in `task.ncl` — any other sender gets
+/// a rejection breadcrumb on the wire and a SUCCESS reply (no fault, to
+/// match `handle_drop_report`'s shape and avoid faulting attackers). If
+/// the peer isn't in this build, `PEERS.sysmodule_log` is `None` and every
+/// caller is rejected.
+fn handle_emit_log(sender: userlib::TaskId, data: &[u8]) {
+    // **Unconditional** entry breadcrumb — diagnostic. If we don't see
+    // this on USART1 when MoshiMoshi fires, the IPC isn't reaching us
+    // (rules out the ACL branch and the "build picked up stale code"
+    // branch in one shot, since this fires before any check or fallible
+    // operation).
+    usart_write_bytes(b"supervisor: emit_log entry sender=");
+    usart_write_u32(sender.task_index() as u32);
+    usart_write_bytes(b" len=");
+    usart_write_u32(data.len() as u32);
+    usart_write_bytes(b"\r\n");
+
+    let is_log = generated::peers::PEERS.sysmodule_log
+        .map_or(false, |id| sender.task_index() == id.task_index());
+    if !is_log {
+        usart_write_bytes(b"supervisor: rejected emit_log from non-log sender\r\n");
+        userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
+        return;
+    }
+
+    let n = data.len().min(EMIT_LOG_MAX);
+    // SAFETY: n <= data.len() by construction above.
+    usart_write_bytes(unsafe { data.get_unchecked(..n) });
     userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
 }
 
@@ -298,7 +341,13 @@ fn main() -> ! {
     usart_init();
     usart_write_bytes(b"supervisor: Awake\r\n");
 
-    let mut buf = [MaybeUninit::uninit(); 16];
+    // Sized to hold the largest inbound message: `OP_EMIT_LOG`'s payload,
+    // capped at `EMIT_LOG_MAX`. `OP_DROP_REPORT` is only 11 bytes and fits
+    // trivially. Hubris silently truncates messages larger than the
+    // buffer, which manifests as a bogus `len=…` on the supervisor side
+    // and silent data loss on the wire — so the buffer must match the
+    // largest opcode we handle.
+    let mut buf = [MaybeUninit::uninit(); EMIT_LOG_MAX];
 
     loop {
         match userlib::sys_recv_open(&mut buf, FAULT_NOTIFICATION) {
@@ -311,6 +360,13 @@ fn main() -> ! {
                         handle_drop_report(msg.sender, data);
                     } else {
                         usart_write_bytes(b"supervisor: malformed drop report\r\n");
+                        userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
+                    }
+                } else if msg.operation == OP_EMIT_LOG {
+                    if let Ok(data) = msg.data {
+                        handle_emit_log(msg.sender, data);
+                    } else {
+                        usart_write_bytes(b"supervisor: malformed emit_log\r\n");
                         userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
                     }
                 } else {

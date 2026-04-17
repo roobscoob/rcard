@@ -15,6 +15,7 @@ escargot = "0.5"
 rfd = "0.15"
 crossbeam-channel = "0.5"
 device = { path = "../device" }
+ipc-protocol = { path = "../ipc-protocol" }
 serial = { path = "../serial" }
 usb = { path = "../usb" }
 nusb = { version = "0.2", features = ["tokio"] }

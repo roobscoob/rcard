@@ -54,8 +54,14 @@ pub enum Command {
         device_id: DeviceId,
         call: ipc_runtime::EncodedCall,
         /// oneshot to return the result to the caller.
-        reply: tokio::sync::oneshot::Sender<Result<usb::IpcCallResult, String>>,
+        reply: tokio::sync::oneshot::Sender<Result<crate::ipc::IpcCallResult, String>>,
     },
+    /// Fire a one-shot MoshiMoshi probe on the device's USART2 wire.
+    ///
+    /// Manual diagnostic trigger used while validating the USART1 hello
+    /// path: lets the user re-fire MoshiMoshi without restarting the app
+    /// (the automatic MoshiMoshi only runs on `Usart2::connect`).
+    SendMoshiMoshi { device_id: DeviceId },
 }
 
 // ── Events (bridge → GUI) ──────────────────────────────────────────────
@@ -65,18 +71,36 @@ pub enum Event {
     AdapterCreated {
         adapter_id: device::adapter::AdapterId,
         display_name: String,
+        /// Transport label + priority for adapters that contribute the
+        /// IPC capability — matches the values the bridge's
+        /// `crate::ipc::pick` ranks against. `None` for non-IPC adapters
+        /// (SifliDebug-over-USART1, etc.).
+        ipc_transport: Option<(&'static str, u8)>,
     },
     /// An adapter was removed.
     AdapterRemoved {
         adapter_id: device::adapter::AdapterId,
     },
-    /// A device appeared (from any connection type).
+    /// An adapter is now bound to a device, contributing capabilities.
+    /// The adapter and device must both already exist (via `AdapterCreated`
+    /// and `DeviceCreated`).
+    AdapterBound {
+        adapter_id: device::adapter::AdapterId,
+        device_id: DeviceId,
+        capabilities: Vec<KnownCapability>,
+    },
+    /// An adapter is no longer bound to its device. The adapter itself
+    /// still exists — it has not been removed.
+    AdapterUnbound {
+        adapter_id: device::adapter::AdapterId,
+        device_id: DeviceId,
+    },
+    /// A new device entity was created. Adapters are bound separately
+    /// via `AdapterBound`.
     DeviceCreated {
         device_id: DeviceId,
         name: String,
         kind: DeviceKind,
-        adapter_ids: Vec<device::adapter::AdapterId>,
-        capabilities: Vec<KnownCapability>,
         /// The firmware this device is running, if known.
         firmware_id: Option<crate::state::FirmwareId>,
     },
@@ -164,6 +188,39 @@ pub enum FlashPhase {
     /// the modal can render a red X next to the failed task and leave any
     /// subsequent tasks as "not started".
     Failed { at_step: usize, message: String },
+}
+
+// ── Persistent device registry helper ──────────────────────────────────
+
+/// Look up or mint a persistent `DeviceId` for `uid`. Emits
+/// `Event::DeviceCreated` only if this is the first time the UID has been
+/// seen — subsequent calls for the same UID return the existing ID
+/// without emitting anything.
+fn get_or_create_persistent_device(
+    uid: ChipUid,
+    name: impl Into<String>,
+    firmware_id: Option<crate::state::FirmwareId>,
+    persistent_devices: &Mutex<HashMap<ChipUid, DeviceId>>,
+    next_device_id: &AtomicU64,
+    tx: &crossbeam_channel::Sender<Event>,
+) -> DeviceId {
+    let mut is_new = false;
+    let id = {
+        let mut registry = persistent_devices.lock().unwrap();
+        *registry.entry(uid).or_insert_with(|| {
+            is_new = true;
+            DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed))
+        })
+    };
+    if is_new {
+        let _ = tx.send(Event::DeviceCreated {
+            device_id: id,
+            name: name.into(),
+            kind: DeviceKind::Persistent,
+            firmware_id,
+        });
+    }
+    id
 }
 
 // ── Bridge state ───────────────────────────────────────────────────────
@@ -256,16 +313,26 @@ pub async fn run(
                                     let _ = tx.send(Event::AdapterCreated {
                                         adapter_id: id,
                                         display_name: name.into(),
+                                        // Emulator adapters don't currently
+                                        // expose the IPC capability to the
+                                        // GUI (see the empty `capabilities`
+                                        // on `DeviceCreated` below).
+                                        ipc_transport: None,
                                     });
                                 }
                                 let _ = tx.send(Event::DeviceCreated {
                                     device_id,
                                     name: "Emulator".into(),
                                     kind: DeviceKind::Emulator,
-                                    adapter_ids,
-                                    capabilities: vec![],
                                     firmware_id: Some(firmware_id),
                                 });
+                                for &id in &adapter_ids {
+                                    let _ = tx.send(Event::AdapterBound {
+                                        adapter_id: id,
+                                        device_id,
+                                        capabilities: vec![],
+                                    });
+                                }
                                 repaint.request_repaint();
 
                                 // Subscribe before moving the device into the
@@ -513,45 +580,82 @@ pub async fn run(
                 call,
                 reply,
             } => {
-                // Find the device and an IPC capability. Prefer USB
-                // (faster) with USART2 as fallback.
+                // Single capability lookup — `crate::ipc::pick` walks all
+                // registered `Ipc`s on the device and returns the
+                // highest-priority one (USB beats USART2 today). This
+                // handler doesn't have to know which transports exist.
                 let devices_lock = devices.lock().unwrap();
-                if let Some(bridge_dev) = devices_lock.get(&device_id) {
-                    use device::device::DeviceExt;
-
-                    // Helper: spawn the call on whichever transport is available.
-                    macro_rules! spawn_ipc_call {
-                        ($ipc:expr) => {{
-                            let ipc = $ipc.clone();
-                            tokio::spawn(async move {
-                                let lease_refs: Vec<&[u8]> =
-                                    call.lease_data.iter().map(|d| d.as_slice()).collect();
-                                let req = rcard_usb_proto::IpcRequest {
-                                    task_id: call.task_id,
-                                    resource_kind: call.resource_kind,
-                                    method: call.method_id,
-                                    args: &call.wire_args,
-                                    leases: &call.leases,
-                                    lease_data: &lease_refs,
-                                };
-                                let result = ipc.call(&req).await.map_err(|e| e.to_string());
-                                let _ = reply.send(result);
-                            });
-                        }};
-                    }
-
-                    if let Some(usb_ipc) = bridge_dev.device.get::<usb::Ipc>() {
-                        spawn_ipc_call!(usb_ipc);
-                    } else if let Some(serial_ipc) = bridge_dev.device.get::<serial::SerialIpc>() {
-                        spawn_ipc_call!(serial_ipc);
-                    } else {
-                        let _ = reply.send(Err(
-                            "device has no IPC capability (no USART2 or USB transport)".into(),
-                        ));
-                    }
-                } else {
+                let Some(bridge_dev) = devices_lock.get(&device_id) else {
                     let _ = reply.send(Err("device not found in bridge".into()));
-                }
+                    continue;
+                };
+
+                let Some(ipc) = crate::ipc::pick(&*bridge_dev.device) else {
+                    let _ = reply.send(Err(
+                        "device has no IPC capability (no USART2 or USB transport)".into(),
+                    ));
+                    continue;
+                };
+
+                tokio::spawn(async move {
+                    eprintln!(
+                        "[ipc] call via {} task={} op={:02x}.{:02x}",
+                        ipc.label(),
+                        call.task_id,
+                        call.resource_kind,
+                        call.method_id,
+                    );
+                    let lease_refs: Vec<&[u8]> =
+                        call.lease_data.iter().map(|d| d.as_slice()).collect();
+                    let req = rcard_usb_proto::IpcRequest {
+                        task_id: call.task_id,
+                        resource_kind: call.resource_kind,
+                        method: call.method_id,
+                        args: &call.wire_args,
+                        leases: &call.leases,
+                        lease_data: &lease_refs,
+                    };
+                    let result = ipc.call(&req).await.map_err(|e| e.to_string());
+                    match &result {
+                        Ok(r) => eprintln!(
+                            "[ipc] reply via {} rc={} return={} bytes",
+                            ipc.label(),
+                            r.rc,
+                            r.return_value.len(),
+                        ),
+                        Err(e) => eprintln!("[ipc] error via {}: {}", ipc.label(), e),
+                    }
+                    let _ = reply.send(result);
+                });
+            }
+
+            Command::SendMoshiMoshi { device_id } => {
+                // Manual diagnostic: fire MoshiMoshi on the device's USART2
+                // adapter on demand. Looks up the raw SerialSender capability
+                // (registered alongside the unified Ipc by `Usart2::capabilities`)
+                // so we can send a TYPE_CONTROL_REQUEST frame directly,
+                // bypassing the IPC-request path.
+                let devices_lock = devices.lock().unwrap();
+                let Some(bridge_dev) = devices_lock.get(&device_id) else {
+                    eprintln!("[probe] SendMoshiMoshi: device {device_id:?} not in bridge");
+                    continue;
+                };
+
+                use device::device::DeviceExt;
+                let Some(sender) = bridge_dev.device.get::<serial::SerialSender>() else {
+                    eprintln!(
+                        "[probe] SendMoshiMoshi: device {device_id:?} has no USART2 SerialSender capability"
+                    );
+                    continue;
+                };
+
+                eprintln!("[probe] SendMoshiMoshi: firing on device {device_id:?}");
+                tokio::spawn(async move {
+                    match sender.send_moshi_moshi().await {
+                        Ok(()) => eprintln!("[probe] SendMoshiMoshi: sent"),
+                        Err(e) => eprintln!("[probe] SendMoshiMoshi: send failed: {e}"),
+                    }
+                });
             }
         }
     }
@@ -655,6 +759,8 @@ async fn usart1_connect_loop(
         let _ = tx.send(Event::AdapterCreated {
             adapter_id,
             display_name: format!("USART1 ({})", port),
+            // USART1 carries SifliDebug, not IPC.
+            ipc_transport: None,
         });
         let _ = tx.send(Event::SerialStatus {
             index,
@@ -814,15 +920,15 @@ async fn usart1_connect_loop(
                     // the first line may have a garbled prefix from the
                     // truncated ACK tail, e.g. "\x06SFBL".
                     if line.ends_with("SFBL") {
-                        // Device just (re)booted. Detach adapter from current device.
-                        // Persistent devices survive; ephemeral ones auto-clean via 0-adapter rule.
-                        current_device.take();
-                        let _ = tx.send(Event::AdapterRemoved { adapter_id });
-                        // Re-create adapter for this new boot cycle.
-                        let _ = tx.send(Event::AdapterCreated {
-                            adapter_id,
-                            display_name: format!("USART1 ({})", port),
-                        });
+                        // Device just (re)booted. Unbind adapter from
+                        // current device — persistent devices survive;
+                        // ephemeral ones auto-clean via 0-adapter rule.
+                        if let Some(old_id) = current_device.take() {
+                            let _ = tx.send(Event::AdapterUnbound {
+                                adapter_id,
+                                device_id: old_id,
+                            });
+                        }
 
                         // Create ephemeral device immediately so the UI shows it.
                         let ephemeral_id = DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed));
@@ -831,9 +937,12 @@ async fn usart1_connect_loop(
                             device_id: ephemeral_id,
                             name: format!("{} (USART1)", port),
                             kind: DeviceKind::Ephemeral,
-                            adapter_ids: vec![adapter_id],
-                            capabilities: vec![KnownCapability::SifliDebug],
                             firmware_id: None,
+                        });
+                        let _ = tx.send(Event::AdapterBound {
+                            adapter_id,
+                            device_id: ephemeral_id,
+                            capabilities: vec![KnownCapability::SifliDebug],
                         });
                         let _ = tx.send(Event::DevicePhaseChanged {
                             device_id: ephemeral_id,
@@ -895,22 +1004,18 @@ async fn usart1_connect_loop(
                                     eprintln!("[usart1:{port}] identified device: {uid}");
 
                                     // GetOrCreate persistent device for this UID.
-                                    let persistent_id = {
-                                        let mut registry = persistent_devices.lock().unwrap();
-                                        *registry.entry(uid).or_insert_with(|| {
-                                            let id = next_device_id.fetch_add(1, Ordering::Relaxed);
-                                            DeviceId(id)
-                                        })
-                                    };
-
-                                    // Tell GUI: upgrade ephemeral → persistent.
-                                    let _ = tx.send(Event::DeviceCreated {
+                                    let persistent_id = get_or_create_persistent_device(
+                                        uid,
+                                        format!("Device {uid}"),
+                                        None,
+                                        &persistent_devices,
+                                        &next_device_id,
+                                        &tx,
+                                    );
+                                    let _ = tx.send(Event::AdapterBound {
+                                        adapter_id,
                                         device_id: persistent_id,
-                                        name: format!("Device {uid}"),
-                                        kind: DeviceKind::Persistent,
-                                        adapter_ids: vec![adapter_id],
                                         capabilities: vec![KnownCapability::SifliDebug],
-                                        firmware_id: None,
                                     });
                                     let _ = tx.send(Event::DeviceUpgraded {
                                         old_id: ephemeral_id,
@@ -1022,6 +1127,79 @@ async fn usart1_connect_loop(
                         }
                     }
 
+                    // ── Sentinel: hello (supervisor-side response to the
+                    // USART2 MoshiMoshi probe). Carries chip UID + build id
+                    // read direct from efuse — this is the authoritative
+                    // identity for the wire. If we're bound to a different
+                    // DeviceId (stale ephemeral from SFBL, cable moved to
+                    // another device mid-session, etc.), detach the old
+                    // adapter attachment and rebind. Same-DeviceId is a
+                    // silent no-op: repeated MoshiMoshi pings change nothing.
+                    if let Some((uid_bytes, build_id_bytes)) = parse_hello_line(&line) {
+                        let chip_uid = ChipUid(uid_bytes);
+
+                        // Get-or-mint the persistent DeviceId for this UID.
+                        // Shared registry with USART2/USB, so the same chip
+                        // always resolves to the same id regardless of which
+                        // transport identified it first.
+                        let persistent_id = get_or_create_persistent_device(
+                            chip_uid,
+                            format!("Device {chip_uid}"),
+                            None,
+                            &persistent_devices,
+                            &next_device_id,
+                            &tx,
+                        );
+
+                        if current_device != Some(persistent_id) {
+                            // Unbind from prior device — it was wrong (or
+                            // ephemeral). The adapter persists; only the
+                            // binding changes.
+                            if let Some(old_id) = current_device.take() {
+                                eprintln!(
+                                    "[usart1:{port}] discovery: hello uid {chip_uid} \
+                                    supersedes bound {old_id:?}, rebinding"
+                                );
+                                let _ = tx.send(Event::AdapterUnbound {
+                                    adapter_id,
+                                    device_id: old_id,
+                                });
+                            }
+
+                            eprintln!(
+                                "[usart1:{port}] discovery: identified device \
+                                {chip_uid} ({persistent_id:?}) via hello"
+                            );
+
+                            // Bind this adapter to the persistent device.
+                            let _ = tx.send(Event::AdapterBound {
+                                adapter_id,
+                                device_id: persistent_id,
+                                capabilities: vec![KnownCapability::SifliDebug],
+                            });
+                            // Build id arrives via the dedicated event so
+                            // state.rs can resolve it against loaded .tfw
+                            // archives — same pattern as USART2 awake.
+                            let _ = tx.send(Event::DeviceReportedBuildId {
+                                device_id: persistent_id,
+                                build_id_bytes,
+                            });
+                            // Hello only fires from a running Hubris kernel
+                            // (sysmodule_log triggers it), so the phase is
+                            // unambiguously Kernel.
+                            let _ = tx.send(Event::DevicePhaseChanged {
+                                device_id: persistent_id,
+                                phase: DevicePhase::Kernel,
+                            });
+                            let _ = tx.send(Event::SerialStatus {
+                                index,
+                                status: SerialPortStatus::DeviceDetected,
+                            });
+                            current_device = Some(persistent_id);
+                            ctx.request_repaint();
+                        }
+                    }
+
                     // Forward all lines as text logs. The received_at is
                     // the first-byte-of-line timestamp captured by the
                     // parallel reader task, so ordering in the device
@@ -1098,6 +1276,7 @@ async fn usart2_connect_loop(
                 let _ = tx.send(Event::AdapterCreated {
                     adapter_id,
                     display_name: format!("USART2 ({})", port),
+                    ipc_transport: Some(("usart2", serial::USART2_IPC_PRIORITY)),
                 });
                 let _ = tx.send(Event::SerialStatus {
                     index,
@@ -1241,33 +1420,32 @@ fn handle_usart2_awake(
     next_device_id: &Arc<AtomicU64>,
     ctx: &egui::Context,
 ) {
-    // Reboot during session: detach and re-announce the adapter.
-    if current_device.take().is_some() {
+    // Reboot during session: unbind from the old device. The adapter
+    // persists — only the binding changes.
+    if let Some(old_id) = current_device.take() {
         eprintln!("[usart2:{port}] awake during session — device rebooted, re-binding");
-        let _ = tx.send(Event::AdapterRemoved { adapter_id });
-        let _ = tx.send(Event::AdapterCreated {
+        let _ = tx.send(Event::AdapterUnbound {
             adapter_id,
-            display_name: format!("USART2 ({})", port),
+            device_id: old_id,
         });
     }
 
     // Get-or-create the persistent DeviceId for this chip UID.
-    let persistent_id = {
-        let mut registry = persistent_devices.lock().unwrap();
-        *registry
-            .entry(uid)
-            .or_insert_with(|| DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed)))
-    };
+    let persistent_id = get_or_create_persistent_device(
+        uid,
+        format!("Device {uid}"),
+        None,
+        persistent_devices,
+        next_device_id,
+        tx,
+    );
 
-    eprintln!("[usart2:{port}] awake: bound device {uid} ({persistent_id:?})");
+    eprintln!("[usart2:{port}] discovery: identified device {uid} ({persistent_id:?})");
 
-    let _ = tx.send(Event::DeviceCreated {
+    let _ = tx.send(Event::AdapterBound {
+        adapter_id,
         device_id: persistent_id,
-        name: format!("Device {uid}"),
-        kind: DeviceKind::Persistent,
-        adapter_ids: vec![adapter_id],
         capabilities: vec![KnownCapability::Ipc],
-        firmware_id: None,
     });
     // Awake also carries the firmware image's build id. Forward it so
     // state.rs can resolve it against the loaded .tfw archives and
@@ -1624,6 +1802,47 @@ async fn flash_stub_via_debug(
 
 // ── eFuse reader ───────────────────────────────────────────────────────
 
+/// Parse a single ASCII hex digit — returns `None` for any non-hex byte.
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode 32 ASCII hex chars into 16 bytes, lowercase or uppercase.
+fn parse_hex16(s: &[u8]) -> Option<[u8; 16]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        out[i] = (hex_nibble(s[i * 2])? << 4) | hex_nibble(s[i * 2 + 1])?;
+    }
+    Some(out)
+}
+
+/// Parse a `hello uid=<32hex> build=<32hex>` line as emitted by the
+/// supervisor's `OP_EMIT_LOG` handler in response to a USART2 MoshiMoshi.
+/// Returns `(uid, firmware_id)` on a successful match.
+fn parse_hello_line(line: &str) -> Option<([u8; 16], [u8; 16])> {
+    let rest = line.strip_prefix("hello uid=")?;
+    if rest.len() < 32 {
+        return None;
+    }
+    let uid_hex = &rest.as_bytes()[..32];
+    let rest = &rest[32..];
+    let build_hex = rest.strip_prefix(" build=")?;
+    if build_hex.len() != 32 {
+        return None;
+    }
+    let uid = parse_hex16(uid_hex)?;
+    let build = parse_hex16(build_hex.as_bytes())?;
+    Some((uid, build))
+}
+
 /// Read the 128-bit chip UID from eFuse bank 0 via the EFUSEC controller.
 ///
 /// Sequence: set CR (bank=0, mode=read), trigger EN, poll SR.DONE,
@@ -1741,9 +1960,12 @@ fn register_from_discovery(
                 device_id: id,
                 name: format!("{} (USART1)", port),
                 kind: DeviceKind::Ephemeral,
-                adapter_ids: vec![adapter_id],
-                capabilities: vec![KnownCapability::SifliDebug],
                 firmware_id: None,
+            });
+            let _ = tx.send(Event::AdapterBound {
+                adapter_id,
+                device_id: id,
+                capabilities: vec![KnownCapability::SifliDebug],
             });
             ctx.request_repaint();
             Some(id)
@@ -1752,19 +1974,18 @@ fn register_from_discovery(
             session: _session,
             uid,
         } => {
-            let id = {
-                let mut registry = persistent_devices.lock().unwrap();
-                *registry
-                    .entry(uid)
-                    .or_insert_with(|| DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed)))
-            };
-            let _ = tx.send(Event::DeviceCreated {
+            let id = get_or_create_persistent_device(
+                uid,
+                format!("Device {uid}"),
+                None,
+                persistent_devices,
+                next_device_id,
+                tx,
+            );
+            let _ = tx.send(Event::AdapterBound {
+                adapter_id,
                 device_id: id,
-                name: format!("Device {uid}"),
-                kind: DeviceKind::Persistent,
-                adapter_ids: vec![adapter_id],
                 capabilities: vec![KnownCapability::SifliDebug],
-                firmware_id: None,
             });
             ctx.request_repaint();
             Some(id)
@@ -1893,12 +2114,14 @@ fn handle_usb_attach(
     flash_wait_usb: &Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
 ) -> Result<UsbEntry, String> {
     // Resolve / mint the persistent DeviceId for this chip UID.
-    let device_id = {
-        let mut registry = persistent_devices.lock().unwrap();
-        *registry
-            .entry(uid)
-            .or_insert_with(|| DeviceId(next_device_id.fetch_add(1, Ordering::Relaxed)))
-    };
+    let device_id = get_or_create_persistent_device(
+        uid,
+        format!("Device {uid}"),
+        None,
+        persistent_devices,
+        next_device_id,
+        tx,
+    );
 
     // Ensure a BridgeDevice exists, grab a LogSink from it.
     let sink = {
@@ -1938,19 +2161,16 @@ fn handle_usb_attach(
         }
     }
 
-    // Announce to the GUI. DeviceCreated is idempotent in state.rs —
-    // merges adapter_ids + capabilities into the existing handle.
+    // Announce to the GUI.
     let _ = tx.send(Event::AdapterCreated {
         adapter_id,
         display_name: format!("USB ({serial})"),
+        ipc_transport: Some(("usb", usb::USB_IPC_PRIORITY)),
     });
-    let _ = tx.send(Event::DeviceCreated {
+    let _ = tx.send(Event::AdapterBound {
+        adapter_id,
         device_id,
-        name: format!("Device {uid}"),
-        kind: DeviceKind::Persistent,
-        adapter_ids: vec![adapter_id],
-        capabilities: vec![KnownCapability::UsbIpc],
-        firmware_id: None,
+        capabilities: vec![KnownCapability::Ipc],
     });
     ctx.request_repaint();
 

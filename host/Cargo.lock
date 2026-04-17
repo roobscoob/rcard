@@ -186,6 +186,7 @@ dependencies = [
  "escargot",
  "futures-util",
  "indexmap",
+ "ipc-protocol",
  "ipc-runtime",
  "nusb 0.2.3",
  "rcard-log",

@@ -882,6 +882,8 @@ name = "storage_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1161,8 +1163,10 @@ name = "sysmodule_mpi_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
  "rcard-log-macros",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1211,7 +1215,9 @@ name = "sysmodule_storage_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
+ "serde",
  "serde_json",
  "storage_api",
  "userlib",

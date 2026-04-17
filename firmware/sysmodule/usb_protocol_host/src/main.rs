@@ -159,6 +159,18 @@ impl HostTransport for HostTransportImpl {
 /// declared as a peer in this task's `task.ncl` purely for this check.
 const HOST_FORWARDING_AVAILABLE: bool = PEERS.sysmodule_host_proxy.is_some();
 
+/// Tracks whether we're currently in the "bus not Configured" state, so
+/// disconnect noise only emits on the true → false transition.
+///
+/// Initialized to `true` because at boot the bus genuinely is disconnected
+/// (host hasn't enumerated yet) — the first transition out of that state
+/// into Configured is the interesting one, not arrival at it. `Suspend`
+/// (which the bus enters after ~3 ms of no SOFs — i.e. constantly when
+/// the host isn't actively moving data) also reports as not-Configured
+/// from the driver, so without this gate every quiet moment spams the log.
+static USB_DISCONNECTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
 /// Encode and write a `TunnelError` frame straight to EP IN. Used both for
 /// no-host-forwarding NACKs and for malformed-request rejects.
 fn write_tunnel_error(
@@ -190,19 +202,31 @@ fn handle_usb_event(_sender: u16, _code: u32) {
     loop {
         match ep_out.read(&mut usb_buf) {
             Ok(Ok(n)) if n > 0 => {
+                // Successful read ⇒ bus is Configured. Note the transition
+                // back to connected so the next disconnect will log again.
+                USB_DISCONNECTED.store(false, core::sync::atomic::Ordering::Relaxed);
                 READER
                     .with(|r| r.push(&usb_buf[..n as usize]))
                     .log_unwrap();
             }
             Ok(Err(UsbError::Disconnected)) => {
-                warn!("USB disconnected");
-                READER.with(|r| r.reset()).log_unwrap();
-                PENDING
-                    .with(|p| {
-                        p.set = false;
-                        p.len = 0;
-                    })
-                    .log_unwrap();
+                // Only act on the transition from connected → disconnected.
+                // `UsbError::Disconnected` is also returned for transient
+                // non-Configured states (Suspend, Default during enumeration),
+                // so firing every time would spam the log and repeatedly wipe
+                // PENDING/READER for no reason.
+                let was_connected = !USB_DISCONNECTED
+                    .swap(true, core::sync::atomic::Ordering::Relaxed);
+                if was_connected {
+                    warn!("USB disconnected");
+                    READER.with(|r| r.reset()).log_unwrap();
+                    PENDING
+                        .with(|p| {
+                            p.set = false;
+                            p.len = 0;
+                        })
+                        .log_unwrap();
+                }
                 return;
             }
             _ => break,

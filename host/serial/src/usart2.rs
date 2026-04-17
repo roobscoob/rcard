@@ -9,7 +9,7 @@ use device::logs::{ControlEvent, LogEntry};
 use ipc_protocol::IpcProtocol;
 use rcard_log::LogMetadata;
 use rcard_log::decoder::{Decoder, FeedResult};
-use rcard_usb_proto::messages::{Awake, TunnelError};
+use rcard_usb_proto::messages::{Awake, MoshiMoshi, TunnelError};
 use rcard_usb_proto::{FrameReader, ReaderError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::TryFromBytes;
@@ -28,65 +28,77 @@ const SWEEP_INTERVAL: Duration = Duration::from_millis(500);
 /// USART2 serial adapter — structured binary log stream + IPC transport.
 ///
 /// Opens a serial port at 921600 baud. Reads COBS-framed binary data and
-/// decodes structured log entries. Also exposes an `IpcProtocol`-based
-/// IPC capability for making typed calls to firmware tasks over the same
-/// wire (TYPE_IPC_REQUEST / TYPE_IPC_REPLY framing).
+/// decodes structured log entries. Also exposes the unified
+/// `ipc_protocol::Ipc` capability so callers can `device.get::<Ipc>()`
+/// without caring about the wire underneath
+/// (TYPE_IPC_REQUEST / TYPE_IPC_REPLY framing).
 pub struct Usart2 {
     id: AdapterId,
-    ipc: Arc<SerialIpc>,
+    ipc: Arc<ipc_protocol::Ipc>,
+    /// Same `SerialSender` the `Ipc`'s `FrameSender` uses internally —
+    /// stored separately so we can expose it as its own capability for
+    /// code paths that need the non-IPC-framed operations (notably a
+    /// manual `send_moshi_moshi` trigger from the app UI).
+    sender: Arc<SerialSender>,
     _reader_task: tokio::task::JoinHandle<()>,
 }
 
-/// USART2 IPC capability — wraps `IpcProtocol` with a COBS+TYPE_IPC_REQUEST
-/// serial writer for sending, and receives replies via the read task calling
-/// `protocol.resolve()`.
-pub struct SerialIpc {
-    protocol: Arc<IpcProtocol>,
+/// Priority of the USART2 transport relative to other `ipc_protocol::Ipc`
+/// providers — lower than USB so that, when both are available, USB wins.
+pub const USART2_IPC_PRIORITY: u8 = 5;
+
+/// `FrameSender` over a USART2 serial writer. COBS-wraps each frame with
+/// a wire-type tag so the reader on the device side can demux it from
+/// the structured log stream.
+pub struct SerialSender {
     writer: tokio::sync::Mutex<tokio::io::WriteHalf<tokio_serial::SerialStream>>,
 }
 
-impl SerialIpc {
-    /// Send an IPC request and wait for the response.
-    pub async fn call(
-        &self,
-        req: &rcard_usb_proto::IpcRequest<'_>,
-    ) -> Result<ipc_protocol::IpcCallResult, ipc_protocol::IpcError> {
-        eprintln!(
-            "[serial-ipc] call: task_id={} kind=0x{:02x} method={} args={} bytes, {} leases",
-            req.task_id, req.resource_kind, req.method,
-            req.args.len(), req.leases.len(),
-        );
+impl SerialSender {
+    /// Common write path for any TYPE_* tagged COBS chunk. The
+    /// `FrameSender` impl uses `TYPE_IPC_REQUEST`; the MoshiMoshi probe
+    /// uses `TYPE_CONTROL_REQUEST`.
+    async fn write_typed(&self, type_byte: u8, bytes: &[u8]) -> Result<(), String> {
+        let mut raw = Vec::with_capacity(1 + bytes.len());
+        raw.push(type_byte);
+        raw.extend_from_slice(bytes);
 
-        let writer_mutex = &self.writer;
+        let mut encoded = vec![0u8; cobs::max_encoding_length(raw.len()) + 1];
+        let enc_len = cobs::encode(&raw, &mut encoded);
+        encoded[enc_len] = 0x00;
 
-        self.protocol
-            .call(req, |frame_bytes| async move {
-                // Wrap the rcard_usb_proto frame in a TYPE_IPC_REQUEST COBS chunk.
-                let mut raw = Vec::with_capacity(1 + frame_bytes.len());
-                raw.push(rcard_log::wire::TYPE_IPC_REQUEST);
-                raw.extend_from_slice(&frame_bytes);
-
-                let mut encoded = vec![0u8; cobs::max_encoding_length(raw.len()) + 1];
-                let enc_len = cobs::encode(&raw, &mut encoded);
-                encoded[enc_len] = 0x00;
-
-                eprintln!(
-                    "[serial-ipc] sending {} raw bytes, {} COBS-encoded bytes",
-                    raw.len(), enc_len + 1,
-                );
-
-                let mut writer = writer_mutex.lock().await;
-                writer
-                    .write_all(&encoded[..enc_len + 1])
-                    .await
-                    .map_err(|e| e.to_string())
-            })
+        let mut writer = self.writer.lock().await;
+        writer
+            .write_all(&encoded[..enc_len + 1])
             .await
+            .map_err(|e| e.to_string())
     }
 
-    /// Access the underlying protocol for resolve() calls from the reader.
-    pub fn protocol(&self) -> &Arc<IpcProtocol> {
-        &self.protocol
+    /// Send a `MoshiMoshi` simple frame on the control-request channel.
+    /// `sysmodule_log` responds with an `Awake` simple frame carrying the
+    /// chip UID + firmware build id — the same payload it sends once at
+    /// boot — so the host can identify devices that were already running
+    /// when this serial port opened.
+    pub async fn send_moshi_moshi(&self) -> Result<(), String> {
+        // header(5) + opcode(1) — `MoshiMoshi` has no payload.
+        let mut buf = [0u8; 6];
+        let n = rcard_usb_proto::simple::encode_simple(&MoshiMoshi, &mut buf, 0)
+            .ok_or_else(|| "encode_simple(MoshiMoshi) failed".to_string())?;
+        self.write_typed(rcard_log::wire::TYPE_CONTROL_REQUEST, &buf[..n])
+            .await
+    }
+}
+
+impl ipc_protocol::FrameSender for SerialSender {
+    fn send_frame<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.write_typed(rcard_log::wire::TYPE_IPC_REQUEST, &bytes)
+                .await
+        })
     }
 }
 
@@ -94,7 +106,8 @@ impl Usart2 {
     /// Connect to a USART2 serial port.
     ///
     /// Log events are pushed into the provided `sink`. The returned adapter
-    /// exposes a `SerialIpc` capability for making IPC calls.
+    /// exposes the unified `ipc_protocol::Ipc` capability for making IPC
+    /// calls over USART2.
     pub fn connect(
         port: &str,
         id: AdapterId,
@@ -104,15 +117,41 @@ impl Usart2 {
         let (reader, writer) = tokio::io::split(stream);
 
         let protocol = Arc::new(IpcProtocol::new());
-        let ipc = Arc::new(SerialIpc {
-            protocol: protocol.clone(),
+        let raw_sender = Arc::new(SerialSender {
             writer: tokio::sync::Mutex::new(writer),
         });
+        let sender: Arc<dyn ipc_protocol::FrameSender> = raw_sender.clone();
+        let ipc = Arc::new(ipc_protocol::Ipc::new(
+            "usart2",
+            USART2_IPC_PRIORITY,
+            protocol.clone(),
+            sender,
+        ));
 
         let task = tokio::spawn(read_structured(reader, sink, protocol));
+
+        // Probe device identity now that the wire is open. The `Awake`
+        // response lands through the read path and surfaces as a
+        // `ControlEvent::Awake`, same as the boot-time sentinel — so a
+        // device that was already running before this port opened still
+        // gets identified. Spawned because `connect` is sync; the probe
+        // is fire-and-forget (failure just delays detection until either
+        // a real `Awake` shows up or the user reconnects).
+        eprintln!("[usart2:{port}] discovery: sending MoshiMoshi");
+        let probe_sender = raw_sender.clone();
+        let probe_port = port.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = probe_sender.send_moshi_moshi().await {
+                eprintln!(
+                    "[usart2:{probe_port}] discovery: MoshiMoshi send failed: {e}"
+                );
+            }
+        });
+
         Ok(Usart2 {
             id,
             ipc,
+            sender: raw_sender,
             _reader_task: task,
         })
     }
@@ -128,7 +167,10 @@ impl Adapter for Usart2 {
     }
 
     fn capabilities(&self) -> Vec<(TypeId, Arc<dyn Any + Send + Sync>)> {
-        vec![(TypeId::of::<SerialIpc>(), self.ipc.clone())]
+        vec![
+            (TypeId::of::<ipc_protocol::Ipc>(), self.ipc.clone()),
+            (TypeId::of::<SerialSender>(), self.sender.clone()),
+        ]
     }
 }
 
