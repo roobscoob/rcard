@@ -13,19 +13,8 @@
     idle = 4,
   },
 
-  ## Place with a fallback: try `primary`, overflow into `alt`.
-  ## The result is a valid Place (primary's fields) with an extra
-  ## `alternatives` array the layout solver checks on overflow.
-  or = fun primary alt =>
-    primary & { alternatives = [alt] },
-
-  ## Ordered preference list: first element is primary, rest are
-  ## alternatives tried in order.
-  prefer = fun places =>
-    std.array.first places & { alternatives = std.array.drop_first places },
-
   ## Partition a memory device into named places.
-  ## Each place inherits the device's mappings and block_size.
+  ## Each place inherits the device's mappings and geometry.
   partition = fun device parts =>
     (std.array.fold_left
       (fun state part =>
@@ -36,7 +25,7 @@
             size = part.size,
             offset = off,
             mappings = device.mappings,
-            block_size = std.record.get_or "block_size" null device,
+            geometry = std.record.get_or "geometry" null device,
           } state.places,
         })
       { cursor = 0, places = {} }

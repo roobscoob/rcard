@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use device::adapter::Adapter;
@@ -62,6 +62,15 @@ pub enum Command {
     /// path: lets the user re-fire MoshiMoshi without restarting the app
     /// (the automatic MoshiMoshi only runs on `Usart2::connect`).
     SendMoshiMoshi { device_id: DeviceId },
+    /// Fire a MoshiMoshi probe on *every* bridge device that has a
+    /// `SerialSender` (USART2) capability.
+    ///
+    /// Self-enqueued by `usart1_connect_loop` when the last settling
+    /// USART1 transitions into its main read loop — the probe coaxes
+    /// each device's supervisor into emitting the `hello` line on the
+    /// USART1 wire that now has a ready listener. See the `usart1_settling`
+    /// counter in `run()` for the transition logic.
+    ProbeMoshiMoshi,
 }
 
 // ── Events (bridge → GUI) ──────────────────────────────────────────────
@@ -236,15 +245,39 @@ struct BridgeDevice {
 struct BridgeSerial {
     cancel: tokio_util::sync::CancellationToken,
     _task: tokio::task::JoinHandle<()>,
+    /// Live USART2 `SerialSender`, filled by `usart2_connect_loop` once
+    /// `Usart2::connect` succeeds and cleared when the connect loop
+    /// exits. `None` until then, and always `None` for USART1 entries.
+    ///
+    /// Keyed by `SerialPortIndex` via the outer `serials` map, not by
+    /// `DeviceId` — so `Command::ProbeMoshiMoshi` can reach every live
+    /// USART2 wire whether or not Awake has identified its device yet.
+    /// That's the whole point of the probe: coax unidentified adapters
+    /// into emitting the hello that reveals their identity.
+    usart2_sender: Arc<Mutex<Option<Arc<serial::SerialSender>>>>,
 }
 
 // ── Main loop ──────────────────────────────────────────────────────────
 
 pub async fn run(
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
+    cmd_tx: mpsc::UnboundedSender<Command>,
     event_tx: crossbeam_channel::Sender<Event>,
     ctx: egui::Context,
 ) {
+    // Counts USART1 adapters currently in their "settling" phase — from
+    // `Command::RegisterSerial` until the connect loop finishes its
+    // initial discovery and enters the main read loop (or cancels out).
+    // Each USART1 increments on spawn and decrements on settle/exit.
+    //
+    // When the decrement drops the count to zero, the last USART1 self-
+    // enqueues `Command::ProbeMoshiMoshi`. This coalesces the probe into
+    // a single fire across the whole "batch" of USART1s that come up
+    // together (startup, or a bulk port registration), instead of one
+    // probe per USART1. Ports registered individually after the batch
+    // settles each trigger their own single probe.
+    let usart1_settling: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+
     let devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut serials: HashMap<SerialPortIndex, BridgeSerial> = HashMap::new();
 
@@ -423,7 +456,18 @@ pub async fn run(
                     old.cancel.cancel();
                 }
 
+                // Increment the settling counter synchronously *before*
+                // spawning the task — multiple `RegisterSerial` commands
+                // processed back-to-back all bump the count before any
+                // task can run and decrement, so a "batch" (e.g. the
+                // startup load of saved ports) stays a single probe fire.
+                if matches!(adapter_type, SerialAdapterType::Usart1) {
+                    usart1_settling.fetch_add(1, Ordering::SeqCst);
+                }
+
                 let cancel = tokio_util::sync::CancellationToken::new();
+                let usart2_sender: Arc<Mutex<Option<Arc<serial::SerialSender>>>> =
+                    Arc::new(Mutex::new(None));
                 let task = tokio::spawn(serial_connect_loop(
                     index,
                     port,
@@ -437,6 +481,9 @@ pub async fn run(
                     flash_notify.clone(),
                     flash_wait_usb.clone(),
                     devices.clone(),
+                    usart1_settling.clone(),
+                    cmd_tx.clone(),
+                    usart2_sender.clone(),
                 ));
 
                 serials.insert(
@@ -444,6 +491,7 @@ pub async fn run(
                     BridgeSerial {
                         cancel,
                         _task: task,
+                        usart2_sender,
                     },
                 );
             }
@@ -657,6 +705,50 @@ pub async fn run(
                     }
                 });
             }
+
+            Command::ProbeMoshiMoshi => {
+                // Fire MoshiMoshi on every registered USART2 serial
+                // adapter, regardless of whether its device has been
+                // identified yet — identifying unknown adapters is the
+                // whole point of the probe. Iterates `serials` (keyed
+                // by `SerialPortIndex`) rather than `devices` (keyed by
+                // `DeviceId`) so a USART2 wire that hasn't yet seen its
+                // Awake still gets probed.
+                let targets: Vec<(SerialPortIndex, Arc<serial::SerialSender>)> = serials
+                    .iter()
+                    .filter_map(|(idx, bs)| {
+                        bs.usart2_sender
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .map(|s| (*idx, s))
+                    })
+                    .collect();
+
+                if targets.is_empty() {
+                    eprintln!(
+                        "[probe] ProbeMoshiMoshi: no live USART2 adapters, skipping"
+                    );
+                    continue;
+                }
+
+                eprintln!(
+                    "[probe] ProbeMoshiMoshi: firing on {} USART2 adapter(s)",
+                    targets.len()
+                );
+                for (idx, sender) in targets {
+                    tokio::spawn(async move {
+                        match sender.send_moshi_moshi().await {
+                            Ok(()) => {
+                                eprintln!("[probe] ProbeMoshiMoshi: sent to serial[{idx}]")
+                            }
+                            Err(e) => eprintln!(
+                                "[probe] ProbeMoshiMoshi: send failed on serial[{idx}]: {e}"
+                            ),
+                        }
+                    });
+                }
+            }
         }
     }
 }
@@ -676,6 +768,14 @@ async fn serial_connect_loop(
     flash_notify: Arc<tokio::sync::Notify>,
     flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
     bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
+    // USART1-specific settling counter + cmd_tx for self-enqueueing
+    // the batched ProbeMoshiMoshi. USART2 doesn't touch these.
+    usart1_settling: Arc<AtomicUsize>,
+    cmd_tx: mpsc::UnboundedSender<Command>,
+    // USART2-specific sender slot — filled by the USART2 connect loop
+    // once `Usart2::connect` succeeds so `ProbeMoshiMoshi` can find the
+    // wire even before an Awake identifies the device. Unused by USART1.
+    usart2_sender: Arc<Mutex<Option<Arc<serial::SerialSender>>>>,
 ) {
     match adapter_type {
         SerialAdapterType::Usart1 => {
@@ -690,6 +790,8 @@ async fn serial_connect_loop(
                 pending_flash,
                 flash_notify,
                 flash_wait_usb,
+                usart1_settling,
+                cmd_tx,
             )
             .await;
         }
@@ -703,8 +805,32 @@ async fn serial_connect_loop(
                 persistent_devices,
                 next_device_id,
                 bridge_devices,
+                usart2_sender,
             )
             .await;
+        }
+    }
+}
+
+/// Decrements `usart1_settling` on drop. If the decrement takes the count
+/// to zero, self-enqueues `Command::ProbeMoshiMoshi` so the last USART1
+/// to settle (or cancel) triggers one batched probe across all devices.
+///
+/// Using Drop (rather than an explicit `.release()` call) means
+/// cancellation paths — `return`s from port-open failures, the
+/// `cancel.cancelled()` branch in the select loop, panic unwinds — all
+/// balance the earlier `fetch_add(1)` in `Command::RegisterSerial`
+/// without per-site cleanup code.
+struct Usart1SettleGuard {
+    counter: Arc<AtomicUsize>,
+    cmd_tx: mpsc::UnboundedSender<Command>,
+}
+
+impl Drop for Usart1SettleGuard {
+    fn drop(&mut self) {
+        let prev = self.counter.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            let _ = self.cmd_tx.send(Command::ProbeMoshiMoshi);
         }
     }
 }
@@ -722,7 +848,17 @@ async fn usart1_connect_loop(
     pending_flash: Arc<Mutex<HashMap<DeviceId, PathBuf>>>,
     flash_notify: Arc<tokio::sync::Notify>,
     flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+    usart1_settling: Arc<AtomicUsize>,
+    cmd_tx: mpsc::UnboundedSender<Command>,
 ) {
+    // Guard is held until the connect loop either settles (in which case
+    // we drop it manually below to fire the probe as we enter the read
+    // loop) or cancels/errors out (in which case the function's drop
+    // fires it, possibly triggering a probe for any already-ready peers).
+    let mut settle_guard = Some(Usart1SettleGuard {
+        counter: usart1_settling,
+        cmd_tx,
+    });
     let adapter_id = device::adapter::AdapterId(index as u64);
 
     loop {
@@ -824,6 +960,14 @@ async fn usart1_connect_loop(
                 status: SerialPortStatus::DeviceDetected,
             });
         }
+
+        // Settle: we're past discovery and the select! loop below is
+        // about to start consuming `line_rx`. Dropping the guard here
+        // decrements `usart1_settling`; if this was the last USART1 in
+        // the batch, the drop fires a single `Command::ProbeMoshiMoshi`
+        // that pings every USART2 device so their supervisors emit the
+        // `hello` line we're now ready to receive.
+        settle_guard.take();
 
         loop {
             tokio::select! {
@@ -1248,6 +1392,10 @@ async fn usart2_connect_loop(
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
     bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
+    // Shared slot the `ProbeMoshiMoshi` handler reads to find live USART2
+    // wires. Populated here after a successful `Usart2::connect`; cleared
+    // when this loop exits so probes don't fire on a dead sender.
+    usart2_sender_slot: Arc<Mutex<Option<Arc<serial::SerialSender>>>>,
 ) {
     let adapter_id = device::adapter::AdapterId(index as u64 + 500_000);
 
@@ -1270,6 +1418,12 @@ async fn usart2_connect_loop(
 
         match connect_result {
             Ok(adapter) => {
+                // Publish the sender so `ProbeMoshiMoshi` can find this
+                // wire even before Awake has identified its device.
+                // Cleared on every exit path from this loop-iteration
+                // branch (see the `*slot = None` sites further down).
+                *usart2_sender_slot.lock().unwrap() = Some(adapter.sender());
+
                 // Hold the adapter until Awake identifies a device.
                 let mut adapter = Some(adapter);
 
@@ -1380,6 +1534,9 @@ async fn usart2_connect_loop(
                 if let Some(dev_id) = current_device.take() {
                     bridge_devices.lock().unwrap().remove(&dev_id);
                 }
+                // Clear the sender slot so a subsequent `ProbeMoshiMoshi`
+                // doesn't try to write to a dead wire.
+                *usart2_sender_slot.lock().unwrap() = None;
                 let _ = tx.send(Event::AdapterRemoved { adapter_id });
                 ctx.request_repaint();
                 return;

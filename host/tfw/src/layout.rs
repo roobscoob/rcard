@@ -76,10 +76,6 @@ fn place_key(place: &Place) -> u64 {
     resolve_cpu_address(place, false).unwrap_or(place.offset.unwrap_or(0))
 }
 
-fn has_alternatives(place: &Place) -> bool {
-    !place.alternatives.is_empty()
-}
-
 // ---------------------------------------------------------------------------
 // Cursor-based allocator
 // ---------------------------------------------------------------------------
@@ -106,11 +102,12 @@ pub type Reservations = BTreeMap<u64, u64>;
 pub const PLCB_TRAILER_RESERVATION: u64 = 1024;
 
 /// Compute trailer reservation for the place that hosts `places.bin`.
-/// Convention: the place named `image` hosts the file. Returns an
-/// empty map when no such place exists (e.g. RAM-boot configs).
+/// The host place is chosen by `boot.image` in the app's ncl config.
+/// Returns an empty map when no boot config is set (e.g. RAM-boot).
 pub fn compute_reservations(config: &AppConfig) -> Reservations {
     let mut out = BTreeMap::new();
-    if let Some(host) = config.places.get("image") {
+    if let Some(boot) = config.boot.as_ref() {
+        let host = &boot.image;
         if resolve_cpu_address(host, false).is_some() {
             out.insert(place_key(host), PLCB_TRAILER_RESERVATION);
         }
@@ -173,25 +170,6 @@ fn try_allocate(
     Some(Allocation { base: aligned, size })
 }
 
-/// Try primary place, then each alternative in order.
-fn try_allocate_any(
-    place: &Place,
-    size: u64,
-    align: u64,
-    cursors: &mut CursorMap,
-    reservations: &Reservations,
-) -> Option<Allocation> {
-    if let Some(alloc) = try_allocate(place, size, align, cursors, reservations) {
-        return Some(alloc);
-    }
-    for alt in &place.alternatives {
-        if let Some(alloc) = try_allocate(alt, size, align, cursors, reservations) {
-            return Some(alloc);
-        }
-    }
-    None
-}
-
 /// Remaining bytes in a place's primary region.
 fn remaining_in_place(place: &Place, cursors: &CursorMap) -> u64 {
     let pk = place_key(place);
@@ -231,32 +209,19 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
     let mut acl_only: Vec<RegionKey> = Vec::new();
     let mut cursors: CursorMap = BTreeMap::new();
 
-    // Partition fixed-size requests into single-place and flexible.
-    let fixed: Vec<&(RegionKey, &RegionRequest)> = requests
+    // Sort fixed-size requests: pack each place's regions largest-first
+    // for tight allocation.
+    let mut fixed: Vec<&(RegionKey, &RegionRequest)> = requests
         .iter()
         .filter(|(_, req)| req.size.is_some())
         .collect();
-
-    let mut single: Vec<&(RegionKey, &RegionRequest)> = fixed
-        .iter()
-        .filter(|(_, req)| !has_alternatives(&req.place))
-        .copied()
-        .collect();
-    single.sort_by(|a, b| {
+    fixed.sort_by(|a, b| {
         place_key(&a.1.place)
             .cmp(&place_key(&b.1.place))
             .then(b.1.size.cmp(&a.1.size))
     });
 
-    let mut flexible: Vec<&(RegionKey, &RegionRequest)> = fixed
-        .iter()
-        .filter(|(_, req)| has_alternatives(&req.place))
-        .copied()
-        .collect();
-    flexible.sort_by(|a, b| b.1.size.cmp(&a.1.size));
-
-    // Phase 1: single-place fixed-size regions (no fallback).
-    for (key, req) in &single {
+    for (key, req) in &fixed {
         if !is_cpu_mapped(&req.place) {
             acl_only.push(key.clone());
             continue;
@@ -266,27 +231,6 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
         let align = req.align.unwrap_or(4);
 
         let alloc = try_allocate(&req.place, size, align, &mut cursors, reservations)
-            .ok_or_else(|| LayoutError::OutOfSpace {
-                owner: key.0.clone(),
-                region: key.1.clone(),
-                needed: size,
-                available: remaining_in_place(&req.place, &cursors),
-            })?;
-
-        placed.insert(key.clone(), alloc);
-    }
-
-    // Phase 2: flexible fixed-size regions (try alternatives on overflow).
-    for (key, req) in &flexible {
-        if !is_cpu_mapped(&req.place) {
-            acl_only.push(key.clone());
-            continue;
-        }
-
-        let size = req.size.unwrap();
-        let align = req.align.unwrap_or(4);
-
-        let alloc = try_allocate_any(&req.place, size, align, &mut cursors, reservations)
             .ok_or_else(|| LayoutError::OutOfSpace {
                 owner: key.0.clone(),
                 region: key.1.clone(),
@@ -412,31 +356,18 @@ impl Layout {
         let mut cursors: CursorMap = BTreeMap::new();
         for r in &regions {
             ensure_cursor(&r.place, &mut cursors, reservations);
-            for alt in &r.place.alternatives {
-                ensure_cursor(alt, &mut cursors, reservations);
-            }
         }
         advance_cursors_past(&self.placed, &mut cursors);
 
-        // Phase 1: single-place deferred regions.
-        let mut single: Vec<&Region> = regions
-            .iter()
-            .filter(|r| !has_alternatives(&r.place))
-            .collect();
-        single.sort_by(|a, b| {
+        // Pack each place's regions largest-first.
+        let mut sorted: Vec<&Region> = regions.iter().collect();
+        sorted.sort_by(|a, b| {
             place_key(&a.place)
                 .cmp(&place_key(&b.place))
                 .then(b.size.cmp(&a.size))
         });
 
-        // Phase 2: flexible deferred regions (largest first).
-        let mut flexible: Vec<&Region> = regions
-            .iter()
-            .filter(|r| has_alternatives(&r.place))
-            .collect();
-        flexible.sort_by(|a, b| b.size.cmp(&a.size));
-
-        for r in single.iter().chain(flexible.iter()) {
+        for r in sorted {
             if r.size == 0 {
                 // Region has no content, but we still need an entry
                 // in `placed` so the linker script gets a valid ORIGIN
@@ -451,7 +382,7 @@ impl Layout {
                 continue;
             }
 
-            let alloc = try_allocate_any(&r.place, r.size, r.align, &mut cursors, reservations)
+            let alloc = try_allocate(&r.place, r.size, r.align, &mut cursors, reservations)
                 .ok_or_else(|| LayoutError::OutOfSpace {
                     owner: r.key.0.clone(),
                     region: r.key.1.clone(),

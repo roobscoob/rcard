@@ -36,9 +36,11 @@ fn load_fob_config() {
     assert!(bl.regions.contains_key("code"));
     assert!(bl.regions.contains_key("stack"));
 
-    // Boot config has ftab placement
+    // Boot config has ftab placement and image placement
     let boot = config.boot.as_ref().expect("boot config should exist");
     assert!(boot.ftab.offset.is_some());
+    assert!(boot.image.offset.is_some());
+    assert_eq!(boot.image.name.as_deref(), Some("image"));
 
     // Kernel
     assert_eq!(config.kernel.crate_info.package.name, "kernel-sf32lb52");

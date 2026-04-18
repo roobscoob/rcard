@@ -39,7 +39,6 @@ struct PartitionEntry {
     name: String,
     offset: u64,
     size: u64,
-    block_size: u64,
 }
 
 #[derive(Deserialize)]
@@ -458,7 +457,6 @@ fn write_partitions(out_dir: &PathBuf, config: &Config) {
     writeln!(f, "    pub name: &'static str,").unwrap();
     writeln!(f, "    pub offset: u64,").unwrap();
     writeln!(f, "    pub size: u64,").unwrap();
-    writeln!(f, "    pub block_size: u64,").unwrap();
     writeln!(f, "}}").unwrap();
     writeln!(f).unwrap();
 
@@ -466,8 +464,8 @@ fn write_partitions(out_dir: &PathBuf, config: &Config) {
     for part in &config.partitions {
         writeln!(
             f,
-            "    PartitionInfo {{ name: \"{}\", offset: {}, size: {}, block_size: {} }},",
-            part.name, part.offset, part.size, part.block_size
+            "    PartitionInfo {{ name: \"{}\", offset: {}, size: {} }},",
+            part.name, part.offset, part.size
         )
         .unwrap();
     }

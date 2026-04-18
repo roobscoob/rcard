@@ -10,7 +10,6 @@ let miB = fun n => n * 1024 * 1024 in
   pins = base.pins,
   memory = std.record.insert "mpi1" {
     size = miB 8,
-    block_size = 1,
     mappings = [
       { address = 0x10000000, size = miB 8, read = true, write = true, execute = true },
       { address = 0x60000000, size = miB 8, read = true, write = true },

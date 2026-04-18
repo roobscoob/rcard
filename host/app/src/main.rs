@@ -51,8 +51,11 @@ fn main() -> eframe::Result<()> {
             });
 
             // Spawn the bridge before moving the runtime into the app.
+            // Bridge needs a `cmd_tx` clone too so it can self-enqueue
+            // commands (e.g. the batched `ProbeMoshiMoshi` fired by
+            // `usart1_connect_loop` when the USART1 settling set empties).
             let handle = runtime.handle().clone();
-            handle.spawn(bridge::run(cmd_rx, event_tx, ctx.clone()));
+            handle.spawn(bridge::run(cmd_rx, cmd_tx.clone(), event_tx, ctx.clone()));
 
             Ok(Box::new(app::RcardApp::new(cmd_tx, event_rx, ctx, runtime)))
         }),

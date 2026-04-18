@@ -406,9 +406,12 @@ fn bl_to_fake_task(bl: &crate::config::BootloaderConfig) -> TaskConfig {
 /// Generate the bootloader's KCONFIG: firmware partition flash address and size.
 fn generate_bootloader_kconfig(config: &AppConfig) -> Result<String, CompileError> {
     // The bootloader needs to know where places.bin lives in flash.
-    // Find the image place from config.places.
-    let fw_place = config.places.get("image")
-        .ok_or_else(|| CompileError::Other("no 'image' place in config".into()))?;
+    // Pulled from `boot.image` in the app's ncl config.
+    let boot = config.boot.as_ref()
+        .ok_or_else(|| CompileError::Other(
+            "bootloader requires a `boot` config with `image` set".into()
+        ))?;
+    let fw_place = &boot.image;
     let fw_offset = fw_place.offset.unwrap_or(0);
     let flash_base = fw_place.mappings.iter()
         .find(|m| m.execute)

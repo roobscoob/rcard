@@ -157,6 +157,16 @@ impl Usart2 {
     }
 }
 
+impl Usart2 {
+    /// Clone of the underlying `SerialSender`. Exposed for bridge-level
+    /// code that needs the sender *before* this adapter is attached to
+    /// a `PhysicalDevice` (e.g. `ProbeMoshiMoshi`, which must reach the
+    /// wire to coax out the identifying Awake).
+    pub fn sender(&self) -> Arc<SerialSender> {
+        self.sender.clone()
+    }
+}
+
 impl Adapter for Usart2 {
     fn id(&self) -> AdapterId {
         self.id

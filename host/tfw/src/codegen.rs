@@ -31,6 +31,9 @@ pub struct GeneratedConfig {
     pub partitions: Vec<PartitionEntry>,
     /// Partition ACLs: partition name → list of allowed task indices.
     pub partition_acl: BTreeMap<String, Vec<usize>>,
+    /// Static geometry per memory device, keyed by device name (e.g. `"mpi2"`).
+    /// Surfaces the NCL `memory.<device>.geometry` field for firmware consumers.
+    pub device_geometry: BTreeMap<String, DeviceGeometryEntry>,
 
     /// Filesystem mount mappings.
     pub filesystems: Vec<FilesystemEntry>,
@@ -67,7 +70,6 @@ pub struct PartitionEntry {
     pub name: String,
     pub offset: u64,
     pub size: u64,
-    pub block_size: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +77,13 @@ pub struct FilesystemEntry {
     pub filesystem: String,
     pub mount_name: String,
     pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeviceGeometryEntry {
+    pub erase_size: u64,
+    pub program_size: u64,
+    pub read_size: u64,
 }
 
 /// Build the master config from the resolved AppConfig.
@@ -144,7 +153,6 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
                 name: place_name.clone(),
                 offset,
                 size: place.size,
-                block_size: place.block_size.unwrap_or(1) as u64,
             });
         }
     }
@@ -254,6 +262,25 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
         }
     }
 
+    // Per-device geometry. Only devices that declare a geometry block
+    // surface here — the NCL is the source of truth, and sysmodule_storage
+    // bakes these as build-time constants.
+    // `memory` lives on `config.kernel` indirectly — we grab it via
+    // the chip-level MemoryDevice map on the top-level AppConfig.
+    let mut device_geometry: BTreeMap<String, DeviceGeometryEntry> = BTreeMap::new();
+    for (dev_name, dev) in memory_devices(config) {
+        if let Some(g) = dev.geometry {
+            device_geometry.insert(
+                dev_name.clone(),
+                DeviceGeometryEntry {
+                    erase_size: g.erase_size,
+                    program_size: g.program_size,
+                    read_size: g.read_size,
+                },
+            );
+        }
+    }
+
     GeneratedConfig {
         build_id: build_id.to_string(),
         version: config.version.clone(),
@@ -264,12 +291,20 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
         notification_subscribers,
         partitions,
         partition_acl,
+        device_geometry,
         filesystems,
         pin_assignments: config.pin_assignments.clone(),
         ipc_acl,
         peers,
         task_irqs,
     }
+}
+
+/// Iterate over memory devices declared in the app config. The location
+/// depends on how `memory` is threaded through — for this project it's
+/// surfaced via the `AppConfig::memory` map.
+fn memory_devices(config: &AppConfig) -> impl Iterator<Item = (&String, &crate::config::MemoryDevice)> {
+    config.memory.iter()
 }
 
 /// Write the master config JSON to the given path.

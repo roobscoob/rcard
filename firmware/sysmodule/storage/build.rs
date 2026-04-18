@@ -5,10 +5,18 @@ use std::io::Write;
 use std::path::PathBuf;
 
 fn main() {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let project_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let json_path = project_root.join(".work").join("config.json");
+    // Prefer TFW_CONFIG_JSON (set by `tfw::build::build` to the real
+    // per-build work dir). Fall back to `firmware/.work/config.json`
+    // for direct cargo check.
+    let json_path = if let Ok(path) = std::env::var("TFW_CONFIG_JSON") {
+        PathBuf::from(path)
+    } else {
+        let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        let project_root = manifest_dir.parent().unwrap().parent().unwrap();
+        project_root.join(".work").join("config.json")
+    };
 
+    println!("cargo::rerun-if-env-changed=TFW_CONFIG_JSON");
     println!("cargo::rerun-if-changed={}", json_path.display());
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -17,8 +25,15 @@ fn main() {
 
     if !json_path.exists() {
         writeln!(out, "pub const PARTITIONS: &[PartitionConfig] = &[];").unwrap();
-        writeln!(out, "pub const MANAGED_PARTITIONS: &[&str] = &[];").unwrap();
         writeln!(out, "pub const FILESYSTEMS: &[FilesystemMap] = &[];").unwrap();
+        // Fallback geometry for bare cargo check (no config.json staged).
+        // Real builds always override this via device_geometry from NCL.
+        writeln!(
+            out,
+            "pub const FLASH_GEOMETRY: FlashGeometry = FlashGeometry {{ \
+             erase_size: 4096, program_size: 256, read_size: 1 }};"
+        )
+        .unwrap();
         writeln!(
             out,
             "pub fn is_partition_allowed(_name: &str, _caller: u16) -> bool {{ true }}"
@@ -30,38 +45,58 @@ fn main() {
     let data: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
 
-    // Partitions from config.json
+    // Flash geometry — pulled from the NCL `memory.mpi2.geometry` block.
+    // The storage sysmodule hardcodes mpi2 as its backing device (see
+    // `main.rs::main`), so we reach for that entry specifically.
+    let geo = data["device_geometry"]["mpi2"].as_object().unwrap_or_else(|| {
+        panic!(
+            "config.json missing `device_geometry.mpi2`; set `memory.mpi2.geometry` \
+             in the board NCL"
+        )
+    });
+    let erase_size = geo["erase_size"].as_u64().unwrap();
+    let program_size = geo["program_size"].as_u64().unwrap();
+    let read_size = geo["read_size"].as_u64().unwrap();
+    writeln!(
+        out,
+        "pub const FLASH_GEOMETRY: FlashGeometry = FlashGeometry {{ \
+         erase_size: {erase_size}u32, program_size: {program_size}u32, read_size: {read_size}u32 }};"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    // Partitions that back filesystem mounts get PART_MANAGED set —
+    // mirrors the flag the host writes into places.bin so the two
+    // sources stay in sync.
+    let managed_set: std::collections::HashSet<String> = data["filesystems"]
+        .as_array()
+        .map(|fs| {
+            fs.iter()
+                .filter_map(|f| f["source"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Partitions from config.json. Geometry (erase_size etc.) is queried
+    // from the MPI driver at runtime, not baked per partition.
     writeln!(out, "pub const PARTITIONS: &[PartitionConfig] = &[").unwrap();
     if let Some(parts) = data["partitions"].as_array() {
         for p in parts {
             let name = p["name"].as_str().unwrap();
             let offset = p["offset"].as_u64().unwrap();
             let size = p["size"].as_u64().unwrap();
-            let block_size = p["block_size"].as_u64().unwrap();
+            let mut flags: u32 = 0;
+            if managed_set.contains(name) {
+                flags |= rcard_places::PART_MANAGED;
+            }
             writeln!(
                 out,
                 "    PartitionConfig {{ device: \"mpi2\", name: \"{name}\", \
                  offset_bytes: {offset}, size_bytes: {size}, \
-                 erase_size: {block_size}, format: PartitionFormat::Raw }},"
+                 flags: {flags}, format: PartitionFormat::Raw }},"
             )
             .unwrap();
         }
-    }
-    writeln!(out, "];").unwrap();
-    writeln!(out).unwrap();
-
-    // Managed partitions (partitions used by filesystems)
-    let mut managed = Vec::new();
-    if let Some(filesystems) = data["filesystems"].as_array() {
-        for fs in filesystems {
-            if let Some(source) = fs["source"].as_str() {
-                managed.push(source.to_string());
-            }
-        }
-    }
-    writeln!(out, "pub const MANAGED_PARTITIONS: &[&str] = &[").unwrap();
-    for name in &managed {
-        writeln!(out, "    \"{name}\",").unwrap();
     }
     writeln!(out, "];").unwrap();
     writeln!(out).unwrap();

@@ -162,9 +162,7 @@ pub enum HostCrateEvent {
 
 /// A named memory place on the board (e.g. `"sram_fast_dctm"`, `"image"`).
 /// Place names come from `config.places` — the layout names assigned in
-/// `.ncl` files.  The resource identity is where the allocation *actually
-/// landed*, which may differ from where it was *requested* if
-/// alternatives/overflow were used.
+/// `.ncl` files. The resource identity is where the allocation landed.
 #[derive(Debug, Clone)]
 pub struct Memory {
     pub place: String,

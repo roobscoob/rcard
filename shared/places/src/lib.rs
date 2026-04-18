@@ -59,6 +59,10 @@ const SEGMENT_SIZE: usize = 16;
 /// Partition is not CPU-mapped; accessed via driver (e.g. MPI).
 pub const PART_UNMAPPED: u32 = 1 << 0;
 
+/// Partition is owned by a filesystem task — the storage sysmodule
+/// rejects direct acquires from anyone else.
+pub const PART_MANAGED: u32 = 1 << 1;
+
 // ── Name hashing ────────────────────────────────────────────────────────────
 
 /// FNV-1a hash of a partition name. Deterministic, no_std, and trivial

@@ -22,6 +22,7 @@ fun args =>
 
     boot = {
       ftab = args.places.sec_config,
+      image = args.places.image,
     },
 
     notifications = {

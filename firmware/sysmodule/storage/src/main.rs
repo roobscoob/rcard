@@ -25,13 +25,24 @@ pub enum PartitionFormat {
     RingBuffer,
 }
 
+/// Static geometry of the NOR flash backing this sysmodule. Baked from
+/// the board's `geometry` field in `build.rs`.
+#[derive(Debug, Clone, Copy)]
+pub struct FlashGeometry {
+    pub erase_size: u32,
+    pub program_size: u32,
+    pub read_size: u32,
+}
+
 #[derive(Debug)]
 pub struct PartitionConfig {
     pub device: &'static str,
     pub name: &'static str,
     pub offset_bytes: u64,
     pub size_bytes: u64,
-    pub erase_size: u64,
+    /// `rcard_places::PART_*` bits. Mirrors the flags the host writes
+    /// into places.bin's partition table so the two stay in sync.
+    pub flags: u32,
     pub format: PartitionFormat,
 }
 
@@ -60,8 +71,8 @@ fn find_partition(name: &[u8; 16]) -> Option<usize> {
     PARTITIONS.iter().position(|p| p.name == name_str)
 }
 
-fn is_managed(name: &str) -> bool {
-    MANAGED_PARTITIONS.iter().any(|&m| m == name)
+fn is_managed(config: &PartitionConfig) -> bool {
+    config.flags & rcard_places::PART_MANAGED != 0
 }
 
 // ── Shared MPI handle ──────────────────────────────────────────────
@@ -122,7 +133,6 @@ struct PartitionResource {
     index: usize,
     offset_bytes: u32,
     size_bytes: u32,
-    erase_size: u32,
 }
 
 impl Partition for PartitionResource {
@@ -134,7 +144,7 @@ impl Partition for PartitionResource {
         let is_fs_task = generated::peers::PEERS.sysmodule_fs
             .map_or(false, |id| caller == id.task_index());
 
-        if is_managed(config.name) {
+        if is_managed(config) {
             if !is_fs_task {
                 return Err(AcquireError::ManagedByFilesystem);
             }
@@ -150,7 +160,6 @@ impl Partition for PartitionResource {
             index: idx,
             offset_bytes: config.offset_bytes as u32,
             size_bytes: config.size_bytes as u32,
-            erase_size: config.erase_size as u32,
         })
     }
 
@@ -177,8 +186,8 @@ impl Partition for PartitionResource {
         if offset.saturating_add(len) > self.size_bytes {
             return Err(StorageError::out_of_range());
         }
-        // Require erase-aligned offset and length
-        if offset % self.erase_size != 0 || len % self.erase_size != 0 {
+        // Require erase-aligned offset and length.
+        if offset % FLASH_GEOMETRY.erase_size != 0 || len % FLASH_GEOMETRY.erase_size != 0 {
             return Err(StorageError::alignment());
         }
         // Erase then program
@@ -197,7 +206,7 @@ impl Partition for PartitionResource {
         if offset.saturating_add(len) > self.size_bytes {
             return Err(StorageError::out_of_range());
         }
-        if offset % self.erase_size != 0 || len % self.erase_size != 0 {
+        if offset % FLASH_GEOMETRY.erase_size != 0 || len % FLASH_GEOMETRY.erase_size != 0 {
             return Err(StorageError::alignment());
         }
         if mpi()
@@ -226,9 +235,9 @@ impl Partition for PartitionResource {
     fn geometry(&mut self, _meta: ipc::Meta) -> Geometry {
         Geometry {
             total_size: self.size_bytes,
-            erase_size: self.erase_size,
-            program_size: 256,
-            read_size: 1,
+            erase_size: FLASH_GEOMETRY.erase_size,
+            program_size: FLASH_GEOMETRY.program_size,
+            read_size: FLASH_GEOMETRY.read_size,
         }
     }
 }

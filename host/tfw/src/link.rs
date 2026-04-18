@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use object::read::elf::{ElfFile32, FileHeader, ProgramHeader};
@@ -54,10 +54,24 @@ pub fn link_image(
     // Build the places binary.
     let mut builder = rcard_places::PlacesBuilder::new(entry_point);
 
+    // Places that back filesystem mounts — marked PART_MANAGED so the
+    // storage sysmodule rejects direct acquires from non-fs tasks.
+    let fs_sources: HashSet<&str> = config
+        .filesystems
+        .values()
+        .flat_map(|fs| fs.mounts.iter().map(|m| m.source.as_str()))
+        .collect();
+
     // Emit partition table entries for all flash places.
     for (place_name, place) in &config.places {
         if let Some(offset) = place.offset {
-            let flags = if place.unmapped { rcard_places::PART_UNMAPPED } else { 0 };
+            let mut flags = 0;
+            if place.unmapped {
+                flags |= rcard_places::PART_UNMAPPED;
+            }
+            if fs_sources.contains(place_name.as_str()) {
+                flags |= rcard_places::PART_MANAGED;
+            }
             builder.add_partition(
                 rcard_places::name_hash(place_name.as_bytes()),
                 offset as u32,
@@ -72,13 +86,18 @@ pub fn link_image(
     // at their linker addresses on flash and run XIP. Segments destined
     // for other places (RAM-init data) are packed after the host place's
     // data, at any unclaimed file offset.
-    let host_base = config.places.get("image")
-        .and_then(|p| p.mappings.first().map(|m| m.address + p.offset.unwrap_or(0)));
+    //
+    // Which place hosts places.bin is chosen by the app ncl via
+    // `boot.image`. Without a boot config there is no host place.
+    let host_place_name: Option<&str> = config.boot.as_ref()
+        .and_then(|b| b.image.name.as_deref());
+    let host_base = config.boot.as_ref()
+        .and_then(|b| b.image.mappings.first().map(|m| m.address + b.image.offset.unwrap_or(0)));
 
     // Iterate places in two passes: host place first (so it takes
     // file_offset 0..host_size), then everything else packed after.
     let mut place_names: Vec<&str> = by_place.keys().copied().collect();
-    place_names.sort_by_key(|n| if *n == "image" { 0 } else { 1 });
+    place_names.sort_by_key(|n| if Some(*n) == host_place_name { 0 } else { 1 });
 
     let mut tail_cursor: u32 = 0;
     for place_name in place_names {
@@ -126,12 +145,12 @@ pub fn link_image(
         let mem_size = (mem_end - base) as u32;
 
         // Compute file_offset.
-        let file_offset = if place_name == "image" {
+        let file_offset = if Some(place_name) == host_place_name {
             let host = host_base.ok_or_else(|| LinkError::Other(
-                "image place exists in by_place but has no CPU mapping".into()
+                "host place exists in by_place but has no CPU mapping".into()
             ))?;
             let off = (base - host) as u32;
-            // Reserve the rest of the image's data region for the host.
+            // Reserve the rest of the host's data region for its own bytes.
             tail_cursor = off + total as u32;
             off
         } else {
