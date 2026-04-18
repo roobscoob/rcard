@@ -1,8 +1,8 @@
 use egui::{Color32, CornerRadius, Stroke, Style, Visuals, style::Spacing};
 
 // ── Palette ────────────────────────────────────────────────────────────
-const BG: Color32 = Color32::from_rgb(0x1B, 0x1D, 0x2B);
-const PANEL: Color32 = Color32::from_rgb(0x23, 0x25, 0x36);
+pub const BG: Color32 = Color32::from_rgb(0x1B, 0x1D, 0x2B);
+pub const PANEL: Color32 = Color32::from_rgb(0x23, 0x25, 0x36);
 const SIDEBAR: Color32 = Color32::from_rgb(0x1E, 0x20, 0x30);
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xCA, 0xD3, 0xF5);
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0x80, 0x87, 0xA2);
@@ -24,6 +24,14 @@ pub const TRACE: Color32 = Color32::from_rgb(0x60, 0x65, 0x80);
 pub const SURFACE: Color32 = Color32::from_rgb(0x2A, 0x2D, 0x42);
 #[allow(dead_code)]
 pub const SURFACE_BORDER: Color32 = Color32::from_rgb(0x33, 0x36, 0x50);
+#[allow(dead_code)]
+pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x40, 0x44, 0x66);
+
+// Build-panel category colors. Bootloader reuses ACCENT, kernel reuses
+// WARN, task reuses INFO; these are the two extra categories that need
+// their own tint.
+pub const SYSMOD: Color32 = Color32::from_rgb(0xF5, 0xA9, 0x7F);
+pub const HOST: Color32 = Color32::from_rgb(0x8B, 0xD5, 0xCA);
 
 pub fn apply(ctx: &egui::Context) {
     let mut style = Style::default();

@@ -11,8 +11,10 @@ use device::logs::Log;
 use tokio::sync::mpsc;
 
 use crate::state::{
-    BuildId, ChipUid, DeviceId, DeviceKind, DevicePhase, KnownCapability, SerialAdapterType,
-    SerialPortIndex, SerialPortStatus,
+    BuildId, ChipUid, CrateBuildState, CrateKind, DeviceId, DeviceKind, DevicePhase, Diagnostic,
+    DiagnosticLevel, HostCrateBuildState, ImageProgress, KnownCapability, MemoryAllocation,
+    MemoryDevice, PipelinePhase, ResourceSummary, SerialAdapterType, SerialPortIndex,
+    SerialPortStatus,
 };
 
 // ── Commands (GUI → bridge) ────────────────────────────────────────────
@@ -117,13 +119,75 @@ pub enum Event {
     DeviceDeleted { device_id: DeviceId },
     /// A log from a device.
     Log { device: DeviceId, log: Log },
-    /// Build stage progress.
-    BuildStage {
+    /// Pipeline advanced to a new major phase (Planning, CompilingTasks, …).
+    BuildPhase {
         build_id: BuildId,
-        stage: String,
-        detail: String,
+        phase: PipelinePhase,
     },
-    /// Build log line.
+    /// One-shot delivery of the resolved config — UUID, memory
+    /// devices, place capacities. Arrives once during Planning, after
+    /// config load. Replaces the old `BuildUuid` +
+    /// `BuildPlaceCapacity` + `BuildMemoryDevice` trio; those were
+    /// shaped like events but were really static config data.
+    BuildConfigResolved {
+        build_id: BuildId,
+        uuid: String,
+        memories: Vec<MemoryDevice>,
+        place_capacities: Vec<(String, u64)>,
+    },
+    /// IPC resource list resolved during the ExtractingMetadata stage.
+    /// Replaces `BuildHandle::resources` so the live-build view can
+    /// render the Resources card instead of leaving it empty until
+    /// the archive is loaded from disk.
+    BuildResources {
+        build_id: BuildId,
+        resources: Vec<ResourceSummary>,
+    },
+    /// An embedded crate's build state transitioned.
+    BuildCrateState {
+        build_id: BuildId,
+        name: String,
+        kind: CrateKind,
+        state: CrateBuildState,
+    },
+    /// An embedded crate reported a measured region size.
+    BuildCrateSized {
+        build_id: BuildId,
+        name: String,
+        kind: CrateKind,
+        region: String,
+        size: u64,
+    },
+    /// A single cargo output line scoped to a specific crate. Used to
+    /// populate the per-crate dropdown body.
+    BuildCrateCargoLine {
+        build_id: BuildId,
+        name: String,
+        kind: CrateKind,
+        line: String,
+    },
+    /// Host-side crate (schema_dump, metadata scrapers) state transition.
+    BuildHostCrateState {
+        build_id: BuildId,
+        name: String,
+        state: HostCrateBuildState,
+    },
+    /// A memory allocation was resolved by the layout solver.
+    BuildAllocation {
+        build_id: BuildId,
+        allocation: MemoryAllocation,
+    },
+    /// Output image state changed.
+    BuildImage {
+        build_id: BuildId,
+        image: ImageProgress,
+    },
+    /// A compiler diagnostic (warning or error) was emitted.
+    BuildDiagnostic {
+        build_id: BuildId,
+        diagnostic: Diagnostic,
+    },
+    /// Free-form pipeline log line (stage events, unparsed lines).
     BuildLog { build_id: BuildId, message: String },
     /// Build finished.
     BuildComplete {
@@ -517,79 +581,209 @@ pub async fn run(
                     let repaint = build_ctx.clone();
                     let on_event = move |event: tfw::build::BuildEvent| {
                         use tfw::build::*;
-                        let msg: Option<String> = match &event {
+                        // Forward strongly-typed events first; opportunistically
+                        // echo interesting lines into the free-form pipeline log
+                        // so the collapsed raw view still has context.
+                        let echo: Option<String> = match &event {
                             BuildEvent::Build(state) => {
-                                let name = format!("{state:?}");
-                                let _ = tx.send(Event::BuildStage {
+                                let phase = map_build_state(state);
+                                let _ = tx.send(Event::BuildPhase {
                                     build_id,
-                                    stage: name.clone(),
-                                    detail: String::new(),
+                                    phase: phase.clone(),
                                 });
-                                match state {
-                                    BuildState::Done => Some("Build complete.".into()),
-                                    _ => Some(format!("Stage: {name}")),
-                                }
+                                Some(format!("stage: {}", phase.label()))
+                            }
+                            BuildEvent::ConfigResolved(resolved) => {
+                                let memories = resolved
+                                    .memories
+                                    .iter()
+                                    .map(|m| MemoryDevice {
+                                        name: m.name.clone(),
+                                        size: m.size,
+                                        mappings: m.mappings.clone(),
+                                    })
+                                    .collect();
+                                let place_capacities = resolved.places.clone();
+                                let _ = tx.send(Event::BuildConfigResolved {
+                                    build_id,
+                                    uuid: resolved.build_id.clone(),
+                                    memories,
+                                    place_capacities,
+                                });
+                                Some(format!("build id: {}", resolved.build_id))
+                            }
+                            BuildEvent::IpcMetadata(bundle) => {
+                                // Derive the same `Vec<ResourceSummary>` a
+                                // loaded-firmware snapshot would produce,
+                                // so the Resources card fills in for live
+                                // builds without any UI branching.
+                                let resources =
+                                    ResourceSummary::list_from_bundle(bundle);
+                                let _ = tx.send(Event::BuildResources {
+                                    build_id,
+                                    resources,
+                                });
+                                Some(format!(
+                                    "ipc metadata: {} resources, {} servers",
+                                    bundle.resources.len(),
+                                    bundle.servers.len()
+                                ))
                             }
                             BuildEvent::Crate {
                                 name,
-                                kind: _,
+                                kind,
                                 update: ResourceUpdate::State(state),
                             } => {
-                                let _ = tx.send(Event::BuildStage {
+                                let gui_kind = classify_kind(name, *kind);
+                                let gui_state = map_crate_state(state);
+                                let _ = tx.send(Event::BuildCrateState {
                                     build_id,
-                                    stage: "Compile".into(),
-                                    detail: format!("{state:?}: {name}"),
+                                    name: name.clone(),
+                                    kind: gui_kind,
+                                    state: gui_state,
                                 });
-                                Some(format!("  {state:?} {name}"))
+                                Some(format!("  {:?} {name}", state))
                             }
                             BuildEvent::Crate {
                                 name,
-                                kind: _,
+                                kind,
                                 update: ResourceUpdate::Event(event),
-                            } => match event {
-                                CrateEvent::Sized { region, size } => {
-                                    Some(format!("  Measured {name}.{region} = {size} bytes"))
+                            } => {
+                                let gui_kind = classify_kind(name, *kind);
+                                match event {
+                                    CrateEvent::Sized { region, size } => {
+                                        let _ = tx.send(Event::BuildCrateSized {
+                                            build_id,
+                                            name: name.clone(),
+                                            kind: gui_kind,
+                                            region: region.clone(),
+                                            size: *size,
+                                        });
+                                        Some(format!(
+                                            "  Measured {name}.{region} = {size} bytes"
+                                        ))
+                                    }
+                                    CrateEvent::CargoMessage(m) => {
+                                        forward_cargo_message(&tx, build_id, name, gui_kind, m)
+                                    }
+                                    CrateEvent::CargoError(e) => {
+                                        let rendered = format!("{e}");
+                                        let _ = tx.send(Event::BuildCrateCargoLine {
+                                            build_id,
+                                            name: name.clone(),
+                                            kind: gui_kind,
+                                            line: rendered.clone(),
+                                        });
+                                        let _ = tx.send(Event::BuildDiagnostic {
+                                            build_id,
+                                            diagnostic: Diagnostic {
+                                                level: DiagnosticLevel::Error,
+                                                crate_name: name.clone(),
+                                                rendered: rendered.clone(),
+                                            },
+                                        });
+                                        let _ = tx.send(Event::BuildCrateState {
+                                            build_id,
+                                            name: name.clone(),
+                                            kind: gui_kind,
+                                            state: CrateBuildState::Failed,
+                                        });
+                                        Some(rendered)
+                                    }
                                 }
-                                CrateEvent::CargoMessage(m) => {
-                                    m.decode().ok().and_then(|decoded| {
-                                        if let escargot::format::Message::CompilerMessage(cm) =
-                                            decoded
-                                        {
-                                            cm.message.rendered.map(|r| r.trim().to_string())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                }
-                                CrateEvent::CargoError(e) => Some(format!("{e}")),
-                            },
+                            }
                             BuildEvent::HostCrate {
                                 name,
                                 update: ResourceUpdate::State(state),
-                            } => Some(format!("  {name}: {state:?}")),
+                            } => {
+                                let gui_state = map_host_crate_state(state);
+                                let _ = tx.send(Event::BuildHostCrateState {
+                                    build_id,
+                                    name: name.clone(),
+                                    state: gui_state,
+                                });
+                                Some(format!("  {name}: {:?}", state))
+                            }
                             BuildEvent::HostCrate {
-                                name: _,
+                                name,
                                 update: ResourceUpdate::Event(event),
                             } => match event {
-                                HostCrateEvent::CargoMessage(m) => {
-                                    m.decode().ok().and_then(|decoded| {
-                                        if let escargot::format::Message::CompilerMessage(cm) =
-                                            decoded
-                                        {
-                                            cm.message.rendered.map(|r| r.trim().to_string())
-                                        } else {
-                                            None
-                                        }
-                                    })
+                                HostCrateEvent::CargoMessage(m) => forward_cargo_message(
+                                    &tx,
+                                    build_id,
+                                    name,
+                                    crate::state::CrateKind::HostCrate,
+                                    m,
+                                ),
+                                HostCrateEvent::CargoError(e) => {
+                                    let rendered = format!("{e}");
+                                    let _ = tx.send(Event::BuildCrateCargoLine {
+                                        build_id,
+                                        name: name.clone(),
+                                        kind: crate::state::CrateKind::HostCrate,
+                                        line: rendered.clone(),
+                                    });
+                                    let _ = tx.send(Event::BuildDiagnostic {
+                                        build_id,
+                                        diagnostic: Diagnostic {
+                                            level: DiagnosticLevel::Error,
+                                            crate_name: name.clone(),
+                                            rendered: rendered.clone(),
+                                        },
+                                    });
+                                    let _ = tx.send(Event::BuildHostCrateState {
+                                        build_id,
+                                        name: name.clone(),
+                                        state: HostCrateBuildState::Failed,
+                                    });
+                                    Some(rendered)
                                 }
-                                HostCrateEvent::CargoError(e) => Some(format!("{e}")),
                             },
+                            BuildEvent::Memory {
+                                place,
+                                update: ResourceUpdate::Event(MemoryEvent::Allocated {
+                                    owner,
+                                    region,
+                                    base,
+                                    size,
+                                    request,
+                                }),
+                            } => {
+                                let _ = tx.send(Event::BuildAllocation {
+                                    build_id,
+                                    allocation: MemoryAllocation {
+                                        place: place.clone(),
+                                        owner: owner.clone(),
+                                        region: region.clone(),
+                                        base: *base,
+                                        size: *size,
+                                        requested_place: request.requested_place.clone(),
+                                    },
+                                });
+                                Some(format!(
+                                    "  alloc {owner}.{region} in {place} @ {base:#010x} ({size}B)"
+                                ))
+                            }
                             BuildEvent::Memory { .. } => None,
                             BuildEvent::Image(ResourceUpdate::State(state)) => match state {
                                 ImageState::Assembled { size } => {
+                                    let _ = tx.send(Event::BuildImage {
+                                        build_id,
+                                        image: ImageProgress::Assembled { size: *size },
+                                    });
                                     Some(format!("  Image assembled: {size} bytes"))
                                 }
                                 ImageState::Archived { path } => {
+                                    let size = std::fs::metadata(path)
+                                        .map(|m| m.len())
+                                        .unwrap_or(0);
+                                    let _ = tx.send(Event::BuildImage {
+                                        build_id,
+                                        image: ImageProgress::Archived {
+                                            size,
+                                            path: path.clone(),
+                                        },
+                                    });
                                     Some(format!("  Archived: {}", path.display()))
                                 }
                             },
@@ -599,7 +793,7 @@ pub async fn run(
                                 }
                             },
                         };
-                        if let Some(message) = msg {
+                        if let Some(message) = echo {
                             let _ = tx.send(Event::BuildLog { build_id, message });
                         }
                         repaint.request_repaint();
@@ -2395,3 +2589,148 @@ fn handle_usb_detach(
 
     eprintln!("[usb:{uid}] detached");
 }
+
+// ── Build event mapping helpers ─────────────────────────────────────────
+
+fn map_build_state(state: &tfw::build::BuildState) -> PipelinePhase {
+    use tfw::build::BuildState::*;
+    match state {
+        Planning => PipelinePhase::Planning,
+        CompilingTasks => PipelinePhase::CompilingTasks,
+        Organizing { regions_placed } => PipelinePhase::Organizing {
+            regions_placed: *regions_placed,
+        },
+        CompilingApp => PipelinePhase::CompilingApp,
+        ExtractingMetadata => PipelinePhase::ExtractingMetadata,
+        Packing => PipelinePhase::Packing,
+        Done => PipelinePhase::Done,
+    }
+}
+
+fn map_crate_kind(kind: tfw::build::CrateKind) -> CrateKind {
+    use tfw::build::CrateKind::*;
+    match kind {
+        Task => CrateKind::Task,
+        Kernel => CrateKind::Kernel,
+        Bootloader => CrateKind::Bootloader,
+    }
+}
+
+/// Classify a crate by name and its raw `tfw` kind. Sysmodules don't
+/// have their own variant in `tfw::build::CrateKind` — they're tasks
+/// whose crate name starts with `sysmodule_`. That convention is the
+/// only reliable signal we have today.
+fn classify_kind(name: &str, tfw_kind: tfw::build::CrateKind) -> CrateKind {
+    if tfw_kind == tfw::build::CrateKind::Task && name.starts_with("sysmodule_") {
+        CrateKind::Sysmodule
+    } else {
+        map_crate_kind(tfw_kind)
+    }
+}
+
+fn map_crate_state(state: &tfw::build::CrateState) -> CrateBuildState {
+    use tfw::build::CrateState::*;
+    match state {
+        Building => CrateBuildState::Building,
+        Compiled => CrateBuildState::Compiled,
+        Measuring => CrateBuildState::Measuring,
+        Linking => CrateBuildState::Linking,
+        Linked => CrateBuildState::Linked,
+    }
+}
+
+fn map_host_crate_state(state: &tfw::build::HostCrateState) -> HostCrateBuildState {
+    use tfw::build::HostCrateState::*;
+    match state {
+        Building => HostCrateBuildState::Building,
+        Running => HostCrateBuildState::Running,
+        Done => HostCrateBuildState::Done,
+    }
+}
+
+/// Decode a cargo message and forward it. Three message types are
+/// interesting to the panel:
+/// - `CompilerArtifact` → compile progress ("compiled foo v0.1.0")
+/// - `CompilerMessage`  → warnings and errors (also become diagnostics)
+/// - `BuildFinished`    → "cargo finished" tail
+///
+/// Cargo's human-readable `Compiling foo v0.1.0` status lines are
+/// written to stderr and never appear in the JSON stream, so the per-
+/// crate dropdown would otherwise be empty during a successful build.
+/// Surfacing CompilerArtifact fills that gap.
+fn forward_cargo_message(
+    tx: &crossbeam_channel::Sender<Event>,
+    build_id: BuildId,
+    crate_name: &str,
+    kind: CrateKind,
+    msg: &escargot::Message,
+) -> Option<String> {
+    let decoded = msg.decode().ok()?;
+    match decoded {
+        escargot::format::Message::CompilerMessage(cm) => {
+            let rendered = cm.message.rendered.as_deref()?.trim().to_string();
+            if rendered.is_empty() {
+                return None;
+            }
+            let _ = tx.send(Event::BuildCrateCargoLine {
+                build_id,
+                name: crate_name.to_string(),
+                kind,
+                line: rendered.clone(),
+            });
+            let level_str = format!("{:?}", cm.message.level).to_lowercase();
+            let level = if level_str.contains("error") || level_str.contains("ice") {
+                Some(DiagnosticLevel::Error)
+            } else if level_str.contains("warn") {
+                Some(DiagnosticLevel::Warning)
+            } else if level_str.contains("help") {
+                Some(DiagnosticLevel::Help)
+            } else if level_str.contains("note") {
+                Some(DiagnosticLevel::Note)
+            } else {
+                None
+            };
+            if let Some(level) = level {
+                let _ = tx.send(Event::BuildDiagnostic {
+                    build_id,
+                    diagnostic: Diagnostic {
+                        level,
+                        crate_name: crate_name.to_string(),
+                        rendered: rendered.clone(),
+                    },
+                });
+            }
+            Some(rendered)
+        }
+        escargot::format::Message::CompilerArtifact(ca) => {
+            // The artifact's target already carries the name we want
+            // (e.g. the crate or bin name). `package_id` wraps it in a
+            // `WorkspaceMember` whose raw string is private.
+            let target_name = ca.target.name.as_ref();
+            let line = format!("   Compiled {target_name}");
+            let _ = tx.send(Event::BuildCrateCargoLine {
+                build_id,
+                name: crate_name.to_string(),
+                kind,
+                line: line.clone(),
+            });
+            Some(line)
+        }
+        escargot::format::Message::BuildFinished(bf) => {
+            let line = if bf.success {
+                "   Finished".to_string()
+            } else {
+                "   Finished with errors".to_string()
+            };
+            let _ = tx.send(Event::BuildCrateCargoLine {
+                build_id,
+                name: crate_name.to_string(),
+                kind,
+                line: line.clone(),
+            });
+            Some(line)
+        }
+        _ => None,
+    }
+}
+

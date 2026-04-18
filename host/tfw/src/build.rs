@@ -102,6 +102,11 @@ impl Resource for Crate {
 pub enum CrateState {
     /// Cargo is building this crate into a relocatable object.
     Building,
+    /// Cargo has finished producing the relocatable object; waiting
+    /// for the batched Measuring pass to start. This exists so the
+    /// UI can stop showing "building…" the moment a crate is actually
+    /// done compiling, even when sibling crates are still in Cargo.
+    Compiled,
     /// The relocatable object is being linked at temporary addresses
     /// to measure how much memory its code and data actually need.
     Measuring,
@@ -245,12 +250,42 @@ pub enum ImageEvent {
 
 // ── Type-erased event stream ───────────────────────────────────────────────
 
+/// Static information that falls out of config load at the start of
+/// Planning — UUID, physical memory devices, named place capacities.
+/// Carried as a single one-shot bundle rather than three discrete
+/// events, because none of this data changes during the build.
+#[derive(Debug, Clone)]
+pub struct ResolvedLayout {
+    pub build_id: String,
+    pub memories: Vec<ResolvedMemoryDevice>,
+    /// `(place_name, size_bytes)` for every named place.
+    pub places: Vec<(String, u64)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedMemoryDevice {
+    pub name: String,
+    pub size: u64,
+    /// `(cpu_address, size)` pairs for each distinct CPU mapping.
+    pub mappings: Vec<(u64, u64)>,
+}
+
 /// Concrete event type sent through the callback channel.
 /// Wraps each resource's updates into a single enum for type erasure.
 #[derive(Debug)]
 pub enum BuildEvent {
     /// The overall build pipeline changed state.
     Build(BuildState),
+    /// One-shot delivery of the resolved config: build id, memory
+    /// devices, place capacities. Fired once during Planning, right
+    /// after config load. Bundles data that used to be three separate
+    /// events — none of this changes across the rest of the build.
+    ConfigResolved(ResolvedLayout),
+    /// Full IPC metadata bundle produced by the ExtractingMetadata
+    /// stage. Emitted once, after `ipc_metadata::scrape` and task-id
+    /// population. Lets the UI populate its Resources card for a live
+    /// build — previously only loaded firmware had this data.
+    IpcMetadata(crate::ipc_metadata::IpcMetadataBundle),
     /// A firmware crate was updated.
     Crate {
         name: String,
@@ -289,7 +324,42 @@ pub fn build(
     on_event: Option<EventFn<'_>>,
     work_dir: Option<&Path>,
 ) -> Result<PathBuf, BuildError> {
-    let emit = on_event.unwrap_or(&noop);
+    // Wrap the user's event sink so we can quietly tee every solved
+    // memory allocation into a local collector, and time the whole
+    // build for duration persistence. These two things end up in the
+    // archive at pack time so the GUI can show accurate utilisation +
+    // timing for any loaded firmware.
+    let user_emit: EventFn<'_> = on_event.unwrap_or(&noop);
+    let build_started = std::time::Instant::now();
+    let collected_allocs: std::cell::RefCell<Vec<crate::build_metadata::AllocationRecord>> =
+        std::cell::RefCell::new(Vec::new());
+    let emit_closure = |event: BuildEvent| {
+        if let BuildEvent::Memory {
+            place,
+            update:
+                ResourceUpdate::Event(MemoryEvent::Allocated {
+                    owner,
+                    region,
+                    base,
+                    size,
+                    request,
+                }),
+        } = &event
+        {
+            collected_allocs
+                .borrow_mut()
+                .push(crate::build_metadata::AllocationRecord {
+                    place: place.clone(),
+                    owner: owner.clone(),
+                    region: region.clone(),
+                    base: *base,
+                    size: *size,
+                    requested_place: request.requested_place.clone(),
+                });
+        }
+        user_emit(event);
+    };
+    let emit: EventFn<'_> = &emit_closure;
 
     let _tmp;
     let work_dir = match work_dir {
@@ -315,6 +385,35 @@ pub fn build(
     let config = crate::config::load(firmware_dir, root_ncl, board_ncl, layout_ncl)
         .map_err(BuildError::Config)?;
 
+    // Generate the build's identity up-front so it can be bundled
+    // with the resolved-layout broadcast.
+    let build_id = uuid::Uuid::new_v4().to_string();
+
+    // One-shot: everything about the resolved config the UI needs
+    // to render its static chrome (memory map devices, place
+    // capacities, build id). None of this changes during the build.
+    emit(BuildEvent::ConfigResolved(ResolvedLayout {
+        build_id: build_id.clone(),
+        memories: config
+            .memory
+            .iter()
+            .map(|(name, mem)| ResolvedMemoryDevice {
+                name: name.clone(),
+                size: mem.size,
+                mappings: mem
+                    .mappings
+                    .iter()
+                    .map(|m| (m.address, m.size))
+                    .collect(),
+            })
+            .collect(),
+        places: config
+            .places
+            .iter()
+            .map(|(name, place)| (name.clone(), place.size))
+            .collect(),
+    }));
+
     let reservations = crate::layout::compute_reservations(&config);
     let mut layout = crate::layout::solve(&config, &reservations).map_err(BuildError::Layout)?;
 
@@ -322,8 +421,6 @@ pub fn build(
     emit_memory_allocations(&layout.placed, &config, emit);
 
     crate::linker::generate(&config, &layout, &linker_dir).map_err(BuildError::Linker)?;
-
-    let build_id = uuid::Uuid::new_v4().to_string();
 
     crate::codegen::emit(&config, &build_id, &config_json_path).map_err(BuildError::Codegen)?;
 
@@ -375,6 +472,9 @@ pub fn build(
             server.task_id = Some(idx as u16);
         }
     }
+    // Announce the full bundle now that `task_id` fields are set —
+    // the UI needs it to populate the Resources card for live builds.
+    emit(BuildEvent::IpcMetadata(ipc_bundle.clone()));
 
     // Schema dump — compile a host binary to extract postcard-schema types.
     let api_crates: Vec<crate::schema_dump::ApiCrate> = ipc_bundle
@@ -454,7 +554,7 @@ pub fn build(
         ImageState::Assembled { size: bin_size },
     )));
 
-    let build_meta = crate::build_metadata::BuildMetadata::from_build(
+    let mut build_meta = crate::build_metadata::BuildMetadata::from_build(
         &build_id,
         &config.name,
         config.version.as_deref(),
@@ -462,6 +562,11 @@ pub fn build(
         layout_ncl,
         firmware_dir,
     );
+    // Stamp duration + solved allocations so tooling reading this .tfw
+    // later can render a faithful memory map and timing without having
+    // to re-solve.
+    build_meta.build_duration_ms = Some(build_started.elapsed().as_millis() as u64);
+    build_meta.allocations = collected_allocs.borrow().clone();
     crate::pack::pack(
         &config,
         &layout,

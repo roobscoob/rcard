@@ -102,6 +102,10 @@ pub fn compile_all(
         if artifact.exists() {
             std::fs::copy(&artifact, partial_dir.join(crate_name)).map_err(CompileError::Io)?;
         }
+        // Cargo done for this crate — flip out of Building so the
+        // UI stops showing "building…" while siblings are still
+        // compiling. Measuring happens in its own batched pass below.
+        emit_crate(crate_name, CrateKind::Task, CrateState::Compiled);
     }
 
     // ── Measuring: Re-link for sizing → resolve deferred ─────────────
@@ -236,6 +240,7 @@ pub fn compile_all(
     if kernel_partial_src.exists() {
         std::fs::copy(&kernel_partial_src, &kernel_partial).map_err(CompileError::Io)?;
     }
+    emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Compiled);
 
     // Measuring
     emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Measuring);
@@ -328,6 +333,7 @@ pub fn compile_all(
         if bl_partial_src.exists() {
             std::fs::copy(&bl_partial_src, &bl_partial).map_err(CompileError::Io)?;
         }
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Compiled);
 
         // Measuring
         emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Measuring);

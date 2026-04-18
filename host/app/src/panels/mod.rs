@@ -1,6 +1,5 @@
 pub mod build_output;
 pub mod device_renode;
-pub mod firmware_status;
 pub mod log_viewer;
 pub mod placeholder;
 pub mod raw_logs;
@@ -9,7 +8,7 @@ pub mod serial_control;
 
 pub mod serial_adapter;
 
-use crate::state::{AppState, BuildId, DeviceId, FirmwareId, SerialPortIndex};
+use crate::state::{AppState, BuildId, DeviceId, SerialPortIndex};
 use egui_phosphor::regular as icon;
 
 /// A pane in the tiled main area.
@@ -21,10 +20,12 @@ pub enum Pane {
     DeviceProtocol(DeviceId),
     /// Renode emulator management view (emulator devices only).
     DeviceRenode(DeviceId),
-    /// Firmware status / details view.
-    FirmwareStatus(FirmwareId),
-    /// Build output / progress view.
-    Build(BuildId),
+    /// Unified build / firmware panel. The `BuildId` addresses a
+    /// `BuildHandle` in `AppState::builds`, which can be either a
+    /// live build or a snapshot synthesised from a loaded `.tfw`
+    /// archive. The panel never branches on which — it renders
+    /// whatever's in the handle.
+    Firmware(BuildId),
     /// USART1 serial adapter management view (raw terminal).
     SerialAdapter(SerialPortIndex),
     /// USART2 Logs sub-pane — decoded structured log entries.
@@ -60,19 +61,18 @@ impl Pane {
                     .unwrap_or("?");
                 format!("{} {name} — Renode", icon::DESKTOP)
             }
-            Pane::FirmwareStatus(id) => {
-                let name = state
-                    .firmware
-                    .get(id)
-                    .map(|fw| fw.display_name())
-                    .unwrap_or_else(|| "Firmware".into());
-                format!("{} {name}", icon::PACKAGE)
+            Pane::Firmware(id) => {
+                if let Some(b) = state.builds.get(id) {
+                    let glyph = match b.status {
+                        crate::state::BuildStatus::Running => icon::HAMMER,
+                        crate::state::BuildStatus::Succeeded { .. } => icon::PACKAGE,
+                        crate::state::BuildStatus::Failed { .. } => icon::X_CIRCLE,
+                    };
+                    format!("{} {}", glyph, b.config.config)
+                } else {
+                    format!("{} Firmware", icon::PACKAGE)
+                }
             }
-            Pane::Build(id) => state
-                .builds
-                .get(id)
-                .map(|b| format!("{} Build: {}", icon::HAMMER, b.config.config))
-                .unwrap_or_else(|| format!("{} Build", icon::HAMMER)),
             Pane::SerialAdapter(idx) => state
                 .serial_ports
                 .get(*idx)
@@ -130,31 +130,18 @@ impl<'a> egui_tiles::Behavior<Pane> for PaneBehavior<'a> {
                     ui.label("Device not found");
                 }
             }
-            Pane::FirmwareStatus(id) => {
-                let fw_id = *id;
-                if let Some(fw) = self.state.firmware.get(id) {
-                    match firmware_status::show(ui, fw) {
-                        firmware_status::FirmwareAction::RunEmulator => {
-                            self.state.run_emulator(fw_id);
-                        }
-                        firmware_status::FirmwareAction::Flash => {
-                            self.state.flash_modal = Some(crate::state::FlashModalState::Picker {
-                                firmware_id: fw_id,
-                                selected_device: None,
-                            });
-                        }
-                        firmware_status::FirmwareAction::None => {}
-                    }
+            Pane::Firmware(build_id) => {
+                // Single dispatch point. Whether this `BuildHandle` was
+                // produced by a live build or synthesised from an
+                // archive is irrelevant to the renderer — it just
+                // reads `BuildHandle` fields.
+                let action = if let Some(build) = self.state.builds.get(build_id) {
+                    build_output::show(ui, build)
                 } else {
                     ui.label("Firmware not found");
-                }
-            }
-            Pane::Build(id) => {
-                if let Some(build) = self.state.builds.get(id) {
-                    build_output::show(ui, build);
-                } else {
-                    ui.label("Build not found");
-                }
+                    build_output::PanelAction::None
+                };
+                handle_panel_action(self.state, action);
             }
             Pane::SerialAdapter(idx) => {
                 let idx = *idx;
@@ -215,6 +202,25 @@ impl<'a> egui_tiles::Behavior<Pane> for PaneBehavior<'a> {
         egui_tiles::SimplificationOptions {
             all_panes_must_have_tabs: true,
             ..Default::default()
+        }
+    }
+}
+
+/// Dispatch a `PanelAction` returned by the unified Build/Firmware panel.
+fn handle_panel_action(state: &mut AppState, action: build_output::PanelAction) {
+    match action {
+        build_output::PanelAction::None => {}
+        build_output::PanelAction::Flash(fw_id) => {
+            state.flash_modal = Some(crate::state::FlashModalState::Picker {
+                firmware_id: fw_id,
+                selected_device: None,
+            });
+        }
+        build_output::PanelAction::RunEmulator(fw_id) => {
+            state.run_emulator(fw_id);
+        }
+        build_output::PanelAction::DeleteBuild(build_id) => {
+            state.remove_build(build_id);
         }
     }
 }

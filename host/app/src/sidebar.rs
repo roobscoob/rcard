@@ -146,7 +146,7 @@ fn build_section(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(6.0);
 
     let any_running = state.builds.values().any(|b| {
-        matches!(b.status, BuildStatus::Running { .. })
+        matches!(b.status, BuildStatus::Running)
     });
 
     let label = if any_running {

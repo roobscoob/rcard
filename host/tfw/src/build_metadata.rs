@@ -4,6 +4,20 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+/// One resolved region allocation — `owner.region` occupies `size`
+/// bytes at cpu `base`, landing in `place`. Persisted in the archive
+/// so tooling (and the GUI's memory-map card) can show real utilisation
+/// without re-running the build.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationRecord {
+    pub place: String,
+    pub owner: String,
+    pub region: String,
+    pub base: u64,
+    pub size: u64,
+    pub requested_place: String,
+}
+
 /// Metadata about a firmware build, stored in the .tfw archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildMetadata {
@@ -21,6 +35,14 @@ pub struct BuildMetadata {
     pub layout: String,
     /// Package name → version for all crates in the build.
     pub packages: BTreeMap<String, String>,
+    /// Wall-clock build duration (milliseconds). `None` for archives
+    /// produced by older versions of the build pipeline.
+    #[serde(default)]
+    pub build_duration_ms: Option<u64>,
+    /// Solved memory-region allocations. Source of truth for the UI's
+    /// memory map on loaded firmware; `None` for older archives.
+    #[serde(default)]
+    pub allocations: Vec<AllocationRecord>,
 }
 
 impl BuildMetadata {
@@ -41,6 +63,8 @@ impl BuildMetadata {
             board: board.to_string(),
             layout: layout.to_string(),
             packages: collect_package_versions(firmware_dir),
+            build_duration_ms: None,
+            allocations: Vec::new(),
         }
     }
 }

@@ -135,7 +135,13 @@ impl eframe::App for RcardApp {
                 eprintln!("[drag] hover started: {}", path.display());
                 match self.state.load_firmware(path) {
                     Ok(fw_id) => {
-                        let pane = panels::Pane::FirmwareStatus(fw_id);
+                        // Resolve to (or synthesize) a BuildHandle so
+                        // the pane can render through the unified
+                        // BuildId path.
+                        let Some(build_id) = self.state.build_for_firmware(fw_id) else {
+                            return;
+                        };
+                        let pane = panels::Pane::Firmware(build_id);
                         let tile_id = self.state.tree.tiles.insert_pane(pane);
 
                         if self.state.tree.root().is_none() {
