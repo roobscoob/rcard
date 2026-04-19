@@ -21,9 +21,15 @@ const CR_BANKSEL_SHIFT: u32 = 2;
 
 const SR_DONE: u32 = 1 << 0;
 
+/// Maximum poll iterations before declaring a timeout. At 240 MHz the
+/// real controller completes in well under 1 µs; 100 000 iterations is
+/// extremely generous while still preventing an infinite loop when the
+/// peripheral is unmodeled (e.g. Renode with a SilenceRange).
+const POLL_LIMIT: u32 = 100_000;
+
 /// Run one bank read: program CR, poll SR.DONE, w1c DONE, then pull the
 /// eight data words out. See §13.3.4 for the sequence.
-fn read_bank(bank: u8) -> [u32; 8] {
+fn read_bank(bank: u8) -> Result<[u32; 8], EfuseError> {
     let bank = bank as u32 & 0x3;
 
     unsafe {
@@ -31,10 +37,14 @@ fn read_bank(bank: u8) -> [u32; 8] {
         // off the read).
         write_volatile(CR, (bank << CR_BANKSEL_SHIFT) | CR_EN);
 
-        // Poll SR.DONE. The TIMR reset value is calibrated for a 48 MHz
-        // module clock; the completion window is sub-millisecond so a
-        // tight busy-poll is fine.
-        while read_volatile(SR) & SR_DONE == 0 {}
+        // Poll SR.DONE with a bounded retry count.
+        let mut polls = 0u32;
+        while read_volatile(SR) & SR_DONE == 0 {
+            polls += 1;
+            if polls >= POLL_LIMIT {
+                return Err(EfuseError::Timeout);
+            }
+        }
 
         // w1c the DONE flag before the next read.
         write_volatile(SR, SR_DONE);
@@ -47,7 +57,7 @@ fn read_bank(bank: u8) -> [u32; 8] {
             out[i] = read_volatile(base.add(i));
             i += 1;
         }
-        out
+        Ok(out)
     }
 }
 
@@ -74,7 +84,7 @@ impl Efuse for EfuseImpl {
         if bank_id > 3 {
             return Err(EfuseError::InvalidBank);
         }
-        Ok(bank_to_bytes(read_bank(bank_id)))
+        Ok(bank_to_bytes(read_bank(bank_id)?))
     }
 }
 

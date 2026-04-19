@@ -68,7 +68,8 @@ impl Pane {
                         crate::state::BuildStatus::Succeeded { .. } => icon::PACKAGE,
                         crate::state::BuildStatus::Failed { .. } => icon::X_CIRCLE,
                     };
-                    format!("{} {}", glyph, b.config.config)
+                    let name = b.name.as_deref().unwrap_or(&b.config.config);
+                    format!("{} {}", glyph, name)
                 } else {
                     format!("{} Firmware", icon::PACKAGE)
                 }
@@ -138,8 +139,8 @@ impl<'a> egui_tiles::Behavior<Pane> for PaneBehavior<'a> {
                 let action = if let Some(build) = self.state.builds.get(build_id) {
                     build_output::show(ui, build)
                 } else {
-                    ui.label("Firmware not found");
-                    build_output::PanelAction::None
+                    // Build was removed — close this orphaned tile.
+                    build_output::PanelAction::DeleteBuild(*build_id)
                 };
                 handle_panel_action(self.state, action);
             }

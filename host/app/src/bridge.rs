@@ -11,10 +11,10 @@ use device::logs::Log;
 use tokio::sync::mpsc;
 
 use crate::state::{
-    BuildId, ChipUid, CrateBuildState, CrateKind, DeviceId, DeviceKind, DevicePhase, Diagnostic,
-    DiagnosticLevel, HostCrateBuildState, ImageProgress, KnownCapability, MemoryAllocation,
-    MemoryDevice, PipelinePhase, ResourceSummary, SerialAdapterType, SerialPortIndex,
-    SerialPortStatus,
+    BuildId, ChipUid, CrateBuildState, CrateKind, DeviceId, DeviceKind, DevicePhase,
+    HostCrateBuildState, ImageProgress, KnownCapability, MemoryAllocation,
+    MemoryDevice, PipelinePhase, ProvidedResource, ResourceSummary, SerialAdapterType,
+    SerialPortIndex, SerialPortStatus, UsedResource,
 };
 
 // ── Commands (GUI → bridge) ────────────────────────────────────────────
@@ -132,8 +132,14 @@ pub enum Event {
     BuildConfigResolved {
         build_id: BuildId,
         uuid: String,
+        /// Resolved app name from the Nickel config.
+        name: String,
         memories: Vec<MemoryDevice>,
         place_capacities: Vec<(String, u64)>,
+        /// Per-task metadata from the config: priority, kind,
+        /// dependency edges. Used to pre-populate `CrateProgress`
+        /// entries before compile events start arriving.
+        tasks: Vec<tfw::build::ResolvedTaskInfo>,
     },
     /// IPC resource list resolved during the ExtractingMetadata stage.
     /// Replaces `BuildHandle::resources` so the live-build view can
@@ -142,6 +148,11 @@ pub enum Event {
     BuildResources {
         build_id: BuildId,
         resources: Vec<ResourceSummary>,
+        /// Raw IPC bundle for per-crate provides/uses derivation in
+        /// state.rs. `resources` above is the card-level summary;
+        /// this carries the full server map needed to fill in
+        /// individual crate rows.
+        bundle: tfw::ipc_metadata::IpcMetadataBundle,
     },
     /// An embedded crate's build state transitioned.
     BuildCrateState {
@@ -158,8 +169,9 @@ pub enum Event {
         region: String,
         size: u64,
     },
-    /// A single cargo output line scoped to a specific crate. Used to
-    /// populate the per-crate dropdown body.
+    /// A raw cargo JSON message scoped to a specific crate. The `line`
+    /// field is one ndjson line from cargo's `--message-format=json`
+    /// output. The frontend decodes it for rendering.
     BuildCrateCargoLine {
         build_id: BuildId,
         name: String,
@@ -181,11 +193,6 @@ pub enum Event {
     BuildImage {
         build_id: BuildId,
         image: ImageProgress,
-    },
-    /// A compiler diagnostic (warning or error) was emitted.
-    BuildDiagnostic {
-        build_id: BuildId,
-        diagnostic: Diagnostic,
     },
     /// Free-form pipeline log line (stage events, unparsed lines).
     BuildLog { build_id: BuildId, message: String },
@@ -604,29 +611,30 @@ pub async fn run(
                                     })
                                     .collect();
                                 let place_capacities = resolved.places.clone();
+                                let tasks = resolved.tasks.clone();
                                 let _ = tx.send(Event::BuildConfigResolved {
                                     build_id,
                                     uuid: resolved.build_id.clone(),
+                                    name: resolved.name.clone(),
                                     memories,
                                     place_capacities,
+                                    tasks,
                                 });
                                 Some(format!("build id: {}", resolved.build_id))
                             }
                             BuildEvent::IpcMetadata(bundle) => {
-                                // Derive the same `Vec<ResourceSummary>` a
-                                // loaded-firmware snapshot would produce,
-                                // so the Resources card fills in for live
-                                // builds without any UI branching.
                                 let resources =
                                     ResourceSummary::list_from_bundle(bundle);
+                                let n_res = bundle.resources.len();
+                                let n_srv = bundle.servers.len();
                                 let _ = tx.send(Event::BuildResources {
                                     build_id,
                                     resources,
+                                    bundle: bundle.clone(),
                                 });
                                 Some(format!(
                                     "ipc metadata: {} resources, {} servers",
-                                    bundle.resources.len(),
-                                    bundle.servers.len()
+                                    n_res, n_srv
                                 ))
                             }
                             BuildEvent::Crate {
@@ -674,14 +682,6 @@ pub async fn run(
                                             kind: gui_kind,
                                             line: rendered.clone(),
                                         });
-                                        let _ = tx.send(Event::BuildDiagnostic {
-                                            build_id,
-                                            diagnostic: Diagnostic {
-                                                level: DiagnosticLevel::Error,
-                                                crate_name: name.clone(),
-                                                rendered: rendered.clone(),
-                                            },
-                                        });
                                         let _ = tx.send(Event::BuildCrateState {
                                             build_id,
                                             name: name.clone(),
@@ -722,14 +722,6 @@ pub async fn run(
                                         name: name.clone(),
                                         kind: crate::state::CrateKind::HostCrate,
                                         line: rendered.clone(),
-                                    });
-                                    let _ = tx.send(Event::BuildDiagnostic {
-                                        build_id,
-                                        diagnostic: Diagnostic {
-                                            level: DiagnosticLevel::Error,
-                                            crate_name: name.clone(),
-                                            rendered: rendered.clone(),
-                                        },
                                     });
                                     let _ = tx.send(Event::BuildHostCrateState {
                                         build_id,
@@ -2648,16 +2640,8 @@ fn map_host_crate_state(state: &tfw::build::HostCrateState) -> HostCrateBuildSta
     }
 }
 
-/// Decode a cargo message and forward it. Three message types are
-/// interesting to the panel:
-/// - `CompilerArtifact` → compile progress ("compiled foo v0.1.0")
-/// - `CompilerMessage`  → warnings and errors (also become diagnostics)
-/// - `BuildFinished`    → "cargo finished" tail
-///
-/// Cargo's human-readable `Compiling foo v0.1.0` status lines are
-/// written to stderr and never appear in the JSON stream, so the per-
-/// crate dropdown would otherwise be empty during a successful build.
-/// Surfacing CompilerArtifact fills that gap.
+/// Forward a raw cargo message as JSON. The frontend decodes and
+/// renders it — no parsing happens here.
 fn forward_cargo_message(
     tx: &crossbeam_channel::Sender<Event>,
     build_id: BuildId,
@@ -2665,72 +2649,14 @@ fn forward_cargo_message(
     kind: CrateKind,
     msg: &escargot::Message,
 ) -> Option<String> {
-    let decoded = msg.decode().ok()?;
-    match decoded {
-        escargot::format::Message::CompilerMessage(cm) => {
-            let rendered = cm.message.rendered.as_deref()?.trim().to_string();
-            if rendered.is_empty() {
-                return None;
-            }
-            let _ = tx.send(Event::BuildCrateCargoLine {
-                build_id,
-                name: crate_name.to_string(),
-                kind,
-                line: rendered.clone(),
-            });
-            let level_str = format!("{:?}", cm.message.level).to_lowercase();
-            let level = if level_str.contains("error") || level_str.contains("ice") {
-                Some(DiagnosticLevel::Error)
-            } else if level_str.contains("warn") {
-                Some(DiagnosticLevel::Warning)
-            } else if level_str.contains("help") {
-                Some(DiagnosticLevel::Help)
-            } else if level_str.contains("note") {
-                Some(DiagnosticLevel::Note)
-            } else {
-                None
-            };
-            if let Some(level) = level {
-                let _ = tx.send(Event::BuildDiagnostic {
-                    build_id,
-                    diagnostic: Diagnostic {
-                        level,
-                        crate_name: crate_name.to_string(),
-                        rendered: rendered.clone(),
-                    },
-                });
-            }
-            Some(rendered)
-        }
-        escargot::format::Message::CompilerArtifact(ca) => {
-            // The artifact's target already carries the name we want
-            // (e.g. the crate or bin name). `package_id` wraps it in a
-            // `WorkspaceMember` whose raw string is private.
-            let target_name = ca.target.name.as_ref();
-            let line = format!("   Compiled {target_name}");
-            let _ = tx.send(Event::BuildCrateCargoLine {
-                build_id,
-                name: crate_name.to_string(),
-                kind,
-                line: line.clone(),
-            });
-            Some(line)
-        }
-        escargot::format::Message::BuildFinished(bf) => {
-            let line = if bf.success {
-                "   Finished".to_string()
-            } else {
-                "   Finished with errors".to_string()
-            };
-            let _ = tx.send(Event::BuildCrateCargoLine {
-                build_id,
-                name: crate_name.to_string(),
-                kind,
-                line: line.clone(),
-            });
-            Some(line)
-        }
-        _ => None,
-    }
+    let val: serde_json::Value = msg.decode_custom().ok()?;
+    let raw = serde_json::to_string(&val).ok()?;
+    let _ = tx.send(Event::BuildCrateCargoLine {
+        build_id,
+        name: crate_name.to_string(),
+        kind,
+        line: raw.clone(),
+    });
+    Some(raw)
 }
 

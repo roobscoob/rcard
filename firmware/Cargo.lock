@@ -889,17 +889,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stub"
-version = "0.1.0"
-dependencies = [
- "generated",
- "ipc",
- "rcard-log",
- "sysmodule_log_api",
- "userlib",
-]
-
-[[package]]
 name = "supervisor"
 version = "0.1.0"
 dependencies = [

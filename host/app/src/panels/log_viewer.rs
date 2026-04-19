@@ -124,10 +124,22 @@ pub fn show(ui: &mut egui::Ui, dev: &DeviceHandle, state: &AppState) {
                         row.col(|ui| { ui.label(text); });
                     }
                     LogContents::Renode { level, message } => {
-                        row.col(|_ui| {}); // source
+                        let (source, body) = message
+                            .find(": ")
+                            .filter(|&i| i > 0 && i < 20 && message[..i].chars().all(|c| c.is_alphanumeric() || c == '_'))
+                            .map(|i| (&message[..i], &message[i + 2..]))
+                            .unwrap_or(("", message.as_str()));
+                        row.col(|ui| {
+                            if !source.is_empty() {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(0x80, 0x87, 0xA2),
+                                    source,
+                                );
+                            }
+                        });
                         let (color, label) = level_style(*level);
                         row.col(|ui| { ui.colored_label(color, label); });
-                        row.col(|ui| { ui.label(message); });
+                        row.col(|ui| { ui.label(body); });
                     }
                 }
             });

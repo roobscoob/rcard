@@ -257,9 +257,26 @@ pub enum ImageEvent {
 #[derive(Debug, Clone)]
 pub struct ResolvedLayout {
     pub build_id: String,
+    /// Resolved app name from the Nickel config (e.g. "rcard").
+    pub name: String,
     pub memories: Vec<ResolvedMemoryDevice>,
     /// `(place_name, size_bytes)` for every named place.
     pub places: Vec<(String, u64)>,
+    /// Per-task metadata from the config tree — priority, kind,
+    /// dependency edges. Lets the UI show task info before compile
+    /// events arrive.
+    pub tasks: Vec<ResolvedTaskInfo>,
+}
+
+/// Static per-task metadata from the config. Available immediately
+/// after config load in the Planning phase.
+#[derive(Debug, Clone)]
+pub struct ResolvedTaskInfo {
+    pub name: String,
+    pub kind: CrateKind,
+    pub priority: u32,
+    /// Names of tasks this task directly depends on.
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,29 +350,64 @@ pub fn build(
     let build_started = std::time::Instant::now();
     let collected_allocs: std::cell::RefCell<Vec<crate::build_metadata::AllocationRecord>> =
         std::cell::RefCell::new(Vec::new());
+    let collected_messages: std::cell::RefCell<Vec<crate::build_metadata::CargoMessageRecord>> =
+        std::cell::RefCell::new(Vec::new());
     let emit_closure = |event: BuildEvent| {
-        if let BuildEvent::Memory {
-            place,
-            update:
-                ResourceUpdate::Event(MemoryEvent::Allocated {
-                    owner,
-                    region,
-                    base,
-                    size,
-                    request,
-                }),
-        } = &event
-        {
-            collected_allocs
-                .borrow_mut()
-                .push(crate::build_metadata::AllocationRecord {
-                    place: place.clone(),
-                    owner: owner.clone(),
-                    region: region.clone(),
-                    base: *base,
-                    size: *size,
-                    requested_place: request.requested_place.clone(),
-                });
+        match &event {
+            BuildEvent::Memory {
+                place,
+                update:
+                    ResourceUpdate::Event(MemoryEvent::Allocated {
+                        owner,
+                        region,
+                        base,
+                        size,
+                        request,
+                    }),
+            } => {
+                collected_allocs
+                    .borrow_mut()
+                    .push(crate::build_metadata::AllocationRecord {
+                        place: place.clone(),
+                        owner: owner.clone(),
+                        region: region.clone(),
+                        base: *base,
+                        size: *size,
+                        requested_place: request.requested_place.clone(),
+                    });
+            }
+            BuildEvent::Crate {
+                name,
+                update: ResourceUpdate::Event(CrateEvent::CargoMessage(msg)),
+                ..
+            } => {
+                if let Ok(val) = msg.decode_custom::<serde_json::Value>() {
+                    if let Ok(raw) = serde_json::to_string(&val) {
+                        collected_messages
+                            .borrow_mut()
+                            .push(crate::build_metadata::CargoMessageRecord {
+                                crate_name: name.clone(),
+                                raw,
+                            });
+                    }
+                }
+            }
+            BuildEvent::HostCrate {
+                name,
+                update: ResourceUpdate::Event(HostCrateEvent::CargoMessage(msg)),
+            } => {
+                if let Ok(val) = msg.decode_custom::<serde_json::Value>() {
+                    if let Ok(raw) = serde_json::to_string(&val) {
+                        collected_messages
+                            .borrow_mut()
+                            .push(crate::build_metadata::CargoMessageRecord {
+                                crate_name: name.clone(),
+                                raw,
+                            });
+                    }
+                }
+            }
+            _ => {}
         }
         user_emit(event);
     };
@@ -392,8 +444,59 @@ pub fn build(
     // One-shot: everything about the resolved config the UI needs
     // to render its static chrome (memory map devices, place
     // capacities, build id). None of this changes during the build.
+    // Walk the config task tree to collect per-task metadata for the
+    // UI (priority, dependency edges). Same tree shape as the snapshot
+    // path uses; doing it here means live builds have task info from
+    // the very start of the pipeline.
+    let mut resolved_tasks = Vec::new();
+    {
+        let mut seen = std::collections::HashSet::new();
+        fn walk_config_tasks(
+            task: &crate::config::TaskConfig,
+            out: &mut Vec<ResolvedTaskInfo>,
+            seen: &mut std::collections::HashSet<String>,
+        ) {
+            let name = &task.crate_info.package.name;
+            if !seen.insert(name.clone()) {
+                return;
+            }
+            out.push(ResolvedTaskInfo {
+                name: name.clone(),
+                kind: CrateKind::Task,
+                priority: task.priority,
+                depends_on: task
+                    .depends_on
+                    .iter()
+                    .map(|d| d.crate_info.package.name.clone())
+                    .collect(),
+            });
+            for dep in &task.depends_on {
+                walk_config_tasks(dep, out, seen);
+            }
+        }
+        // Add kernel + bootloader as well.
+        resolved_tasks.push(ResolvedTaskInfo {
+            name: config.kernel.crate_info.package.name.clone(),
+            kind: CrateKind::Kernel,
+            priority: 0,
+            depends_on: Vec::new(),
+        });
+        if let Some(bl) = &config.bootloader {
+            resolved_tasks.push(ResolvedTaskInfo {
+                name: bl.crate_info.package.name.clone(),
+                kind: CrateKind::Bootloader,
+                priority: 0,
+                depends_on: Vec::new(),
+            });
+        }
+        for task in &config.entries {
+            walk_config_tasks(task, &mut resolved_tasks, &mut seen);
+        }
+    }
+
     emit(BuildEvent::ConfigResolved(ResolvedLayout {
         build_id: build_id.clone(),
+        name: config.name.clone(),
         memories: config
             .memory
             .iter()
@@ -412,6 +515,7 @@ pub fn build(
             .iter()
             .map(|(name, place)| (name.clone(), place.size))
             .collect(),
+        tasks: resolved_tasks,
     }));
 
     let reservations = crate::layout::compute_reservations(&config);
@@ -557,6 +661,7 @@ pub fn build(
     let mut build_meta = crate::build_metadata::BuildMetadata::from_build(
         &build_id,
         &config.name,
+        root_ncl,
         config.version.as_deref(),
         board_ncl,
         layout_ncl,
@@ -567,6 +672,7 @@ pub fn build(
     // to re-solve.
     build_meta.build_duration_ms = Some(build_started.elapsed().as_millis() as u64);
     build_meta.allocations = collected_allocs.borrow().clone();
+    build_meta.cargo_messages = collected_messages.borrow().clone();
     crate::pack::pack(
         &config,
         &layout,

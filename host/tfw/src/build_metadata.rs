@@ -4,6 +4,17 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+/// A single cargo JSON message scoped to the crate that produced it.
+/// Persisted in the archive so the GUI can render build diagnostics
+/// and compiler output for loaded firmware.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CargoMessageRecord {
+    pub crate_name: String,
+    /// One line of raw cargo JSON (ndjson). Can be decoded with
+    /// `escargot::format::Message` or `serde_json`.
+    pub raw: String,
+}
+
 /// One resolved region allocation — `owner.region` occupies `size`
 /// bytes at cpu `base`, landing in `place`. Persisted in the archive
 /// so tooling (and the GUI's memory-map card) can show real utilisation
@@ -27,11 +38,14 @@ pub struct BuildMetadata {
     pub built_at: String,
     /// App version from the Nickel config (e.g. "0.1.0").
     pub version: Option<String>,
-    /// App name from the Nickel config.
+    /// App name from the Nickel config (e.g. "rcard").
     pub name: String,
-    /// Board name used for the build.
+    /// Nickel config filename stem (e.g. "fob" for `apps/fob.ncl`).
+    #[serde(default)]
+    pub config: String,
+    /// Board filename stem (e.g. "bentoboard" for `boards/bentoboard.ncl`).
     pub board: String,
-    /// Layout name used for the build.
+    /// Layout filename stem (e.g. "prod" for `layouts/prod.ncl`).
     pub layout: String,
     /// Package name → version for all crates in the build.
     pub packages: BTreeMap<String, String>,
@@ -43,6 +57,11 @@ pub struct BuildMetadata {
     /// memory map on loaded firmware; `None` for older archives.
     #[serde(default)]
     pub allocations: Vec<AllocationRecord>,
+    /// Raw cargo JSON messages from the build. Each entry is one ndjson
+    /// line paired with the crate that emitted it. Older archives
+    /// without this field deserialize to an empty vec.
+    #[serde(default)]
+    pub cargo_messages: Vec<CargoMessageRecord>,
 }
 
 impl BuildMetadata {
@@ -50,6 +69,7 @@ impl BuildMetadata {
     pub fn from_build(
         build_id: &str,
         name: &str,
+        config: &str,
         version: Option<&str>,
         board: &str,
         layout: &str,
@@ -60,11 +80,13 @@ impl BuildMetadata {
             built_at: iso8601_now(),
             version: version.map(|v| v.to_string()),
             name: name.to_string(),
+            config: config.to_string(),
             board: board.to_string(),
             layout: layout.to_string(),
             packages: collect_package_versions(firmware_dir),
             build_duration_ms: None,
             allocations: Vec::new(),
+            cargo_messages: Vec::new(),
         }
     }
 }

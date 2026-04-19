@@ -189,19 +189,21 @@ impl DeviceBuilder {
             Some(tx) => {
                 usart_threads.push(spawn_usart_reader(
                     usart1_port,
+                    "usart1",
                     StringLogger::new(1, tx.clone()),
                 ));
                 usart_threads.push(spawn_usart_reader(
                     usart2_port,
+                    "usart2",
                     StructuredSink::new(2, tx.clone()),
                 ));
             }
             None => {
-                usart_threads.push(spawn_usart_reader(usart1_port, NullSink));
-                usart_threads.push(spawn_usart_reader(usart2_port, NullSink));
+                usart_threads.push(spawn_usart_reader(usart1_port, "usart1", NullSink));
+                usart_threads.push(spawn_usart_reader(usart2_port, "usart2", NullSink));
             }
         }
-        usart_threads.push(spawn_usart_reader(usart3_port, NullSink));
+        usart_threads.push(spawn_usart_reader(usart3_port, "usart3", NullSink));
 
         Ok(Device {
             renode,

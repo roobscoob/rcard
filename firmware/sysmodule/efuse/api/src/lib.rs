@@ -19,6 +19,8 @@ use rcard_log::Format;
 pub enum EfuseError {
     /// `bank_id` was not in the range 0..=3.
     InvalidBank = 0,
+    /// The eFuse controller did not complete the read in time.
+    Timeout = 1,
 }
 
 #[ipc::resource(arena_size = 0, kind = 0x06)]

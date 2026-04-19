@@ -103,7 +103,7 @@ impl Drop for Device {
 
 /// Spawn a background thread that reads bytes from a TCP stream
 /// and feeds them to a UsartSink.
-fn spawn_usart_reader(port: u16, mut sink: impl UsartSink) -> JoinHandle<()> {
+fn spawn_usart_reader(port: u16, _label: &'static str, mut sink: impl UsartSink) -> JoinHandle<()> {
     std::thread::spawn(move || {
         // Retry connecting — Renode's socket terminal may not be ready yet
         let stream = {

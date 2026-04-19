@@ -42,7 +42,6 @@ members = [
     "hubris/abi",
     "hubris/userlib",
     "tasks/fob",
-    "tasks/stub",
     "bootloader",
     "kernels/sf32lb52",
     "tasks/supervisor",

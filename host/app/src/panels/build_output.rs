@@ -12,11 +12,11 @@ use std::time::Duration;
 
 use egui_phosphor::regular as icon;
 use egui_taffy::taffy::prelude::*;
-use egui_taffy::{tui as taffy_tui, TuiBuilderLogic};
+use egui_taffy::{TuiBuilderLogic, tui as taffy_tui};
 
 use crate::state::{
-    BuildHandle, BuildStatus, CrateBuildState, CrateKind, CrateProgress, Diagnostic,
-    DiagnosticLevel, ImageProgress, MemoryAllocation, PipelinePhase,
+    BuildHandle, BuildStatus, CargoDiagLevel, CargoDiagnostic, CrateBuildState, CrateKind,
+    CrateProgress, ImageProgress, MemoryAllocation, PipelinePhase,
 };
 use crate::theme;
 
@@ -69,36 +69,55 @@ pub fn show(ui: &mut egui::Ui, build: &BuildHandle) -> PanelAction {
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
         .show(ui, |ui| {
-            // Bound all content to the visible width so cards can't
-            // overflow the pane on the right.
-            ui.set_max_width(ui.available_width());
-            ui.add_space(4.0);
-            action = hero(ui, build);
-            ui.add_space(12.0);
-            stats_strip(ui, build);
-            ui.add_space(12.0);
-            pipeline_section(ui, build);
-            ui.add_space(12.0);
-            two_column_body(ui, build);
-            ui.add_space(12.0);
-            diagnostics_section(ui, build);
-            ui.add_space(10.0);
-            pipeline_log(ui, build);
-            ui.add_space(8.0);
-            footer(ui, build);
-            ui.add_space(4.0);
+            let w = ui.available_width();
+            ui.set_max_width(w);
+            taffy_tui(ui, egui::Id::new("panel_root"))
+                .reserve_available_width()
+                .style(Style {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Column,
+                    gap: Size {
+                        width: length(0.0),
+                        height: length(12.0),
+                    },
+                    padding: Rect {
+                        left: length(18.0),
+                        right: length(18.0),
+                        top: length(14.0),
+                        bottom: length(14.0),
+                    },
+                    size: Size {
+                        width: percent(1.0),
+                        height: auto(),
+                    },
+                    ..Default::default()
+                })
+                .show(|tui| {
+                    tui.style(Style::default()).ui(|ui| {
+                        action = hero(ui, build);
+                    });
+                    tui.style(Style::default()).ui(|ui| {
+                        pipeline_section(ui, build);
+                    });
+                    tui.style(Style::default()).ui(|ui| {
+                        two_column_body(ui, build);
+                    });
+                    tui.style(Style::default()).ui(|ui| {
+                        diagnostics_section(ui, build);
+                    });
+                });
         });
     action
 }
 
 fn two_column_body(ui: &mut egui::Ui, build: &BuildHandle) {
-    let right_w: f32 = 380.0;
+    let fixed_w: f32 = 380.0;
     let gap = 12.0;
     // On narrow viewports collapse to a single column.
-    if ui.available_width() < right_w * 2.5 {
-        crates_card(ui, build);
-        ui.add_space(gap);
+    if ui.available_width() < fixed_w * 2.5 {
         memory_card(ui, build);
+        ui.add_space(gap);
+        crates_card(ui, build);
         ui.add_space(gap);
         resources_card(ui, build);
         return;
@@ -120,7 +139,7 @@ fn two_column_body(ui: &mut egui::Ui, build: &BuildHandle) {
             ..Default::default()
         })
         .show(|tui| {
-            // Left column — crates card grows to fill remaining width.
+            // Left column — memory map, grows to fill.
             tui.style(Style {
                 flex_grow: 1.0,
                 flex_basis: length(0.0),
@@ -131,21 +150,19 @@ fn two_column_body(ui: &mut egui::Ui, build: &BuildHandle) {
                 ..Default::default()
             })
             .ui(|ui| {
-                crates_card(ui, build);
+                memory_card(ui, build);
             });
-            // Right column — fixed 380px, memory + resources stacked.
-            // Image/archive info now lives in the bottom footer rather
-            // than its own card.
+            // Right column — crates + resources, fixed width.
             tui.style(Style {
                 flex_shrink: 0.0,
                 size: Size {
-                    width: length(right_w),
+                    width: length(fixed_w),
                     height: auto(),
                 },
                 ..Default::default()
             })
             .ui(|ui| {
-                memory_card(ui, build);
+                crates_card(ui, build);
                 ui.add_space(12.0);
                 resources_card(ui, build);
             });
@@ -237,11 +254,7 @@ fn resources_card(ui: &mut egui::Ui, build: &BuildHandle) {
                             // owns padding + fill, no egui::Frame.
                             taffy_tui(
                                 ui,
-                                egui::Id::new((
-                                    "resource_row_body",
-                                    build.id.0,
-                                    res.name.as_str(),
-                                )),
+                                egui::Id::new(("resource_row_body", build.id.0, res.name.as_str())),
                             )
                             .reserve_available_width()
                             .style(Style {
@@ -291,9 +304,7 @@ fn resources_card(ui: &mut egui::Ui, build: &BuildHandle) {
                                                     egui::RichText::new(m)
                                                         .monospace()
                                                         .size(11.0)
-                                                        .color(
-                                                            theme::TEXT_SECONDARY,
-                                                        ),
+                                                        .color(theme::TEXT_SECONDARY),
                                                 );
                                             }
                                         });
@@ -310,173 +321,226 @@ fn resources_card(ui: &mut egui::Ui, build: &BuildHandle) {
 
 fn hero(ui: &mut egui::Ui, build: &BuildHandle) -> PanelAction {
     let mut action = PanelAction::None;
-    card(ui, |ui| {
-        ui.horizontal(|ui| {
-            // Left: status pill + title + subtitle
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    status_pill(ui, build);
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(&build.config.config)
-                            .size(22.0)
-                            .strong()
-                            .color(theme::TEXT_PRIMARY),
+    let display_name = build.name.as_deref().unwrap_or(&build.config.config);
+
+    taffy_tui(ui, egui::Id::new(("hero", build.id.0)))
+        .reserve_available_width()
+        .style(Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: Some(AlignItems::Center),
+            padding: Rect {
+                left: length(0.0),
+                right: length(0.0),
+                top: length(0.0),
+                bottom: length(0.0),
+            },
+            gap: Size {
+                width: length(12.0),
+                height: length(0.0),
+            },
+            size: Size {
+                width: percent(1.0),
+                height: auto(),
+            },
+            ..Default::default()
+        })
+        .show(|tui| {
+            // ── Left: vertical stack of title row + config row ─────
+            tui.style(Style {
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                flex_basis: length(0.0),
+                min_size: Size {
+                    width: length(0.0),
+                    height: auto(),
+                },
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                gap: Size {
+                    width: length(0.0),
+                    height: length(8.0),
+                },
+                ..Default::default()
+            })
+            .add_with_background_ui(
+                |_, _| {},
+                |tui, _| {
+                    // Title row: pill + name
+                    tui.style(Style {
+                        display: Display::Flex,
+                        flex_direction: FlexDirection::Row,
+                        align_items: Some(AlignItems::Center),
+                        gap: Size {
+                            width: length(6.0),
+                            height: length(0.0),
+                        },
+                        ..Default::default()
+                    })
+                    .add_with_background_ui(
+                        |_, _| {},
+                        |tui, _| {
+                            tui.style(Style::default()).ui(|ui| {
+                                status_pill(ui, build);
+                            });
+                            tui.style(Style::default()).ui(|ui| {
+                                ui.label(
+                                    egui::RichText::new(display_name)
+                                        .size(22.0)
+                                        .strong()
+                                        .color(theme::TEXT_PRIMARY),
+                                );
+                            });
+                        },
                     );
-                });
-                ui.horizontal(|ui| {
-                    ui.colored_label(theme::TEXT_DIM, icon::FILE_CODE);
-                    ui.colored_label(
-                        theme::TEXT_SECONDARY,
-                        format!("apps/{}", build.config.config),
+                    // Config row: file paths
+                    tui.style(Style {
+                        display: Display::Flex,
+                        flex_direction: FlexDirection::Row,
+                        flex_wrap: FlexWrap::Wrap,
+                        align_items: Some(AlignItems::Center),
+                        gap: Size {
+                            width: length(12.0),
+                            height: length(3.0),
+                        },
+                        ..Default::default()
+                    })
+                    .add_with_background_ui(
+                        |_, _| {},
+                        |tui, _| {
+                            // Config/board/layout chips
+                            for (glyph, value) in [
+                                (icon::FILE_CODE, build.config.config.as_str()),
+                                (icon::CPU, build.config.board.as_str()),
+                                (icon::LAYOUT, build.config.layout.as_str()),
+                            ] {
+                                hero_chip(tui, glyph, value);
+                            }
+                            // UUID chip
+                            if let Some(uuid) = &build.uuid {
+                                hero_chip(tui, icon::FINGERPRINT, uuid);
+                            }
+                        },
                     );
-                    ui.colored_label(theme::TEXT_DIM, "·");
-                    ui.colored_label(theme::TEXT_DIM, icon::CPU);
-                    ui.colored_label(
-                        theme::TEXT_SECONDARY,
-                        format!("boards/{}", build.config.board),
+                },
+            );
+
+            // ── Right: timer + buttons ────────────────────────────
+            tui.style(Style {
+                flex_shrink: 1.0,
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: Some(AlignItems::Center),
+                gap: Size {
+                    width: length(6.0),
+                    height: length(0.0),
+                },
+                ..Default::default()
+            })
+            .add_with_background_ui(
+                |_, _| {},
+                |tui, _| {
+                    let has_file = matches!(
+                        build.image,
+                        ImageProgress::Archived { .. }
                     );
-                    ui.colored_label(theme::TEXT_DIM, "·");
-                    ui.colored_label(theme::TEXT_DIM, icon::LAYOUT);
-                    ui.colored_label(
-                        theme::TEXT_SECONDARY,
-                        format!("layouts/{}", build.config.layout),
-                    );
-                });
-                if let Some(uuid) = &build.uuid {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(theme::TEXT_DIM, icon::FINGERPRINT);
-                        ui.label(
-                            egui::RichText::new(uuid)
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::TEXT_DIM),
-                        )
-                        .on_hover_text("Build UUID — persists into the .tfw archive");
-                    });
-                }
-            });
-            // Push right-side content to far right.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Delete button — shown for any BuildHandle that
-                // isn't currently running. `remove_build` drops the
-                // handle from `state.builds` and closes the tile;
-                // the firmware artifact on disk (if any) stays.
-                if !matches!(build.status, BuildStatus::Running) {
-                    let del = ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(icon::TRASH)
-                                    .size(14.0)
-                                    .color(theme::ERROR),
-                            )
-                            .fill(egui::Color32::TRANSPARENT)
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                theme::ERROR.gamma_multiply(0.4),
-                            ))
-                            .min_size(egui::vec2(28.0, 28.0)),
-                        )
-                        .on_hover_text("Delete this build record");
-                    if del.clicked() {
-                        action = PanelAction::DeleteBuild(build.id);
-                    }
-                    ui.add_space(4.0);
-                }
-                // CTA buttons take precedence on the right edge when we
-                // have a firmware to act on.
-                if let BuildStatus::Succeeded {
-                    firmware_id: Some(fw_id),
-                    ..
-                } = &build.status
-                {
-                    // Primary CTA: Flash — accent-filled, rounded,
-                    // generous padding, icon + label. Matches the
-                    // mockup's solid blue pill button.
-                    let flash = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("{}  Flash", icon::LIGHTNING))
-                                .strong()
-                                .size(13.0)
-                                .color(theme::BG),
-                        )
-                        .fill(theme::ACCENT)
-                        .corner_radius(egui::CornerRadius::same(6))
-                        .min_size(egui::vec2(110.0, 32.0)),
-                    );
-                    if flash.clicked() {
-                        action = PanelAction::Flash(*fw_id);
-                    }
-                    ui.add_space(6.0);
-                    // Secondary: Emulate — ghost style, thin border,
-                    // transparent fill, same corner radius.
-                    let emu = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("{}  Emulate", icon::PLAY))
-                                .size(13.0)
-                                .color(theme::TEXT_PRIMARY),
-                        )
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
-                        .corner_radius(egui::CornerRadius::same(6))
-                        .min_size(egui::vec2(110.0, 32.0)),
-                    );
-                    if emu.clicked() {
-                        action = PanelAction::RunEmulator(*fw_id);
-                    }
-                    ui.add_space(6.0);
-                }
-                // Show the elapsed block whenever we have a real
-                // duration. Running builds always do (elapsed is
-                // ticking); completed/failed ones do if `elapsed()`
-                // is non-zero (live finish or persisted duration).
-                // Older archives without timing data show zero and
-                // hide the field.
-                let has_duration =
-                    matches!(build.status, BuildStatus::Running) || !build.elapsed().is_zero();
-                if has_duration {
-                    match &build.status {
-                        BuildStatus::Running => {
-                            let elapsed = format_duration(build.elapsed());
-                            ui.label(
-                                egui::RichText::new(elapsed)
-                                    .size(18.0)
-                                    .strong()
-                                    .monospace()
-                                    .color(theme::TEXT_PRIMARY),
-                            );
-                            ui.small(
-                                egui::RichText::new("ELAPSED")
-                                    .color(theme::TEXT_DIM)
-                                    .monospace(),
-                            );
+                    if has_file {
+                        if let BuildStatus::Succeeded {
+                            firmware_id: Some(fw_id),
+                            ..
+                        } = &build.status
+                        {
+                            tui.style(Style::default()).ui(|ui| {
+                                let emu = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  Emulate", icon::PLAY))
+                                            .size(13.0)
+                                            .color(theme::TEXT_PRIMARY),
+                                    )
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .min_size(egui::vec2(100.0, 32.0)),
+                                );
+                                if emu.clicked() {
+                                    action = PanelAction::RunEmulator(*fw_id);
+                                }
+                            });
+                            tui.style(Style::default()).ui(|ui| {
+                                let flash = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  Flash", icon::LIGHTNING))
+                                            .strong()
+                                            .size(13.0)
+                                            .color(theme::BG),
+                                    )
+                                    .fill(theme::ACCENT)
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .min_size(egui::vec2(100.0, 32.0)),
+                                );
+                                if flash.clicked() {
+                                    action = PanelAction::Flash(*fw_id);
+                                }
+                            });
                         }
-                        BuildStatus::Succeeded { .. } => {
-                            ui.label(
-                                egui::RichText::new(format_duration(build.elapsed()))
-                                    .monospace()
-                                    .color(theme::TEXT_SECONDARY),
-                            );
-                            // Single label for both sources — the build
-                            // happened, regardless of when we opened it.
-                            ui.small(egui::RichText::new("built in").color(theme::TEXT_DIM));
-                        }
-                        BuildStatus::Failed { .. } => {
-                            ui.label(
-                                egui::RichText::new(format_duration(build.elapsed()))
-                                    .monospace()
-                                    .color(theme::TEXT_DIM),
-                            );
-                            ui.small(
-                                egui::RichText::new("failed in").color(theme::TEXT_DIM),
-                            );
-                        }
                     }
-                }
-            });
+                    if has_file && !matches!(build.status, BuildStatus::Running) {
+                        tui.style(Style::default()).ui(|ui| {
+                            let del = ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(icon::TRASH)
+                                            .size(16.0)
+                                            .color(theme::ERROR),
+                                    )
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        theme::ERROR.gamma_multiply(0.4),
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .min_size(egui::vec2(32.0, 32.0)),
+                                )
+                                .on_hover_text("Delete this build record");
+                            if del.clicked() {
+                                action = PanelAction::DeleteBuild(build.id);
+                            }
+                        });
+                    }
+                },
+            );
         });
-    });
     action
+}
+
+/// A single icon+text chip in the hero's info row.
+fn hero_chip(tui: &mut egui_taffy::Tui, glyph: &str, value: &str) {
+    tui.style(Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        align_items: Some(AlignItems::Center),
+        gap: Size {
+            width: length(3.0),
+            height: length(0.0),
+        },
+        ..Default::default()
+    })
+    .add_with_background_ui(
+        |_, _| {},
+        |tui, _| {
+            tui.style(Style::default()).ui(|ui| {
+                ui.colored_label(theme::TEXT_DIM, glyph);
+            });
+            tui.style(Style::default()).ui(|ui| {
+                ui.label(
+                    egui::RichText::new(value)
+                        .monospace()
+                        .size(11.0)
+                        .color(theme::TEXT_SECONDARY),
+                );
+            });
+        },
+    );
 }
 
 fn status_pill(ui: &mut egui::Ui, build: &BuildHandle) {
@@ -489,8 +553,8 @@ fn status_pill(ui: &mut egui::Ui, build: &BuildHandle) {
                 .unwrap_or_else(|| "● STARTING".into());
             (phase, theme::ACCENT)
         }
-        BuildStatus::Succeeded { .. } => (format!("{} BUILT", icon::CHECK), theme::INFO),
-        BuildStatus::Failed { .. } => (format!("{} FAILED", icon::X), theme::ERROR),
+        BuildStatus::Succeeded { .. } => ("BUILT".into(), theme::INFO),
+        BuildStatus::Failed { .. } => ("FAILED".into(), theme::ERROR),
     };
     egui::Frame::NONE
         .fill(col.gamma_multiply(0.2))
@@ -498,13 +562,25 @@ fn status_pill(ui: &mut egui::Ui, build: &BuildHandle) {
         .corner_radius(egui::CornerRadius::same(255))
         .inner_margin(egui::Margin::symmetric(10, 4))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(label)
-                    .monospace()
-                    .strong()
-                    .size(11.0)
-                    .color(col),
-            );
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                // Icon in proportional font so Phosphor glyphs render.
+                if !matches!(build.status, BuildStatus::Running) {
+                    let glyph = match &build.status {
+                        BuildStatus::Succeeded { .. } => icon::CHECK,
+                        BuildStatus::Failed { .. } => icon::X,
+                        _ => "",
+                    };
+                    ui.label(egui::RichText::new(glyph).size(11.0).color(col));
+                }
+                ui.label(
+                    egui::RichText::new(label)
+                        .monospace()
+                        .strong()
+                        .size(11.0)
+                        .color(col),
+                );
+            });
         });
 }
 
@@ -522,345 +598,228 @@ fn phase_live_label(phase: &PipelinePhase) -> String {
 
 // ── Stats strip ─────────────────────────────────────────────────────────
 
-fn stats_strip(ui: &mut egui::Ui, build: &BuildHandle) {
-    let n_tasks = build
-        .crates
-        .iter()
-        .filter(|c| c.kind == CrateKind::Task)
-        .count();
-    let n_hosts = build
-        .crates
-        .iter()
-        .filter(|c| c.kind == CrateKind::HostCrate)
-        .count();
-    let cols: [(&str, egui::Color32, String, String); 4] = [
-        (
-            "APP",
-            theme::ACCENT,
-            build.config.config.clone(),
-            format!("{n_tasks} task crates · {n_hosts} host"),
-        ),
-        (
-            "BOARD",
-            theme::WARN,
-            build.config.board.clone(),
-            String::new(),
-        ),
-        (
-            "LAYOUT",
-            theme::ACCENT,
-            build.config.layout.clone(),
-            format!("{} places", build.place_capacities.len()),
-        ),
-        (
-            "PROFILE",
-            theme::INFO,
-            "release".into(),
-            "opt 3 · LTO".into(),
-        ),
-    ];
-
-    let bg = theme::BORDER_STRONG.gamma_multiply(0.2);
-    egui::Frame::NONE
-        .fill(bg)
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(0, 12))
-        .show(ui, |ui| {
-            // Use egui_taffy flexbox so the 4 columns stay equal width
-            // and can't overflow the parent. Reserve only the available
-            // WIDTH — letting the height size to content — so the strip
-            // shrink-wraps the column labels instead of claiming the
-            // whole pane's height.
-            taffy_tui(ui, egui::Id::new(("stats_strip", build.id.0)))
-                .reserve_available_width()
-                .style(Style {
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Row,
-                    align_items: Some(AlignItems::Start),
-                    size: Size {
-                        width: percent(1.0),
-                        height: auto(),
-                    },
-                    ..Default::default()
-                })
-                .show(|tui| {
-                    let last = cols.len() - 1;
-                    for (i, (label, label_col, value, sub)) in cols.iter().enumerate() {
-                        tui.style(Style {
-                            flex_grow: 1.0,
-                            flex_basis: length(0.0),
-                            min_size: Size {
-                                width: length(0.0),
-                                height: auto(),
-                            },
-                            padding: Rect {
-                                left: length(16.0),
-                                right: length(16.0),
-                                top: length(0.0),
-                                bottom: length(0.0),
-                            },
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Column,
-                            ..Default::default()
-                        })
-                        .ui(|ui| {
-                            stat_col_content(ui, label, *label_col, value, sub);
-                        });
-                        if i != last {
-                            tui.style(Style {
-                                size: Size {
-                                    width: length(1.0),
-                                    height: length(42.0),
-                                },
-                                flex_shrink: 0.0,
-                                ..Default::default()
-                            })
-                            .ui(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(1.0, 42.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().rect_filled(
-                                    rect,
-                                    egui::CornerRadius::ZERO,
-                                    theme::SURFACE_BORDER,
-                                );
-                            });
-                        }
-                    }
-                });
-        });
-}
-
-fn stat_col_content(
-    ui: &mut egui::Ui,
-    label: &str,
-    label_color: egui::Color32,
-    value: &str,
-    sub: &str,
-) {
-    ui.vertical(|ui| {
-        ui.label(
-            egui::RichText::new(label)
-                .monospace()
-                .strong()
-                .size(9.0)
-                .color(label_color),
-        );
-        ui.label(
-            egui::RichText::new(value)
-                .size(15.0)
-                .monospace()
-                .strong()
-                .color(theme::TEXT_PRIMARY),
-        );
-        if !sub.is_empty() {
-            ui.label(
-                egui::RichText::new(sub)
-                    .monospace()
-                    .size(10.0)
-                    .color(theme::TEXT_DIM),
-            );
-        }
-    });
-}
-
 // ── Pipeline stepper / trace ────────────────────────────────────────────
 
 fn pipeline_section(ui: &mut egui::Ui, build: &BuildHandle) {
     let done = !matches!(build.status, BuildStatus::Running);
     if done {
-        // Compact trace strip.
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("BUILD")
-                        .monospace()
-                        .strong()
-                        .size(9.0)
-                        .color(theme::TEXT_DIM),
-                );
-                ui.add_space(8.0);
-                let final_phase_order = build
-                    .phase
-                    .as_ref()
-                    .map(|p| p.order())
-                    .unwrap_or(6);
-                let col_success = matches!(build.status, BuildStatus::Succeeded { .. });
-                for (i, _phase) in PHASE_ORDER.iter().enumerate() {
-                    let reached = i as u8 <= final_phase_order;
-                    let col = if !reached {
-                        theme::BORDER_STRONG
-                    } else if col_success {
-                        theme::INFO
-                    } else {
-                        theme::ERROR
-                    };
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(10.0, 10.0),
-                        egui::Sense::hover(),
-                    );
-                    ui.painter().circle_filled(rect.center(), 5.0, col);
-                    if i + 1 < PHASE_ORDER.len() {
-                        let (lrect, _) = ui.allocate_exact_size(
-                            egui::vec2(14.0, 2.0),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter().rect_filled(
-                            lrect,
-                            egui::CornerRadius::ZERO,
-                            col,
-                        );
-                    }
-                }
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        let n_warn = build
-                            .diagnostics
-                            .iter()
-                            .filter(|d| d.level == DiagnosticLevel::Warning)
-                            .count();
-                        let n_err = build
-                            .diagnostics
-                            .iter()
-                            .filter(|d| d.level == DiagnosticLevel::Error)
-                            .count();
-                        if n_err > 0 {
-                            ui.colored_label(
-                                theme::ERROR,
-                                format!("{} {n_err} errors", icon::X_CIRCLE),
-                            );
-                        }
-                        if n_warn > 0 {
-                            ui.colored_label(
-                                theme::WARN,
-                                format!("{} {n_warn} warnings", icon::WARNING),
-                            );
-                        }
-                        ui.colored_label(
-                            theme::TEXT_SECONDARY,
-                            format!("in {}", format_duration(build.elapsed())),
-                        );
-                    },
-                );
-            });
+        // Quiet metadata line — no card, just dim text.
+        ui.horizontal_wrapped(|ui| {
+            let mut parts: Vec<String> = Vec::new();
+            if !build.elapsed().is_zero() {
+                parts.push(format!("built in {}", format_duration(build.elapsed())));
+            }
+            if let ImageProgress::Archived { size, .. } = &build.image {
+                parts.push(format_bytes(*size));
+            }
+            let all_diags = collect_diagnostics(build);
+            let n_warn = all_diags
+                .iter()
+                .filter(|d| d.diag.level == CargoDiagLevel::Warning)
+                .count();
+            let n_err = all_diags
+                .iter()
+                .filter(|d| d.diag.level == CargoDiagLevel::Error)
+                .count();
+            if n_err > 0 {
+                parts.push(format!("{n_err} errors"));
+            }
+            if n_warn > 0 {
+                parts.push(format!("{n_warn} warnings"));
+            }
+            if let ImageProgress::Archived { path, .. } = &build.image {
+                parts.push(path.display().to_string());
+            }
+            ui.label(
+                egui::RichText::new(parts.join("  ·  "))
+                    .monospace()
+                    .size(10.0)
+                    .color(theme::TEXT_DIM),
+            );
         });
         return;
     }
 
-    // Full stepper while running.
+    // Full stepper while running — taffy flexbox handles sizing so
+    // nodes + connectors never overflow the card.
     card(ui, |ui| {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let current_order = build
-                .phase
-                .as_ref()
-                .map(|p| p.order())
-                .unwrap_or(0);
-            let available = ui.available_width();
-            let node_w = 60.0;
-            let total_nodes_w = 7.0 * node_w;
-            let remaining = available - total_nodes_w;
-            let line_w = (remaining / 6.0).max(12.0);
+        let current_order = build.phase.as_ref().map(|p| p.order()).unwrap_or(0);
 
-            for (i, phase) in PHASE_ORDER.iter().enumerate() {
-                let order_i = i as u8;
-                let past = order_i < current_order;
-                let current = order_i == current_order;
+        // The stepper is a row of (node, connector, node, …). Nodes
+        // are fixed-width columns (circle + label); connectors grow to
+        // fill remaining space. The connectors need to sit at the
+        // vertical center of the circles, not the center of the whole
+        // row. We achieve this with a fixed top margin on connectors
+        // equal to half the circle height (14px for 28px circles).
+        let circle_h: f32 = 28.0; // non-current circle size
+        let connector_top = circle_h / 2.0;
 
-                let (circle_col, ring_col, icon_col, text_col, ring_w) = if past {
-                    (
-                        theme::INFO.gamma_multiply(0.2),
-                        theme::INFO,
-                        theme::INFO,
-                        theme::INFO,
-                        1.5,
-                    )
-                } else if current {
-                    (
-                        theme::ACCENT.gamma_multiply(0.25),
-                        theme::ACCENT,
-                        theme::ACCENT,
-                        theme::ACCENT,
-                        2.0,
-                    )
-                } else {
-                    (
-                        theme::BG,
-                        theme::BORDER_STRONG,
-                        theme::TEXT_DIM,
-                        theme::TEXT_DIM,
-                        1.5,
-                    )
-                };
-                let size = if current { 34.0 } else { 28.0 };
-                ui.allocate_ui_with_layout(
-                    egui::vec2(node_w, 56.0),
-                    egui::Layout::top_down(egui::Align::Center),
-                    |ui| {
+        taffy_tui(ui, egui::Id::new(("stepper", build.id.0)))
+            .reserve_available_width()
+            .style(Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: Some(AlignItems::Start),
+                size: Size {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                gap: Size {
+                    width: length(10.0),
+                    height: length(0.0),
+                },
+                ..Default::default()
+            })
+            .show(|tui| {
+                for (i, phase) in PHASE_ORDER.iter().enumerate() {
+                    let order_i = i as u8;
+                    let past = order_i < current_order;
+                    let current = order_i == current_order;
+
+                    let (circle_col, ring_col, icon_col, text_col, ring_w) = if past {
+                        (
+                            theme::INFO.gamma_multiply(0.2),
+                            theme::INFO,
+                            theme::INFO,
+                            theme::INFO,
+                            1.5,
+                        )
+                    } else if current {
+                        (
+                            theme::ACCENT.gamma_multiply(0.25),
+                            theme::ACCENT,
+                            theme::ACCENT,
+                            theme::ACCENT,
+                            2.0,
+                        )
+                    } else {
+                        (
+                            theme::BG,
+                            theme::BORDER_STRONG,
+                            theme::TEXT_DIM,
+                            theme::TEXT_DIM,
+                            1.5,
+                        )
+                    };
+                    let circle_size = if current { 34.0 } else { 28.0 };
+
+                    // Node: fixed to circle size. The label is painted
+                    // centered below without affecting the layout box,
+                    // so wide labels like "METADATA" can't grow the node.
+                    tui.style(Style {
+                        flex_grow: 0.0,
+                        flex_shrink: 0.0,
+                        size: Size {
+                            width: length(circle_size),
+                            height: length(circle_size + 22.0),
+                        },
+                        display: Display::Flex,
+                        flex_direction: FlexDirection::Column,
+                        align_items: Some(AlignItems::Center),
+                        ..Default::default()
+                    })
+                    .ui(|ui| {
                         let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(size, size),
+                            egui::vec2(circle_size, circle_size),
                             egui::Sense::hover(),
                         );
-                        ui.painter().circle_filled(rect.center(), size / 2.0, circle_col);
+                        ui.painter()
+                            .circle_filled(rect.center(), circle_size / 2.0, circle_col);
                         ui.painter().circle_stroke(
                             rect.center(),
-                            size / 2.0,
+                            circle_size / 2.0,
                             egui::Stroke::new(ring_w, ring_col),
                         );
-                        let glyph = if past {
-                            icon::CHECK
-                        } else {
-                            phase_icon(phase)
-                        };
+                        let glyph = if past { icon::CHECK } else { phase_icon(phase) };
                         ui.painter().text(
                             rect.center(),
                             egui::Align2::CENTER_CENTER,
                             glyph,
-                            egui::FontId::proportional(size * 0.55),
+                            egui::FontId::proportional(circle_size * 0.55),
                             icon_col,
                         );
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(phase.label())
-                                .monospace()
-                                .strong()
-                                .size(10.0)
-                                .color(text_col),
+                        // Paint the label centered below the circle,
+                        // outside the layout box so it doesn't widen the
+                        // node.
+                        let label_pos = egui::pos2(rect.center().x, rect.bottom() + 8.0);
+                        ui.painter().text(
+                            label_pos,
+                            egui::Align2::CENTER_TOP,
+                            phase.label(),
+                            egui::FontId::monospace(10.0),
+                            text_col,
                         );
-                    },
-                );
-                if i + 1 < PHASE_ORDER.len() {
-                    // Connector line.
-                    let next_past = (order_i + 1) < current_order;
-                    let next_current = (order_i + 1) == current_order;
-                    let line_col = if next_past {
-                        theme::INFO
-                    } else if past && next_current {
-                        theme::ACCENT
-                    } else {
-                        theme::BORDER_STRONG
-                    };
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(line_w, 2.0),
-                        egui::Sense::hover(),
-                    );
-                    // Vertically center the line within the 56px row — stepper is top-aligned.
-                    let center_y = rect.top() + 14.0;
-                    let line_rect = egui::Rect::from_min_max(
-                        egui::pos2(rect.left(), center_y - 1.0),
-                        egui::pos2(rect.right(), center_y + 1.0),
-                    );
-                    ui.painter().rect_filled(
-                        line_rect,
-                        egui::CornerRadius::ZERO,
-                        line_col,
-                    );
+                    });
+
+                    // Connector line between nodes — grows to fill space.
+                    // Top margin positions it at the circle's vertical center.
+                    if i + 1 < PHASE_ORDER.len() {
+                        let next_past = (order_i + 1) < current_order;
+                        let next_current = (order_i + 1) == current_order;
+                        let line_col = if next_past {
+                            theme::INFO
+                        } else if past && next_current {
+                            theme::ACCENT
+                        } else {
+                            theme::BORDER_STRONG
+                        };
+                        tui.style(Style {
+                            flex_grow: 1.0,
+                            flex_shrink: 1.0,
+                            flex_basis: length(14.0),
+                            min_size: Size {
+                                width: length(4.0),
+                                height: auto(),
+                            },
+                            size: Size {
+                                width: auto(),
+                                height: length(2.0),
+                            },
+                            margin: Rect {
+                                left: length(0.0),
+                                right: length(0.0),
+                                top: length(connector_top - 1.0),
+                                bottom: length(0.0),
+                            },
+                            ..Default::default()
+                        })
+                        .add_with_background_ui(
+                            |ui, container| {
+                                ui.painter().rect_filled(
+                                    container.full_container(),
+                                    egui::CornerRadius::ZERO,
+                                    line_col,
+                                );
+                            },
+                            |_, _| {},
+                        );
+                    }
                 }
-            }
-        });
+            });
         ui.add_space(4.0);
+        // Image status inline.
+        ui.horizontal(|ui| {
+            let (glyph, text, col) = match &build.image {
+                ImageProgress::None => (
+                    icon::HOURGLASS_MEDIUM,
+                    "awaiting pack".to_string(),
+                    theme::TEXT_DIM,
+                ),
+                ImageProgress::Assembled { size } => (
+                    icon::PACKAGE,
+                    format!("assembled · {}", format_bytes(*size)),
+                    theme::ACCENT,
+                ),
+                ImageProgress::Archived { size, .. } => (
+                    icon::PACKAGE,
+                    format!("{} · {}", icon::CHECK, format_bytes(*size)),
+                    theme::INFO,
+                ),
+            };
+            ui.colored_label(col, glyph);
+            ui.label(egui::RichText::new(text).monospace().size(11.0).color(col));
+        });
     });
 }
 
@@ -886,12 +845,14 @@ fn crates_card(ui: &mut egui::Ui, build: &BuildHandle) {
             let n_inflight = build
                 .crates
                 .iter()
-                .filter(|c| matches!(
-                    c.state,
-                    CrateBuildState::Building
-                        | CrateBuildState::Measuring
-                        | CrateBuildState::Linking
-                ))
+                .filter(|c| {
+                    matches!(
+                        c.state,
+                        CrateBuildState::Building
+                            | CrateBuildState::Measuring
+                            | CrateBuildState::Linking
+                    )
+                })
                 .count();
             let n_queued = build
                 .crates
@@ -923,7 +884,6 @@ fn crates_card(ui: &mut egui::Ui, build: &BuildHandle) {
             };
             ui.colored_label(theme::TEXT_DIM, summary);
         });
-        ui.add_space(6.0);
 
         let has_any = |k: CrateKind| build.crates.iter().any(|c| c.kind == k);
 
@@ -1015,18 +975,12 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
     //   - an active cargo log to stream
     //   - a failure to explain
     //   - IPC metadata (provides/uses) once linked
-    let has_body = failed || !c.cargo_log.is_empty() || has_ipc;
+    let has_body = failed || !c.cargo_messages.is_empty() || has_ipc;
     let default_open = failed || building;
 
     let border = if failed {
         Some(theme::ERROR)
-    } else if matches!(
-        c.state,
-        CrateBuildState::Building
-            | CrateBuildState::Compiled
-            | CrateBuildState::Measuring
-            | CrateBuildState::Linking
-    ) {
+    } else if matches!(c.state, CrateBuildState::Building) {
         Some(theme::ACCENT)
     } else {
         None
@@ -1056,24 +1010,41 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
 
     ui.scope(|ui| {
         ui.set_opacity(opacity);
+        // Lock the row's width to the card's available width so the
+        // body content (horizontal_wrapped chips, diagnostic lines)
+        // wraps instead of growing the card wider.
+        let row_w = ui.available_width();
+        ui.set_min_width(row_w);
+        ui.set_max_width(row_w);
 
         if has_body {
-            let id = ui.make_persistent_id((
-                "crate_row",
-                build.id.0,
-                c.name.as_str(),
-            ));
-            let mut state =
-                egui::collapsing_header::CollapsingState::load_with_default_open(
-                    ui.ctx(),
-                    id,
-                    default_open,
-                );
-            // Force open while actively building or failed — the log /
-            // error is too important to hide.
-            if (building && !c.cargo_log.is_empty()) || failed {
+            let id = ui.make_persistent_id(("crate_row", build.id.0, c.name.as_str()));
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                default_open,
+            );
+            // Track state transitions to auto-open/close once rather
+            // than forcing every frame. The user can freely toggle
+            // after the automatic action.
+            let prev_key = id.with("prev_state");
+            let prev: Option<CrateBuildState> = ui.ctx().data_mut(|d| d.get_temp(prev_key));
+            let cur = c.state;
+            if let Some(prev) = prev {
+                if prev != CrateBuildState::Building && cur == CrateBuildState::Building {
+                    state.set_open(true);
+                } else if prev == CrateBuildState::Building
+                    && cur != CrateBuildState::Building
+                    && !failed
+                {
+                    state.set_open(false);
+                }
+            }
+            // Auto-open on failure regardless of previous state.
+            if failed && prev.map_or(true, |p| p != CrateBuildState::Failed) {
                 state.set_open(true);
             }
+            ui.ctx().data_mut(|d| d.insert_temp(prev_key, cur));
             let is_open = state.is_open();
 
             outer_frame.show(ui, |ui| {
@@ -1093,9 +1064,7 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
                     })
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.small(
-                                egui::RichText::new(chevron).color(theme::TEXT_DIM),
-                            );
+                            ui.small(egui::RichText::new(chevron).color(theme::TEXT_DIM));
                             ui.add_space(4.0);
                             crate_row_header_content(ui, c);
                         });
@@ -1123,11 +1092,7 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
                     // taffy-assigned rect.
                     taffy_tui(
                         ui,
-                        egui::Id::new((
-                            "crate_row_body",
-                            build.id.0,
-                            c.name.as_str(),
-                        )),
+                        egui::Id::new(("crate_row_body", build.id.0, c.name.as_str())),
                     )
                     .reserve_available_width()
                     .style(Style {
@@ -1228,59 +1193,40 @@ fn crate_row_header_content(ui: &mut egui::Ui, c: &CrateProgress) {
             .size(12.0)
             .color(name_col),
     );
-    if c.supervisor {
+    // Right-aligned state info.
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let right_text = right_side_label(c);
+        let right_col = match c.state {
+            CrateBuildState::Queued => theme::TEXT_DIM,
+            CrateBuildState::Linked => theme::TEXT_DIM,
+            CrateBuildState::Failed => theme::ERROR,
+            _ => theme::ACCENT,
+        };
+        ui.label(
+            egui::RichText::new(right_text)
+                .monospace()
+                .size(10.0)
+                .color(right_col),
+        );
+        let wg = if c.kind == CrateKind::HostCrate {
+            "host"
+        } else {
+            "main"
+        };
         egui::Frame::NONE
-            .fill(theme::WARN.gamma_multiply(0.2))
+            .fill(theme::PANEL)
             .corner_radius(egui::CornerRadius::same(3))
-            .inner_margin(egui::Margin::symmetric(6, 2))
+            .inner_margin(egui::Margin::symmetric(7, 2))
             .show(ui, |ui| {
                 ui.label(
-                    egui::RichText::new("SUPERVISOR")
+                    egui::RichText::new(wg)
                         .monospace()
                         .strong()
                         .size(9.0)
-                        .color(theme::WARN),
+                        .color(theme::TEXT_SECONDARY),
                 );
             });
-    }
-
-    // Right-aligned state info.
-    ui.with_layout(
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            let right_text = right_side_label(c);
-            let right_col = match c.state {
-                CrateBuildState::Queued => theme::TEXT_DIM,
-                CrateBuildState::Linked => theme::TEXT_DIM,
-                CrateBuildState::Failed => theme::ERROR,
-                _ => theme::ACCENT,
-            };
-            ui.label(
-                egui::RichText::new(right_text)
-                    .monospace()
-                    .size(10.0)
-                    .color(right_col),
-            );
-            let wg = if c.kind == CrateKind::HostCrate {
-                "host"
-            } else {
-                "main"
-            };
-            egui::Frame::NONE
-                .fill(theme::PANEL)
-                .corner_radius(egui::CornerRadius::same(3))
-                .inner_margin(egui::Margin::symmetric(7, 2))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(wg)
-                            .monospace()
-                            .strong()
-                            .size(9.0)
-                            .color(theme::TEXT_SECONDARY),
-                    );
-                });
-        },
-    );
+    });
 }
 
 /// Right-side text for a crate row — state + pip cluster / size.
@@ -1313,127 +1259,204 @@ fn right_side_label(c: &CrateProgress) -> String {
 }
 
 fn crate_row_body(ui: &mut egui::Ui, c: &CrateProgress) {
-    // No frame here — the caller already handles padding via its own
-    // `Frame::inner_margin`. Leaving the body "unwrapped" lets it
-    // blend into the parent CRATES card's surface instead of looking
-    // like a nested card.
-    {
-        ui.vertical(|ui| {
-                // Cargo log (streaming during Building, frozen on Failed).
-                for line in c.cargo_log.iter().take(40) {
-                    for sub in line.lines().take(8) {
-                        ui.label(
-                            egui::RichText::new(sub)
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::TEXT_SECONDARY),
-                        );
-                    }
-                }
-                if c.cargo_log.is_empty() && c.state == CrateBuildState::Failed {
-                    if let Some(err) = &c.error {
-                        ui.colored_label(theme::ERROR, err);
-                    }
-                }
+    let summary = &c.cargo_summary;
+    let has_messages = !c.cargo_messages.is_empty();
+    let has_ipc = !c.provides.is_empty() || !c.uses.is_empty();
 
-                // IPC metadata — shown once we have it (after Pack
-                // extracts schemas, or when rendering a loaded snapshot).
-                let need_sep = !c.cargo_log.is_empty()
-                    && (!c.provides.is_empty() || !c.uses.is_empty());
-                if need_sep {
-                    ui.add_space(4.0);
+    let building = c.state == CrateBuildState::Building;
+
+    let w = ui.available_width();
+    ui.set_max_width(w);
+
+    ui.vertical(|ui| {
+        // ── Dependencies ──────────────────────────────────────────
+        let total_deps = summary.deps_fresh + summary.deps_compiled.len();
+        if total_deps > 0 || building {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    theme::TEXT_DIM,
+                    egui::RichText::new(icon::TREE_STRUCTURE).size(11.0),
+                );
+                let mut parts = Vec::new();
+                if !summary.deps_compiled.is_empty() {
+                    parts.push(format!("{} compiled", summary.deps_compiled.len()));
                 }
-                if !c.provides.is_empty() {
-                    ipc_chip_row(
-                        ui,
-                        "provides",
-                        c.provides.iter().map(|p| ChipSpec::pill(p.resource.clone())),
-                    );
+                if summary.deps_fresh > 0 {
+                    parts.push(format!("{} cached", summary.deps_fresh));
                 }
-                if !c.uses.is_empty() {
-                    ipc_chip_row(
-                        ui,
-                        "uses    ",
-                        c.uses.iter().map(|u| {
-                            let text = if u.resource.is_empty() {
-                                u.server_task.clone()
-                            } else {
-                                format!("{}::{}", u.server_task, u.resource)
-                            };
-                            ChipSpec::boxy(text)
-                        }),
+                if total_deps > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("{total_deps} deps ({})", parts.join(", ")))
+                            .monospace()
+                            .size(10.0)
+                            .color(theme::TEXT_DIM),
                     );
                 }
             });
-    }
+            if !summary.deps_compiled.is_empty() {
+                let names: Vec<&str> = summary.deps_compiled.iter().map(|s| s.as_str()).collect();
+                chip_row(ui, &c.name, "deps", &names);
+            }
+            ui.add_space(4.0);
+        }
+
+        // ── Diagnostics ───────────────────────────────────────────
+        for d in &summary.diagnostics {
+            let col = match d.level {
+                CargoDiagLevel::Error => theme::ERROR,
+                CargoDiagLevel::Warning => theme::WARN,
+                _ => theme::TEXT_SECONDARY,
+            };
+            for line in d.rendered.lines() {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(line).monospace().size(11.0).color(col))
+                        .wrap(),
+                );
+            }
+            ui.add_space(2.0);
+        }
+
+        // ── Raw errors (non-JSON cargo failures) ──────────────────
+        for text in &summary.raw_errors {
+            for line in text.lines() {
+                ui.label(
+                    egui::RichText::new(line)
+                        .monospace()
+                        .size(11.0)
+                        .color(theme::ERROR),
+                );
+            }
+        }
+
+        // ── Fallback for failed crates with no messages ───────────
+        if !has_messages && c.state == CrateBuildState::Failed {
+            if let Some(err) = &c.error {
+                ui.colored_label(theme::ERROR, err);
+            }
+        }
+
+        // ── Empty state ───────────────────────────────────────────
+        if !has_messages && !has_ipc && c.state != CrateBuildState::Failed {
+            ui.label(
+                egui::RichText::new("No build data")
+                    .monospace()
+                    .size(10.0)
+                    .color(theme::TEXT_DIM),
+            );
+        }
+
+        // ── IPC metadata ──────────────────────────────────────────
+        if has_ipc {
+            if has_messages {
+                ui.add_space(4.0);
+            }
+            if !c.provides.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        theme::TEXT_DIM,
+                        egui::RichText::new(icon::PLUGS_CONNECTED).size(11.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("provides {} resources", c.provides.len()))
+                            .monospace()
+                            .size(10.0)
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+                let names: Vec<&str> = c.provides.iter().map(|p| p.resource.as_str()).collect();
+                chip_row(ui, &c.name, "provides", &names);
+            }
+            if !c.uses.is_empty() {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        theme::TEXT_DIM,
+                        egui::RichText::new(icon::ARROW_SQUARE_OUT).size(11.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("uses {} resources", c.uses.len()))
+                            .monospace()
+                            .size(10.0)
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+                let names: Vec<String> = c
+                    .uses
+                    .iter()
+                    .map(|u| {
+                        if u.resource.is_empty() {
+                            u.server_task.clone()
+                        } else {
+                            format!("{}::{}", u.server_task, u.resource)
+                        }
+                    })
+                    .collect();
+                let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                chip_row(ui, &c.name, "uses", &name_refs);
+            }
+        }
+    });
 }
 
 /// Chip variant. `Pill` matches provided resources (accent-filled,
 /// soft pill). `Boxy` matches consumed resources (monospace code
 /// identifier in a bordered box).
-enum ChipSpec {
-    Pill(String),
-    Boxy(String),
-}
-
-impl ChipSpec {
-    fn pill(s: impl Into<String>) -> Self {
-        ChipSpec::Pill(s.into())
-    }
-    fn boxy(s: impl Into<String>) -> Self {
-        ChipSpec::Boxy(s.into())
-    }
-}
-
-fn ipc_chip_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    chips: impl IntoIterator<Item = ChipSpec>,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            egui::RichText::new(label)
-                .monospace()
-                .strong()
-                .size(9.0)
-                .color(theme::TEXT_DIM),
-        );
-        ui.add_space(4.0);
-        for chip in chips {
-            match chip {
-                ChipSpec::Pill(text) => {
-                    egui::Frame::NONE
-                        .fill(theme::ACCENT.gamma_multiply(0.2))
-                        .corner_radius(egui::CornerRadius::same(255))
-                        .inner_margin(egui::Margin::symmetric(8, 3))
-                        .show(ui, |ui| {
+/// Taffy-based wrapping chip row. Used for deps, provides, and uses.
+fn chip_row(ui: &mut egui::Ui, crate_name: &str, kind: &str, names: &[&str]) {
+    taffy_tui(ui, ui.id().with(("chips", crate_name, kind)))
+        .reserve_available_width()
+        .style(Style {
+            display: Display::Flex,
+            flex_wrap: FlexWrap::Wrap,
+            flex_direction: FlexDirection::Row,
+            gap: Size {
+                width: length(4.0),
+                height: length(3.0),
+            },
+            padding: Rect {
+                left: length(18.0),
+                right: length(0.0),
+                top: length(0.0),
+                bottom: length(0.0),
+            },
+            size: Size {
+                width: percent(1.0),
+                height: auto(),
+            },
+            ..Default::default()
+        })
+        .show(|tui| {
+            for name in names {
+                tui.style(Style::default()).add_with_background_ui(
+                    |ui, container| {
+                        ui.painter().rect_filled(
+                            container.full_container(),
+                            egui::CornerRadius::same(3),
+                            theme::BG,
+                        );
+                    },
+                    |tui, _| {
+                        tui.style(Style {
+                            padding: Rect {
+                                left: length(5.0),
+                                right: length(5.0),
+                                top: length(1.0),
+                                bottom: length(1.0),
+                            },
+                            ..Default::default()
+                        })
+                        .ui(|ui| {
                             ui.label(
-                                egui::RichText::new(text)
+                                egui::RichText::new(*name)
                                     .monospace()
-                                    .strong()
                                     .size(10.0)
-                                    .color(theme::ACCENT),
-                            );
-                        });
-                }
-                ChipSpec::Boxy(text) => {
-                    egui::Frame::NONE
-                        .fill(theme::BG)
-                        .stroke(egui::Stroke::new(1.0, theme::SURFACE_BORDER))
-                        .corner_radius(egui::CornerRadius::same(3))
-                        .inner_margin(egui::Margin::symmetric(7, 2))
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(text)
-                                    .monospace()
-                                    .size(11.0)
                                     .color(theme::TEXT_SECONDARY),
                             );
                         });
-                }
+                    },
+                );
             }
-        }
-    });
+        });
 }
 
 // ── Memory map ──────────────────────────────────────────────────────────
@@ -1455,10 +1478,7 @@ fn memory_card(ui: &mut egui::Ui, build: &BuildHandle) {
                     .size(13.0)
                     .color(theme::TEXT_PRIMARY),
             );
-            ui.colored_label(
-                theme::TEXT_DIM,
-                format!("{} devices", build.memories.len()),
-            );
+            ui.colored_label(theme::TEXT_DIM, format!("{} devices", build.memories.len()));
         });
         ui.add_space(6.0);
 
@@ -1472,11 +1492,7 @@ fn memory_card(ui: &mut egui::Ui, build: &BuildHandle) {
 /// Render a single memory device bar. Allocations whose base address
 /// falls inside one of the device's CPU mappings count toward its
 /// "used" portion, coloured by the owner's crate kind.
-fn memory_device_row(
-    ui: &mut egui::Ui,
-    build: &BuildHandle,
-    dev: &crate::state::MemoryDevice,
-) {
+fn memory_device_row(ui: &mut egui::Ui, build: &BuildHandle, dev: &crate::state::MemoryDevice) {
     // Which allocations live inside this device?
     let allocs: Vec<&MemoryAllocation> = build
         .allocations
@@ -1499,70 +1515,103 @@ fn memory_device_row(
                 .size(11.0)
                 .color(theme::TEXT_PRIMARY),
         );
-        ui.with_layout(
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                let text = match pct {
-                    Some(p) => format!(
-                        "{} / {}  ·  {}%",
-                        format_bytes(used),
-                        format_bytes(capacity),
-                        p
-                    ),
-                    None => format!("{} / {}", format_bytes(used), format_bytes(capacity)),
-                };
-                ui.small(
-                    egui::RichText::new(text)
-                        .monospace()
-                        .color(theme::TEXT_SECONDARY),
-                );
-            },
-        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let text = match pct {
+                Some(p) => format!(
+                    "{} / {}  ·  {}%",
+                    format_bytes(used),
+                    format_bytes(capacity),
+                    p
+                ),
+                None => format!("{} / {}", format_bytes(used), format_bytes(capacity)),
+            };
+            ui.small(
+                egui::RichText::new(text)
+                    .monospace()
+                    .color(theme::TEXT_SECONDARY),
+            );
+        });
     });
 
     let bar_w = ui.available_width();
-    let (track_rect, _) = ui.allocate_exact_size(
-        egui::vec2(bar_w, 8.0),
-        egui::Sense::hover(),
-    );
-    ui.painter().rect_filled(
-        track_rect,
-        egui::CornerRadius::same(3),
-        theme::BG,
-    );
+    // Allocate the bar as non-interactive — hover is handled manually.
+    let (track_rect, _) =
+        ui.allocate_exact_size(egui::vec2(bar_w, 8.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(track_rect, egui::CornerRadius::ZERO, theme::BG);
 
     if capacity == 0 {
         return;
     }
-    // Draw per-allocation segments at their true proportional scale
-    // against the device's capacity — so the unused portion is
-    // correctly visible on the right.
-    let mut x = track_rect.left();
-    for a in &allocs {
-        let w = (a.size as f32 / capacity as f32) * track_rect.width();
-        let seg = egui::Rect::from_min_max(
-            egui::pos2(x, track_rect.top()),
-            egui::pos2((x + w).min(track_rect.right()), track_rect.bottom()),
-        );
-        let col = owner_color(&a.owner);
-        ui.painter()
-            .rect_filled(seg, egui::CornerRadius::same(3), col);
-        x += w;
+
+    // Build segment rects first, then draw + hover.
+    struct Seg {
+        rect: egui::Rect,
+        color: egui::Color32,
+        idx: usize,
     }
-    // Attention border when we get close to capacity.
-    if let Some(p) = pct {
-        if p >= 85 {
-            let used_w = (used as f32 / capacity as f32).min(1.0) * track_rect.width();
-            let warn_rect = egui::Rect::from_min_max(
-                egui::pos2(track_rect.left(), track_rect.top()),
-                egui::pos2(track_rect.left() + used_w, track_rect.bottom()),
-            );
-            ui.painter().rect_stroke(
-                warn_rect,
-                egui::CornerRadius::same(3),
-                egui::Stroke::new(1.0, theme::WARN),
-                egui::StrokeKind::Inside,
-            );
+    let gap = 1.0;
+    let n = allocs.len();
+    let mut segs = Vec::with_capacity(n);
+    let mut x = track_rect.left();
+    for (i, a) in allocs.iter().enumerate() {
+        let w = ((a.size as f32 / capacity as f32) * track_rect.width()).max(1.0);
+        let right = if i + 1 < n {
+            (x + w).min(track_rect.right())
+        } else {
+            (x + w).min(track_rect.right())
+        };
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(x, track_rect.top()),
+            egui::pos2(right, track_rect.bottom()),
+        );
+        segs.push(Seg {
+            rect,
+            color: alloc_color(&a.owner),
+            idx: i,
+        });
+        x = right + gap;
+    }
+
+    // Draw segments.
+    for seg in &segs {
+        ui.painter()
+            .rect_filled(seg.rect, egui::CornerRadius::ZERO, seg.color);
+    }
+
+    // Hover: check pointer position against segments.
+    if let Some(pointer) = ui.ctx().pointer_hover_pos() {
+        if track_rect.contains(pointer) {
+            for seg in &segs {
+                if seg.rect.contains(pointer) {
+                    let a = &allocs[seg.idx];
+                    egui::popup::show_tooltip_at(
+                        ui.ctx(),
+                        ui.layer_id(),
+                        ui.id().with(("alloc_tip", seg.idx)),
+                        pointer + egui::vec2(12.0, 12.0),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{}.{}", a.owner, a.region))
+                                    .monospace()
+                                    .strong()
+                                    .color(seg.color),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} @ {:#010x}",
+                                    format_bytes(a.size),
+                                    a.base
+                                ))
+                                .monospace()
+                                .size(11.0)
+                                .color(theme::TEXT_SECONDARY),
+                            );
+                        },
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -1578,90 +1627,34 @@ fn memory_device_row(
             );
             if dev.mappings.len() > 1 {
                 ui.small(
-                    egui::RichText::new(format!(
-                        "·  {} mappings",
-                        dev.mappings.len()
-                    ))
-                    .monospace()
-                    .color(theme::TEXT_DIM),
+                    egui::RichText::new(format!("·  {} mappings", dev.mappings.len()))
+                        .monospace()
+                        .color(theme::TEXT_DIM),
                 );
             }
         });
     }
 }
 
-fn owner_color(owner: &str) -> egui::Color32 {
+/// Deterministic color for an allocation owner. Known roles get
+/// fixed colors; task crates get a hue derived from their name.
+fn alloc_color(owner: &str) -> egui::Color32 {
     match owner {
         "kernel" => theme::WARN,
         "bootloader" => theme::ACCENT,
-        _ => theme::INFO,
+        _ => {
+            // Hash the name to pick a hue.
+            let mut h: u32 = 0;
+            for b in owner.bytes() {
+                h = h.wrapping_mul(31).wrapping_add(b as u32);
+            }
+            let hue = (h % 360) as f32;
+            egui::ecolor::Hsva::new(hue / 360.0, 0.6, 0.7, 1.0).into()
+        }
     }
 }
 
 // ── Footer ──────────────────────────────────────────────────────────────
-
-/// Bottom-of-panel footer — thin single-line strip with image / archive
-/// metadata. Replaces the previous IMAGE card; lives outside the
-/// two-column body so it always stretches full-width.
-fn footer(ui: &mut egui::Ui, build: &BuildHandle) {
-    let bg = theme::BORDER_STRONG.gamma_multiply(0.2);
-    egui::Frame::NONE
-        .fill(bg)
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(16, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                // Left: image status / icon + size summary.
-                match &build.image {
-                    ImageProgress::None => {
-                        ui.colored_label(theme::TEXT_DIM, icon::HOURGLASS_MEDIUM);
-                        ui.label(
-                            egui::RichText::new("awaiting pack")
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::TEXT_DIM),
-                        );
-                    }
-                    ImageProgress::Assembled { size } => {
-                        ui.colored_label(theme::ACCENT, icon::PACKAGE);
-                        ui.label(
-                            egui::RichText::new(format!("assembled · {}", format_bytes(*size)))
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::ACCENT),
-                        );
-                    }
-                    ImageProgress::Archived { size, .. } => {
-                        ui.colored_label(theme::INFO, icon::PACKAGE);
-                        ui.label(
-                            egui::RichText::new(format!("{} · {}", icon::CHECK, format_bytes(*size)))
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::INFO),
-                        );
-                    }
-                }
-                // Right: truncated archive path with full-path tooltip.
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        if let ImageProgress::Archived { path, .. } = &build.image {
-                            let p = path.display().to_string();
-                            let label = egui::Label::new(
-                                egui::RichText::new(shorten_path(&p))
-                                    .monospace()
-                                    .size(10.0)
-                                    .color(theme::TEXT_DIM),
-                            )
-                            .truncate();
-                            ui.add(label).on_hover_text(p);
-                        }
-                    },
-                );
-            });
-        });
-}
 
 /// Shorten a long path for single-line display: keep the last component
 /// preceded by a `…/` when the path has more than 3 segments.
@@ -1680,15 +1673,14 @@ fn shorten_path(path: &str) -> String {
 // ── Diagnostics ─────────────────────────────────────────────────────────
 
 fn diagnostics_section(ui: &mut egui::Ui, build: &BuildHandle) {
-    let warnings: Vec<&Diagnostic> = build
-        .diagnostics
+    let all = collect_diagnostics(build);
+    let warnings: Vec<_> = all
         .iter()
-        .filter(|d| d.level == DiagnosticLevel::Warning)
+        .filter(|d| d.diag.level == CargoDiagLevel::Warning)
         .collect();
-    let errors: Vec<&Diagnostic> = build
-        .diagnostics
+    let errors: Vec<_> = all
         .iter()
-        .filter(|d| d.level == DiagnosticLevel::Error)
+        .filter(|d| d.diag.level == CargoDiagLevel::Error)
         .collect();
     if warnings.is_empty() && errors.is_empty() {
         return;
@@ -1703,24 +1695,12 @@ fn diagnostics_section(ui: &mut egui::Ui, build: &BuildHandle) {
                     .size(13.0)
                     .color(theme::TEXT_PRIMARY),
             );
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    pill(
-                        ui,
-                        theme::ERROR,
-                        &format!("{} ERRORS", errors.len()),
-                    );
-                    pill(
-                        ui,
-                        theme::WARN,
-                        &format!("{} WARNINGS", warnings.len()),
-                    );
-                },
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                pill(ui, theme::ERROR, &format!("{} ERRORS", errors.len()));
+                pill(ui, theme::WARN, &format!("{} WARNINGS", warnings.len()));
+            });
         });
         ui.add_space(6.0);
-        // Show errors first (most important).
         for d in errors.iter().take(6) {
             diagnostic_row(ui, d);
         }
@@ -1756,12 +1736,13 @@ fn pill(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
         });
 }
 
-fn diagnostic_row(ui: &mut egui::Ui, d: &Diagnostic) {
-    let (stripe, level_text) = match d.level {
-        DiagnosticLevel::Error => (theme::ERROR, "error"),
-        DiagnosticLevel::Warning => (theme::WARN, "warning"),
-        DiagnosticLevel::Note => (theme::ACCENT, "note"),
-        DiagnosticLevel::Help => (theme::INFO, "help"),
+fn diagnostic_row(ui: &mut egui::Ui, d: &BuildDiagnostic<'_>) {
+    let diag = &d.diag;
+    let (stripe, level_text) = match diag.level {
+        CargoDiagLevel::Error => (theme::ERROR, "error"),
+        CargoDiagLevel::Warning => (theme::WARN, "warning"),
+        CargoDiagLevel::Note => (theme::ACCENT, "note"),
+        CargoDiagLevel::Help => (theme::INFO, "help"),
     };
     egui::Frame::NONE
         .fill(theme::BG)
@@ -1770,35 +1751,42 @@ fn diagnostic_row(ui: &mut egui::Ui, d: &Diagnostic) {
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Left stripe.
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(3.0, 34.0), egui::Sense::hover());
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::same(2),
-                    stripe,
-                );
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 34.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, egui::CornerRadius::same(2), stripe);
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.colored_label(
                             stripe,
-                            egui::RichText::new(level_text).monospace().strong().size(11.0),
+                            egui::RichText::new(level_text)
+                                .monospace()
+                                .strong()
+                                .size(11.0),
                         );
+                        if let Some(code) = &diag.code {
+                            ui.label(
+                                egui::RichText::new(format!("[{code}]"))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(stripe.gamma_multiply(0.7)),
+                            );
+                        }
                         ui.colored_label(
                             theme::TEXT_SECONDARY,
-                            egui::RichText::new(&d.crate_name).monospace().size(11.0),
+                            egui::RichText::new(d.crate_name).monospace().size(11.0),
                         );
+                        if let Some(loc) = &diag.location {
+                            ui.label(
+                                egui::RichText::new(loc)
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(theme::TEXT_DIM),
+                            );
+                        }
                     });
-                    // Render a single-line summary — first non-empty line.
-                    let summary = d
-                        .rendered
-                        .lines()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("")
-                        .trim();
                     ui.label(
-                        egui::RichText::new(summary)
+                        egui::RichText::new(&diag.message)
                             .monospace()
                             .size(12.0)
                             .color(theme::TEXT_PRIMARY),
@@ -1809,65 +1797,56 @@ fn diagnostic_row(ui: &mut egui::Ui, d: &Diagnostic) {
     ui.add_space(4.0);
 }
 
-// ── Pipeline log (collapsed) ────────────────────────────────────────────
-
-fn pipeline_log(ui: &mut egui::Ui, build: &BuildHandle) {
-    if build.log.is_empty() {
-        return;
-    }
-    let id = ui.make_persistent_id(("pipeline_log", build.id.0));
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-        .show_header(ui, |ui| {
-            ui.colored_label(theme::TEXT_SECONDARY, icon::TERMINAL);
-            ui.label(
-                egui::RichText::new("PIPELINE LOG")
-                    .monospace()
-                    .strong()
-                    .size(13.0)
-                    .color(theme::TEXT_SECONDARY),
-            );
-            ui.colored_label(
-                theme::TEXT_DIM,
-                format!("{} lines · stage events", build.log.len()),
-            );
-        })
-        .body(|ui| {
-            egui::ScrollArea::vertical()
-                .max_height(240.0)
-                .auto_shrink([false, true])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in &build.log {
-                        ui.label(
-                            egui::RichText::new(line)
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::TEXT_SECONDARY),
-                        );
-                    }
-                });
-        });
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-fn card<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    // Lock card width to the ui's available width so inner content
-    // can't push the card wider than its column. `set_min_width` alone
-    // leaves the card free to grow past the boundary when a label is
-    // slightly too wide — `set_width` clamps both directions.
-    egui::Frame::NONE
-        .fill(theme::SURFACE)
-        .stroke(egui::Stroke::new(1.0, theme::SURFACE_BORDER))
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(18, 14))
-        .show(ui, |ui| {
-            let w = ui.available_width();
-            ui.set_width(w);
-            ui.set_max_width(w);
-            content(ui)
+fn card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
+    taffy_tui(ui, ui.auto_id_with("card"))
+        .reserve_available_width()
+        .style(Style {
+            size: Size {
+                width: percent(1.0),
+                height: auto(),
+            },
+            ..Default::default()
         })
-        .inner
+        .show(|tui| {
+            tui.style(Style {
+                size: Size {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                padding: Rect {
+                    left: length(18.0),
+                    right: length(18.0),
+                    top: length(14.0),
+                    bottom: length(14.0),
+                },
+                ..Default::default()
+            })
+            .add_with_background_ui(
+                |ui, container| {
+                    let rect = container.full_container();
+                    ui.painter()
+                        .rect_filled(rect, egui::CornerRadius::same(8), theme::SURFACE);
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::CornerRadius::same(8),
+                        egui::Stroke::new(1.0, theme::SURFACE_BORDER),
+                        egui::StrokeKind::Inside,
+                    );
+                },
+                |tui, _| {
+                    tui.style(Style {
+                        size: Size {
+                            width: percent(1.0),
+                            height: auto(),
+                        },
+                        ..Default::default()
+                    })
+                    .ui(|ui| content(ui));
+                },
+            );
+        });
 }
 
 fn format_duration(d: Duration) -> String {
@@ -1884,4 +1863,26 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+// ── Diagnostics helpers ───────────────────────────────────────────────
+
+struct BuildDiagnostic<'a> {
+    crate_name: &'a str,
+    diag: &'a CargoDiagnostic,
+}
+
+fn collect_diagnostics(build: &BuildHandle) -> Vec<BuildDiagnostic<'_>> {
+    let mut out = Vec::new();
+    for c in &build.crates {
+        for d in &c.cargo_summary.diagnostics {
+            if matches!(d.level, CargoDiagLevel::Error | CargoDiagLevel::Warning) {
+                out.push(BuildDiagnostic {
+                    crate_name: &c.name,
+                    diag: d,
+                });
+            }
+        }
+    }
+    out
 }

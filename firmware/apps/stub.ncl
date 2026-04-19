@@ -4,8 +4,8 @@ let lib = import "../lib.ncl" in
 
 fun args =>
   {
-    name = "rcard",
-    version = "0.1.0",
+    name = "Stub",
+    version = "0.2.0",
     target = args.board.target,
     vector_table_size = args.board.vector_table_size,
     kernel = (args.board.kernel) args.places,
@@ -47,17 +47,19 @@ fun args =>
     entries = [
       args.tasks.supervisor,
       args.tasks.idle,
-      args.tasks.stub,
+
+      # Enable the host proxy, so the host can drive the stub firmware.
       args.tasks.sysmodule_host_proxy,
-      # USB now comes from the shared usb_protocol stack (same topology
-      # as the full firmware: EP1 IN/OUT for host-driven IPC, EP2 IN/OUT
-      # for fob-driven events). The stub task itself no longer takes the
-      # bus directly — usb_protocol owns it.
+
+      # Include the USB protocol sysmodules so that the host can talk
+      # to the stub firmware over USB, and so that the stub firmware
+      # can talk to the host over USB.
       args.tasks.sysmodule_usb_protocol,
       args.tasks.sysmodule_usb_protocol_host,
       args.tasks.sysmodule_usb_protocol_fob,
+
       # We want to include the storage sysmodule in the stub firmware so 
-      # that we can flash the main firmware to the device over USB
+      # that we can flash the main firmware to the device
       args.tasks.sysmodule_storage,
     ],
   }

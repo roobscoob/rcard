@@ -398,8 +398,6 @@ pub struct CrateProgress {
     /// [`CrateProgress::host_state`] when `kind == HostCrate`.
     pub state: CrateBuildState,
     pub host_state: Option<HostCrateBuildState>,
-    /// If this crate is a supervisor task.
-    pub supervisor: bool,
     /// Scheduling priority (0 = highest). Known from config, set at
     /// first event that references this crate.
     pub priority: Option<u32>,
@@ -407,9 +405,13 @@ pub struct CrateProgress {
     pub sizes: std::collections::BTreeMap<String, u64>,
     /// Total ELF size after link (sum of all regions) — populated on Linked.
     pub total_size: Option<u64>,
-    /// Cargo output lines. Rendered in the dropdown body while Building
-    /// or on Failed.
-    pub cargo_log: Vec<String>,
+    /// Raw cargo JSON messages (ndjson lines). Stored for archive
+    /// persistence. The renderer reads from the pre-decoded `cargo_summary`
+    /// instead of parsing these every frame.
+    pub cargo_messages: Vec<String>,
+    /// Pre-decoded summary of `cargo_messages`. Updated incrementally
+    /// as messages arrive; the renderer reads this directly.
+    pub cargo_summary: CargoSummary,
     /// Error message if this crate failed.
     pub error: Option<String>,
     /// IPC resources this crate serves — drives the "provides" row in
@@ -419,6 +421,34 @@ pub struct CrateProgress {
     pub uses: Vec<UsedResource>,
 }
 
+/// Pre-decoded cargo message summary for a single crate. Populated
+/// incrementally as messages arrive so the renderer never parses JSON.
+#[derive(Clone, Debug, Default)]
+pub struct CargoSummary {
+    pub deps_fresh: usize,
+    pub deps_compiled: Vec<String>,
+    pub diagnostics: Vec<CargoDiagnostic>,
+    pub raw_errors: Vec<String>,
+}
+
+/// A single compiler diagnostic, pre-decoded from cargo JSON.
+#[derive(Clone, Debug)]
+pub struct CargoDiagnostic {
+    pub level: CargoDiagLevel,
+    pub message: String,
+    pub code: Option<String>,
+    pub location: Option<String>,
+    pub rendered: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CargoDiagLevel {
+    Error,
+    Warning,
+    Note,
+    Help,
+}
+
 impl CrateProgress {
     pub fn new(name: String, kind: CrateKind) -> Self {
         Self {
@@ -426,15 +456,74 @@ impl CrateProgress {
             kind,
             state: CrateBuildState::Queued,
             host_state: None,
-            supervisor: false,
             priority: None,
             sizes: std::collections::BTreeMap::new(),
             total_size: None,
-            cargo_log: Vec::new(),
+            cargo_messages: Vec::new(),
+            cargo_summary: CargoSummary::default(),
             error: None,
             provides: Vec::new(),
             uses: Vec::new(),
         }
+    }
+
+    /// Push a raw cargo JSON message, decoding it into the summary
+    /// at the same time.
+    pub fn push_cargo_message(&mut self, raw: String) {
+        if let Ok(msg) = serde_json::from_str::<escargot::format::Message>(&raw) {
+            match msg {
+                escargot::format::Message::CompilerMessage(cm) => {
+                    let d = &cm.message;
+                    let level = match d.level {
+                        escargot::format::diagnostic::DiagnosticLevel::Ice
+                        | escargot::format::diagnostic::DiagnosticLevel::Error => {
+                            CargoDiagLevel::Error
+                        }
+                        escargot::format::diagnostic::DiagnosticLevel::Warning => {
+                            CargoDiagLevel::Warning
+                        }
+                        escargot::format::diagnostic::DiagnosticLevel::Help => {
+                            CargoDiagLevel::Help
+                        }
+                        _ => CargoDiagLevel::Note,
+                    };
+                    self.cargo_summary.diagnostics.push(CargoDiagnostic {
+                        level,
+                        message: d.message.trim().to_string(),
+                        code: d.code.as_ref().map(|c| c.code.to_string()),
+                        location: d
+                            .spans
+                            .iter()
+                            .find(|s| s.is_primary)
+                            .map(|s| {
+                                let path = s.file_name.display();
+                                format!("{path}:{}:{}", s.line_start, s.column_start)
+                            }),
+                        rendered: d
+                            .rendered
+                            .as_deref()
+                            .unwrap_or_else(|| d.message.as_ref())
+                            .trim()
+                            .to_string(),
+                    });
+                }
+                escargot::format::Message::CompilerArtifact(ca) => {
+                    if !ca.target.kind.iter().any(|k| k.as_ref() == "custom-build") {
+                        if ca.fresh {
+                            self.cargo_summary.deps_fresh += 1;
+                        } else {
+                            self.cargo_summary
+                                .deps_compiled
+                                .insert(0, ca.target.name.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if !raw.is_empty() {
+            self.cargo_summary.raw_errors.push(raw.clone());
+        }
+        self.cargo_messages.push(raw);
     }
 }
 
@@ -554,32 +643,18 @@ impl ResourceSummary {
     }
 }
 
-/// Severity of a compiler diagnostic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagnosticLevel {
-    Warning,
-    Error,
-    Note,
-    Help,
-}
-
-/// A rendered compiler diagnostic.
-#[derive(Clone, Debug)]
-pub struct Diagnostic {
-    pub level: DiagnosticLevel,
-    /// Name of the crate that emitted this message.
-    pub crate_name: String,
-    /// Full rendered message (multi-line, ready to display).
-    pub rendered: String,
-}
-
 /// A build tracked by the app. Holds everything needed to render the
 /// unified Build/Firmware panel — coarse status, live pipeline phase,
-/// per-crate progress, memory allocations, image state, diagnostics,
-/// and a free-form pipeline log.
+/// per-crate progress, memory allocations, image state, and a
+/// free-form pipeline log.
 pub struct BuildHandle {
     pub id: BuildId,
     pub config: BuildConfig,
+    /// Resolved app name from the Nickel config (e.g. "rcard").
+    /// Populated from `AppConfig.name` for snapshots, or from the
+    /// `ConfigResolved` event for live builds. Falls back to
+    /// `config.config` until the resolved name arrives.
+    pub name: Option<String>,
     pub status: BuildStatus,
     /// UUID (UUIDv4 string) generated during Planning. Populated by
     /// the `BuildUuid` event for live builds, or from
@@ -607,10 +682,8 @@ pub struct BuildHandle {
     pub resources: Vec<ResourceSummary>,
     /// Output image state.
     pub image: ImageProgress,
-    /// Compiler diagnostics (warnings + errors), newest last.
-    pub diagnostics: Vec<Diagnostic>,
     /// Free-form build log — stage events, pipeline messages. Cargo
-    /// output lives in each crate's `cargo_log` instead.
+    /// output lives in each crate's `cargo_messages` instead.
     pub log: Vec<String>,
     pub started_at: std::time::Instant,
     pub finished_at: Option<std::time::Instant>,
@@ -668,12 +741,18 @@ impl BuildHandle {
         let mut allocations: Vec<MemoryAllocation> = Vec::new();
         let mut resources: Vec<ResourceSummary> = Vec::new();
 
-        let build_name = fw
+        let app_name = fw
             .metadata
             .build
             .as_ref()
             .map(|b| b.name.clone())
             .unwrap_or_else(|| fw.display_name());
+        let config_stem = fw
+            .metadata
+            .build
+            .as_ref()
+            .map(|b| b.config.clone())
+            .unwrap_or_else(|| app_name.clone());
         let board = fw
             .metadata
             .build
@@ -693,7 +772,6 @@ impl BuildHandle {
                 &config.kernel.crate_info.package.name,
                 CrateKind::Kernel,
                 Some(0),
-                false,
             ));
             // Synthesise bootloader (if present).
             if let Some(bl) = &config.bootloader {
@@ -701,7 +779,6 @@ impl BuildHandle {
                     &bl.crate_info.package.name,
                     CrateKind::Bootloader,
                     Some(0),
-                    false,
                 ));
             }
             // Flatten the task tree. Each task carries its direct deps
@@ -725,7 +802,6 @@ impl BuildHandle {
                     name,
                     kind,
                     Some(task.priority),
-                    task.supervisor,
                 );
                 // `uses` = direct dependencies' names; resource names
                 // get filled in later once we have IpcMetadata.
@@ -745,76 +821,10 @@ impl BuildHandle {
                 walk_tasks(task, &mut crates, &mut seen_tasks);
             }
 
-            // Fill in `provides` from IPC metadata servers map, and
-            // expand `uses` placeholder resources from the same map.
-            let ipc = &fw.metadata.ipc;
-            if let Some(ipc) = ipc {
-                // Resources card — delegated to the shared helper so
-                // the live-build path produces identical data.
+            // Fill in per-crate provides/uses from IPC metadata.
+            if let Some(ipc) = &fw.metadata.ipc {
                 resources = ResourceSummary::list_from_bundle(ipc);
-                // Invert `servers` for the provides/uses lookups on
-                // individual crate rows.
-                let provider_by_resource: std::collections::HashMap<&str, &str> = ipc
-                    .servers
-                    .iter()
-                    .flat_map(|(task, server)| {
-                        server
-                            .serves
-                            .iter()
-                            .map(move |r| (r.as_str(), task.as_str()))
-                    })
-                    .collect();
-                // task_name -> list of resource trait names it serves
-                let serves_by_task: std::collections::HashMap<&str, &[String]> = ipc
-                    .servers
-                    .iter()
-                    .map(|(task, server)| (task.as_str(), server.serves.as_slice()))
-                    .collect();
-                // resource name -> method count
-                let method_count: std::collections::HashMap<&str, usize> = ipc
-                    .resources
-                    .iter()
-                    .map(|(name, res)| (name.as_str(), res.methods.len()))
-                    .collect();
-
-                for c in crates.iter_mut() {
-                    // `provides` — look up by crate/task name.
-                    if let Some(serves) = serves_by_task.get(c.name.as_str()) {
-                        for resource in serves.iter() {
-                            c.provides.push(ProvidedResource {
-                                resource: resource.clone(),
-                                method_count: method_count
-                                    .get(resource.as_str())
-                                    .copied()
-                                    .unwrap_or(0),
-                            });
-                        }
-                    }
-                }
-                // Second pass: expand each `uses` dependency into one
-                // `UsedResource` per resource the server task serves.
-                // We build a new list by resolving each server_task.
-                for c in crates.iter_mut() {
-                    let mut expanded: Vec<UsedResource> = Vec::new();
-                    for u in std::mem::take(&mut c.uses) {
-                        if let Some(serves) =
-                            serves_by_task.get(u.server_task.as_str())
-                        {
-                            for resource in serves.iter() {
-                                expanded.push(UsedResource {
-                                    server_task: u.server_task.clone(),
-                                    resource: resource.clone(),
-                                });
-                            }
-                        } else {
-                            // No IPC schema for this dep — keep the
-                            // task-level reference so the chip still
-                            // renders, just without a resource name.
-                            expanded.push(u);
-                        }
-                    }
-                    c.uses = expanded;
-                }
+                apply_ipc_to_crates(&mut crates, ipc);
             }
 
             // Capacities from the resolved places.
@@ -841,14 +851,29 @@ impl BuildHandle {
         // the memory map card shows capacities only in that case.
         if let Some(build) = &fw.metadata.build {
             for a in &build.allocations {
-                allocations.push(MemoryAllocation {
+                let alloc = MemoryAllocation {
                     place: a.place.clone(),
                     owner: a.owner.clone(),
                     region: a.region.clone(),
                     base: a.base,
                     size: a.size,
                     requested_place: a.requested_place.clone(),
-                });
+                };
+                // Dedup by (owner, region) — same as live path.
+                if let Some(existing) = allocations.iter_mut().find(|x| {
+                    x.owner == alloc.owner && x.region == alloc.region
+                }) {
+                    *existing = alloc;
+                } else {
+                    allocations.push(alloc);
+                }
+            }
+            // Populate per-crate cargo messages from the archive so
+            // loaded firmware shows the same build output as live.
+            for msg in &build.cargo_messages {
+                if let Some(c) = crates.iter_mut().find(|c| c.name == msg.crate_name) {
+                    c.push_cargo_message(msg.raw.clone());
+                }
             }
         }
 
@@ -869,10 +894,11 @@ impl BuildHandle {
             // `BuildId` immediately after construction.
             id: BuildId(0),
             config: BuildConfig {
-                config: build_name,
+                config: config_stem,
                 board,
                 layout: layout_name,
             },
+            name: Some(app_name),
             status: BuildStatus::Succeeded {
                 tfw_path: fw.path.clone().unwrap_or_default(),
                 firmware_id: Some(fw.id),
@@ -885,7 +911,6 @@ impl BuildHandle {
             memories,
             resources,
             image,
-            diagnostics: Vec::new(),
             log: Vec::new(),
             started_at,
             finished_at,
@@ -897,13 +922,87 @@ fn synthesise_linked_crate(
     name: &str,
     kind: CrateKind,
     priority: Option<u32>,
-    supervisor: bool,
 ) -> CrateProgress {
     let mut c = CrateProgress::new(name.to_string(), kind);
     c.state = CrateBuildState::Linked;
     c.priority = priority;
-    c.supervisor = supervisor;
     c
+}
+
+/// Map a `tfw::build::CrateKind` to a GUI `CrateKind`, promoting
+/// `sysmodule_*` names to `Sysmodule`.
+fn classify_resolved_kind(name: &str, tfw_kind: tfw::build::CrateKind) -> CrateKind {
+    match tfw_kind {
+        tfw::build::CrateKind::Kernel => CrateKind::Kernel,
+        tfw::build::CrateKind::Bootloader => CrateKind::Bootloader,
+        tfw::build::CrateKind::Task => {
+            if name.starts_with("sysmodule_") {
+                CrateKind::Sysmodule
+            } else {
+                CrateKind::Task
+            }
+        }
+    }
+}
+
+/// Apply IPC metadata to existing crate entries — fills in `provides`
+/// and expands `uses` from task-level deps to resource-level deps.
+/// Shared between live builds (`BuildResources` event) and snapshots
+/// (`snapshot_from_firmware`).
+fn apply_ipc_to_crates(
+    crates: &mut [CrateProgress],
+    bundle: &tfw::ipc_metadata::IpcMetadataBundle,
+) {
+    // task_name → list of resource names it serves.
+    let serves_by_task: HashMap<&str, &[String]> = bundle
+        .servers
+        .iter()
+        .map(|(task, server)| (task.as_str(), server.serves.as_slice()))
+        .collect();
+    // resource name → method count.
+    let method_count: HashMap<&str, usize> = bundle
+        .resources
+        .iter()
+        .map(|(name, res)| (name.as_str(), res.methods.len()))
+        .collect();
+
+    // First pass: fill `provides`.
+    for c in crates.iter_mut() {
+        if let Some(serves) = serves_by_task.get(c.name.as_str()) {
+            // Only add if not already populated (idempotent for snapshots
+            // that may call this after initial population).
+            if c.provides.is_empty() {
+                for resource in serves.iter() {
+                    c.provides.push(ProvidedResource {
+                        resource: resource.clone(),
+                        method_count: method_count
+                            .get(resource.as_str())
+                            .copied()
+                            .unwrap_or(0),
+                    });
+                }
+            }
+        }
+    }
+
+    // Second pass: expand `uses` — each dependency task name gets
+    // replaced by one entry per resource that task serves.
+    for c in crates.iter_mut() {
+        let mut expanded: Vec<UsedResource> = Vec::new();
+        for u in std::mem::take(&mut c.uses) {
+            if let Some(serves) = serves_by_task.get(u.server_task.as_str()) {
+                for resource in serves.iter() {
+                    expanded.push(UsedResource {
+                        server_task: u.server_task.clone(),
+                        resource: resource.clone(),
+                    });
+                }
+            } else {
+                expanded.push(u);
+            }
+        }
+        c.uses = expanded;
+    }
 }
 
 // ── File drag state ─────────────────────────────────────────────────────
@@ -1618,23 +1717,43 @@ impl AppState {
                 crate::bridge::Event::BuildConfigResolved {
                     build_id,
                     uuid,
+                    name,
                     memories,
                     place_capacities,
+                    tasks,
                 } => {
                     if let Some(build) = self.builds.get_mut(&build_id) {
                         build.uuid = Some(uuid);
+                        build.name = Some(name);
                         build.memories = memories;
                         for (name, size) in place_capacities {
                             build.place_capacities.insert(name, size);
+                        }
+                        // Pre-populate crate entries with priority and
+                        // dependency-level `uses` from the config tree.
+                        for task in &tasks {
+                            let kind = classify_resolved_kind(&task.name, task.kind);
+                            let c = build.crate_mut(&task.name, kind);
+                            c.priority = Some(task.priority);
+                            for dep in &task.depends_on {
+                                c.uses.push(UsedResource {
+                                    server_task: dep.clone(),
+                                    resource: String::new(),
+                                });
+                            }
                         }
                     }
                 }
                 crate::bridge::Event::BuildResources {
                     build_id,
                     resources,
+                    bundle,
                 } => {
                     if let Some(build) = self.builds.get_mut(&build_id) {
                         build.resources = resources;
+                        // Derive per-crate provides/uses from the IPC
+                        // bundle, same logic the snapshot path uses.
+                        apply_ipc_to_crates(&mut build.crates, &bundle);
                     }
                 }
                 crate::bridge::Event::BuildCrateState {
@@ -1670,7 +1789,7 @@ impl AppState {
                 } => {
                     if let Some(build) = self.builds.get_mut(&build_id) {
                         let c = build.crate_mut(&name, kind);
-                        c.cargo_log.push(line);
+                        c.push_cargo_message(line);
                     }
                 }
                 crate::bridge::Event::BuildHostCrateState {
@@ -1696,29 +1815,20 @@ impl AppState {
                     allocation,
                 } => {
                     if let Some(build) = self.builds.get_mut(&build_id) {
-                        build.allocations.push(allocation);
+                        // Dedup by (owner, region) — later allocations
+                        // (from deferred resolution) replace earlier ones.
+                        if let Some(existing) = build.allocations.iter_mut().find(|a| {
+                            a.owner == allocation.owner && a.region == allocation.region
+                        }) {
+                            *existing = allocation;
+                        } else {
+                            build.allocations.push(allocation);
+                        }
                     }
                 }
                 crate::bridge::Event::BuildImage { build_id, image } => {
                     if let Some(build) = self.builds.get_mut(&build_id) {
                         build.image = image;
-                    }
-                }
-                crate::bridge::Event::BuildDiagnostic { build_id, diagnostic } => {
-                    if let Some(build) = self.builds.get_mut(&build_id) {
-                        // If this diagnostic belongs to a known crate that's
-                        // currently failing, capture it into that crate's
-                        // error field too.
-                        if diagnostic.level == DiagnosticLevel::Error {
-                            if let Some(c) =
-                                build.crates.iter_mut().find(|c| c.name == diagnostic.crate_name)
-                            {
-                                if c.error.is_none() {
-                                    c.error = Some(diagnostic.rendered.clone());
-                                }
-                            }
-                        }
-                        build.diagnostics.push(diagnostic);
                     }
                 }
                 crate::bridge::Event::BuildLog { build_id, message } => {
@@ -2072,9 +2182,9 @@ impl AppState {
 
         let build_id = self.next_build_id();
         let build_config = BuildConfig {
-            config: config.clone(),
-            board: board.clone(),
-            layout: layout.clone(),
+            config: format!("apps/{config}.ncl"),
+            board: format!("boards/{board}.ncl"),
+            layout: format!("layouts/{layout}.ncl"),
         };
 
         self.builds.insert(
@@ -2082,6 +2192,7 @@ impl AppState {
             BuildHandle {
                 id: build_id,
                 config: build_config.clone(),
+                name: None,
                 status: BuildStatus::Running,
                 uuid: None,
                 phase: None,
@@ -2091,7 +2202,6 @@ impl AppState {
                 memories: Vec::new(),
                 resources: Vec::new(),
                 image: ImageProgress::None,
-                diagnostics: Vec::new(),
                 log: vec![format!("Building {config} (board={board}, layout={layout})")],
                 started_at: std::time::Instant::now(),
                 finished_at: None,
@@ -2100,6 +2210,7 @@ impl AppState {
 
         // Open the unified firmware panel against the live build.
         let pane = Pane::Firmware(build_id);
+        let target = pane.clone();
         let tile = self.tree.tiles.insert_pane(pane);
         if let Some(root) = self.tree.root() {
             if let Some(egui_tiles::Tile::Container(container)) =
@@ -2117,6 +2228,8 @@ impl AppState {
             let tab = self.tree.tiles.insert_tab_tile(vec![tile]);
             self.tree.root = Some(tab);
         }
+        self.tree
+            .make_active(|_, t| matches!(t, egui_tiles::Tile::Pane(p) if *p == target));
 
         let out_dir = self.firmware_dir.parent().unwrap_or(&self.firmware_dir).join("build");
         let _ = std::fs::create_dir_all(&out_dir);
@@ -2155,6 +2268,23 @@ impl AppState {
     /// `.tfw` from the sidebar. Only clears the build's in-memory
     /// state (phase, cargo log, diagnostics, …).
     pub fn remove_build(&mut self, build_id: BuildId) {
+        // If this build points at a firmware entry, remove the firmware
+        // too — otherwise the sidebar still lists it and re-opening
+        // just re-creates the snapshot.
+        if let Some(build) = self.builds.get(&build_id) {
+            if let BuildStatus::Succeeded {
+                firmware_id: Some(fw_id),
+                ..
+            } = &build.status
+            {
+                if let Some(fw) = self.firmware.remove(fw_id) {
+                    // Delete the .tfw file from the database.
+                    if let Some(path) = &fw.path {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
         self.builds.remove(&build_id);
         let target = Pane::Firmware(build_id);
         let to_remove: Vec<egui_tiles::TileId> = self
