@@ -11,7 +11,7 @@ let miB = fun n => n * 1024 * 1024 in
   bootloader = import "../bootloader/bootloader.ncl",
 
   memory = std.record.insert "mpi2" {
-      size = miB 4,
+      size = miB 8,
       geometry = {
         erase_size = 4096,
         program_size = 256,
