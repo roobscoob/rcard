@@ -59,7 +59,7 @@ impl RcardApp {
         _ctx: egui::Context,
         runtime: tokio::runtime::Runtime,
     ) -> Self {
-        let mut state = AppState::new(cmd_tx, event_rx);
+        let mut state = AppState::new(cmd_tx, event_rx, runtime.handle().clone());
         state.register_builtin_stub();
         state.scan_firmware_db();
 

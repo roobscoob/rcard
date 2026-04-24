@@ -623,8 +623,11 @@ pub async fn run(
                                 Some(format!("build id: {}", resolved.build_id))
                             }
                             BuildEvent::IpcMetadata(bundle) => {
-                                let resources =
-                                    ResourceSummary::list_from_bundle(bundle);
+                                // Derive the same `Vec<ResourceSummary>` a
+                                // loaded-firmware snapshot would produce,
+                                // so the Resources card fills in for live
+                                // builds without any UI branching.
+                                let resources = ResourceSummary::list_from_bundle(bundle);
                                 let n_res = bundle.resources.len();
                                 let n_srv = bundle.servers.len();
                                 let _ = tx.send(Event::BuildResources {
@@ -667,9 +670,7 @@ pub async fn run(
                                             region: region.clone(),
                                             size: *size,
                                         });
-                                        Some(format!(
-                                            "  Measured {name}.{region} = {size} bytes"
-                                        ))
+                                        Some(format!("  Measured {name}.{region} = {size} bytes"))
                                     }
                                     CrateEvent::CargoMessage(m) => {
                                         forward_cargo_message(&tx, build_id, name, gui_kind, m)
@@ -733,13 +734,14 @@ pub async fn run(
                             },
                             BuildEvent::Memory {
                                 place,
-                                update: ResourceUpdate::Event(MemoryEvent::Allocated {
-                                    owner,
-                                    region,
-                                    base,
-                                    size,
-                                    request,
-                                }),
+                                update:
+                                    ResourceUpdate::Event(MemoryEvent::Allocated {
+                                        owner,
+                                        region,
+                                        base,
+                                        size,
+                                        request,
+                                    }),
                             } => {
                                 let _ = tx.send(Event::BuildAllocation {
                                     build_id,
@@ -766,9 +768,8 @@ pub async fn run(
                                     Some(format!("  Image assembled: {size} bytes"))
                                 }
                                 ImageState::Archived { path } => {
-                                    let size = std::fs::metadata(path)
-                                        .map(|m| m.len())
-                                        .unwrap_or(0);
+                                    let size =
+                                        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                                     let _ = tx.send(Event::BuildImage {
                                         build_id,
                                         image: ImageProgress::Archived {
@@ -833,11 +834,12 @@ pub async fn run(
 
                 tokio::spawn(async move {
                     eprintln!(
-                        "[ipc] call via {} task={} op={:02x}.{:02x}",
+                        "[ipc] call via {} task={} op={:02x}.{:02x} args={:02x?}",
                         ipc.label(),
                         call.task_id,
                         call.resource_kind,
                         call.method_id,
+                        call.wire_args,
                     );
                     let lease_refs: Vec<&[u8]> =
                         call.lease_data.iter().map(|d| d.as_slice()).collect();
@@ -852,10 +854,10 @@ pub async fn run(
                     let result = ipc.call(&req).await.map_err(|e| e.to_string());
                     match &result {
                         Ok(r) => eprintln!(
-                            "[ipc] reply via {} rc={} return={} bytes",
+                            "[ipc] reply via {} rc={} return={:02x?}",
                             ipc.label(),
                             r.rc,
-                            r.return_value.len(),
+                            r.return_value,
                         ),
                         Err(e) => eprintln!("[ipc] error via {}: {}", ipc.label(), e),
                     }
@@ -903,18 +905,12 @@ pub async fn run(
                 let targets: Vec<(SerialPortIndex, Arc<serial::SerialSender>)> = serials
                     .iter()
                     .filter_map(|(idx, bs)| {
-                        bs.usart2_sender
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .map(|s| (*idx, s))
+                        bs.usart2_sender.lock().unwrap().clone().map(|s| (*idx, s))
                     })
                     .collect();
 
                 if targets.is_empty() {
-                    eprintln!(
-                        "[probe] ProbeMoshiMoshi: no live USART2 adapters, skipping"
-                    );
+                    eprintln!("[probe] ProbeMoshiMoshi: no live USART2 adapters, skipping");
                     continue;
                 }
 
@@ -1381,7 +1377,7 @@ async fn usart1_connect_loop(
                                                 let flash_wait_usb_cleanup = flash_wait_usb.clone();
                                                 tokio::spawn(async move {
                                                     let result = tokio::time::timeout(
-                                                        std::time::Duration::from_secs(20),
+                                                        std::time::Duration::from_secs(30),
                                                         wait_rx,
                                                     )
                                                     .await;
@@ -1402,7 +1398,7 @@ async fn usart1_connect_loop(
                                                                 device_id: persistent_id,
                                                                 phase: FlashPhase::Failed {
                                                                     at_step: 2,
-                                                                    message: "stub USB device did not appear within 20s".into(),
+                                                                    message: "stub USB device did not appear within 30s".into(),
                                                                 },
                                                             });
                                                         }
@@ -2659,4 +2655,3 @@ fn forward_cargo_message(
     });
     Some(raw)
 }
-

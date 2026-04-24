@@ -1,6 +1,7 @@
 mod app;
 mod bridge;
 mod ipc;
+mod ipc_handle;
 mod panels;
 mod port_registry;
 mod sidebar;

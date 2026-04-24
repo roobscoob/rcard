@@ -35,6 +35,7 @@ dirs = "5"
 uuid = "1"
 ipc-runtime = { path = "../ipc-runtime" }
 indexmap = "2"
+postcard = { version = "1", features = ["use-std"] }
 
 [build-dependencies]
 tfw = { path = "../tfw" }

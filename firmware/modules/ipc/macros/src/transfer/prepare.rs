@@ -66,7 +66,14 @@ pub fn gen_handle_transfer_stmts(
                 quote! {
                     {
                         let __cancel_h = #prev_dh.handle;
-                        let __cancel_buf = zerocopy::IntoBytes::as_bytes(&__cancel_h);
+                        let mut __cancel_buf = [0u8; ipc::RawHandle::SIZE + 2];
+                        let __cancel_n = match ipc::__postcard::to_slice(
+                            &__cancel_h,
+                            &mut __cancel_buf,
+                        ) {
+                            Ok(s) => s.len(),
+                            Err(_) => 0,
+                        };
                         let __cancel_k = #prev_dh.kind;
                         let __cancel_opcode = ipc::opcode(__cancel_k, ipc::CANCEL_TRANSFER_METHOD);
                         let mut __cancel_ret = [0u8; 0];
@@ -74,7 +81,7 @@ pub fn gen_handle_transfer_stmts(
                         let _ = ipc::kern::sys_send(
                             #prev_dh.task_id(),
                             __cancel_opcode,
-                            __cancel_buf,
+                            &__cancel_buf[..__cancel_n],
                             &mut __cancel_ret,
                             &mut __cancel_leases,
                         );
@@ -92,12 +99,16 @@ pub fn gen_handle_transfer_stmts(
             };
             // Send PREPARE_TRANSFER to source server
             {
-                let mut __prep_buf = [0u8; ipc::RawHandle::SIZE + core::mem::size_of::<u16>()];
-                let mut __prep_n = 0usize;
                 let __prep_h = #dh_var.handle;
-                __prep_n += ipc::wire::write(&mut __prep_buf[__prep_n..], &__prep_h);
                 let __target_idx: u16 = #server_expr.task_index();
-                __prep_n += ipc::wire::write(&mut __prep_buf[__prep_n..], &__target_idx);
+                let mut __prep_buf = [0u8; ipc::RawHandle::SIZE + 2 + 3];
+                let __prep_n = match ipc::__postcard::to_slice(
+                    &(__prep_h, __target_idx),
+                    &mut __prep_buf,
+                ) {
+                    Ok(s) => s.len(),
+                    Err(_) => 0,
+                };
                 let __prep_k = #dh_var.kind;
                 let __prep_opcode = ipc::opcode(__prep_k, ipc::PREPARE_TRANSFER_METHOD);
                 let mut __prep_ret_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =

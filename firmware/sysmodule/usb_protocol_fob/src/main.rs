@@ -29,19 +29,78 @@ static WRITER: GlobalState<rcard_usb_proto::FrameWriter> =
 // USB write helper
 // ---------------------------------------------------------------------------
 
-fn write_usb(data: &[u8]) -> Result<(), FobSendError> {
-    let ep = EP_IN.get().ok_or(FobSendError::Disconnected)?;
-    let mut offset = 0;
-    while offset < data.len() {
-        let end = (offset + 64).min(data.len());
-        match ep.write(&data[offset..end]) {
-            Ok(Ok(n)) => offset += n as usize,
+/// CRC-16/CCITT-FALSE, matching the host's counterpart in
+/// `host/usb/src/crc.rs`. Used to compute the frame-level integrity check
+/// appended to every outbound IPC frame.
+fn crc16(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// Emit one USB packet (≤ 64 bytes). Retries on `EndpointBusy`.
+fn emit_packet(ep: &UsbEndpoint, data: &[u8]) -> Result<(), FobSendError> {
+    loop {
+        match ep.write(data) {
+            Ok(Ok(_)) => return Ok(()),
             Ok(Err(UsbError::EndpointBusy)) => continue,
-            Ok(Err(UsbError::Disconnected)) => return Err(FobSendError::Disconnected),
             Ok(Err(_)) => return Err(FobSendError::Disconnected),
             Err(e) => panic!("USB IPC died: {:?}", e),
         }
     }
+}
+
+/// Emit `data` as one USB bulk transfer containing the IPC frame plus a
+/// trailing CRC16 (plus a 1-byte pad when the wire would otherwise be a
+/// multiple of 64, to force a short-packet terminator).
+///
+/// The host validates CRC over `data` on receipt and strips it; any
+/// corruption anywhere in the transfer fails CRC, the whole transfer is
+/// discarded, and the next bulk transfer is by USB definition a fresh
+/// frame. See `host/usb/src/crc.rs` for the matching unwrap.
+fn write_usb(data: &[u8]) -> Result<(), FobSendError> {
+    let ep = EP_IN.get().ok_or(FobSendError::Disconnected)?;
+    let crc = crc16(data);
+    let full = data.len() / 64;
+    let tail = data.len() - full * 64;
+
+    for i in 0..full {
+        emit_packet(ep, &data[i * 64..(i + 1) * 64])?;
+    }
+
+    if tail > 0 {
+        let mut last = [0u8; 64];
+        last[..tail].copy_from_slice(&data[full * 64..]);
+        last[tail] = (crc >> 8) as u8;
+        last[tail + 1] = crc as u8;
+        let total = tail + 2;
+        if total <= 64 {
+            emit_packet(ep, &last[..total])?;
+            if total == 64 {
+                // Wire is a multiple of 64 — emit a short pad packet.
+                emit_packet(ep, &[0u8])?;
+            }
+        } else {
+            // total == 65 (tail == 63). Split.
+            emit_packet(ep, &last[..64])?;
+            emit_packet(ep, &last[64..total])?;
+        }
+    } else {
+        // `data.len()` is a multiple of 64 — emit CRC as a 2-byte short
+        // terminator. Wire is `len + 2`, which is not a multiple of 64
+        // (since `len % 64 == 0` and 2 ≠ 0), so no pad needed.
+        emit_packet(ep, &[(crc >> 8) as u8, crc as u8])?;
+    }
+
     Ok(())
 }
 

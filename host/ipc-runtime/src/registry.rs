@@ -10,6 +10,34 @@ use crate::encode::{self, EncodeError};
 use crate::decode::{self, DecodeError};
 use crate::value::IpcValue;
 
+/// Distinguishes the four method shapes the firmware macros support.
+/// The wire format differs by kind — `Message` and `Destructor` prepend
+/// a `RawHandle` to the args tuple; the others do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodKind {
+    Constructor,
+    Message,
+    StaticMessage,
+    Destructor,
+}
+
+impl MethodKind {
+    fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "constructor" => Self::Constructor,
+            "message" => Self::Message,
+            "static_message" => Self::StaticMessage,
+            "destructor" => Self::Destructor,
+            _ => return None,
+        })
+    }
+
+    /// True for methods whose wire args are prefixed with a `RawHandle`.
+    pub fn takes_handle(self) -> bool {
+        matches!(self, Self::Message | Self::Destructor)
+    }
+}
+
 /// A method's full schema, loaded from ipc-metadata.json.
 #[derive(Debug, Clone)]
 pub struct MethodSchema {
@@ -17,6 +45,7 @@ pub struct MethodSchema {
     pub method_name: String,
     pub method_id: u8,
     pub resource_kind: u8,
+    pub kind: MethodKind,
     /// Non-lease parameter schemas, in declaration order.
     pub params: Vec<(String, OwnedNamedType)>,
     /// Lease parameter descriptors (name + direction).
@@ -111,6 +140,11 @@ impl Registry {
                 let method_id = method["id"]
                     .as_u64()
                     .ok_or(RegistryError::BadShape("method missing id"))? as u8;
+                let kind_str = method["kind"]
+                    .as_str()
+                    .ok_or(RegistryError::BadShape("method missing kind"))?;
+                let method_kind = MethodKind::from_str(kind_str)
+                    .ok_or(RegistryError::BadShape("method kind unrecognized"))?;
 
                 let mut params = Vec::new();
                 if let Some(params_arr) = method["params"].as_array() {
@@ -151,6 +185,7 @@ impl Registry {
                     method_name: method_name.to_string(),
                     method_id,
                     resource_kind,
+                    kind: method_kind,
                     params,
                     leases,
                     return_schema,
@@ -174,18 +209,157 @@ impl Registry {
         self.methods.get(&(resource.to_string(), method.to_string()))
     }
 
+    /// Resolve a resource name to the task_id of the server that hosts it.
+    /// Used by the Drop path of a ResourceHandle to build the implicit
+    /// destroy `(kind, 0xFF)` frame without looking up a method schema.
+    pub fn task_id_for(&self, resource: &str) -> Option<u16> {
+        self.resource_task_ids.get(resource).copied()
+    }
+
+    /// Decode a reply's `return_value` bytes against a method's schema.
+    ///
+    /// The wire layout is `[outer_tag, <postcard-encoded return type>]`:
+    /// - `outer_tag == 0` → normal reply; decode the payload against
+    ///   `schema.return_schema`.
+    /// - `outer_tag == 1` → server-side arena error. Byte 1 is the
+    ///   `ipc::Error` discriminant (HandleLost, ArenaFull, etc).
+    ///
+    /// Methods with no declared return (void) get `IpcValue::Unit` on
+    /// success.
+    pub fn decode_reply(
+        &self,
+        schema: &MethodSchema,
+        return_bytes: &[u8],
+    ) -> Result<IpcValue, ReplyDecodeError> {
+        let outer_tag = *return_bytes.first().ok_or(ReplyDecodeError::Empty)?;
+        match outer_tag {
+            0 => {
+                let payload = &return_bytes[1..];
+                match &schema.return_schema {
+                    None => {
+                        if !payload.is_empty() {
+                            return Err(ReplyDecodeError::UnexpectedPayload(payload.len()));
+                        }
+                        Ok(IpcValue::Unit)
+                    }
+                    Some(ret_schema) => {
+                        decode::decode(ret_schema, payload).map_err(ReplyDecodeError::Decode)
+                    }
+                }
+            }
+            1 => {
+                let code = return_bytes.get(1).copied().unwrap_or(0);
+                Err(ReplyDecodeError::ArenaError(code))
+            }
+            other => Err(ReplyDecodeError::UnexpectedOuterTag(other)),
+        }
+    }
+}
+
+/// Extract a u64 `RawHandle` from a decoded constructor reply.
+///
+/// Accepts the three shapes produced by `#[constructor]`:
+/// - bare `RawHandle` → `IpcValue::U64(h)`
+/// - `Option<RawHandle>` → `IpcValue::Some(U64)` / `IpcValue::None`
+/// - `Result<RawHandle, E>` → `IpcValue::Ok(U64)` / `IpcValue::Err(E)`
+pub fn extract_handle(value: &IpcValue) -> Result<u64, HandleExtractError> {
+    match value {
+        IpcValue::U64(h) => Ok(*h),
+        IpcValue::Some(inner) => match inner.as_ref() {
+            IpcValue::U64(h) => Ok(*h),
+            _ => Err(HandleExtractError::UnexpectedShape),
+        },
+        IpcValue::Ok(inner) => match inner.as_ref() {
+            IpcValue::U64(h) => Ok(*h),
+            _ => Err(HandleExtractError::UnexpectedShape),
+        },
+        IpcValue::None => Err(HandleExtractError::AcquireReturnedNone),
+        IpcValue::Err(inner) => Err(HandleExtractError::AcquireReturnedErr(format!("{inner:?}"))),
+        _ => Err(HandleExtractError::UnexpectedShape),
+    }
+}
+
+#[derive(Debug)]
+pub enum ReplyDecodeError {
+    Empty,
+    UnexpectedOuterTag(u8),
+    UnexpectedPayload(usize),
+    ArenaError(u8),
+    Decode(DecodeError),
+}
+
+impl std::fmt::Display for ReplyDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "reply has no outer tag byte"),
+            Self::UnexpectedOuterTag(b) => write!(f, "unexpected outer tag: {b}"),
+            Self::UnexpectedPayload(n) => {
+                write!(f, "void method returned {n} bytes of payload")
+            }
+            Self::ArenaError(code) => write!(f, "server arena error (ipc::Error={code})"),
+            Self::Decode(e) => write!(f, "decode: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReplyDecodeError {}
+
+#[derive(Debug)]
+pub enum HandleExtractError {
+    AcquireReturnedNone,
+    AcquireReturnedErr(String),
+    UnexpectedShape,
+}
+
+impl std::fmt::Display for HandleExtractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AcquireReturnedNone => write!(f, "constructor returned None"),
+            Self::AcquireReturnedErr(e) => write!(f, "constructor returned Err: {e}"),
+            Self::UnexpectedShape => write!(f, "reply did not contain a RawHandle"),
+        }
+    }
+}
+
+impl std::error::Error for HandleExtractError {}
+
+impl Registry {
     /// Encode a method call from user-supplied args.
     ///
     /// `value` should be an `IpcValue::Struct` with field names matching
     /// the method's non-lease parameter names. Lease data is extracted
     /// from fields matching the lease parameter names.
     ///
-    /// `task_id` is resolved from the server metadata loaded into the
-    /// registry. Returns an error if the resource has no known task_id.
+    /// This entry point is for `Constructor` and `StaticMessage` methods
+    /// — methods with no `&self`, no handle on the wire. Calling it for
+    /// a `Message` or `Destructor` returns `CallError::MissingHandle`;
+    /// those callers should use `encode_call_with_handle`.
     pub fn encode_call(
         &self,
         resource: &str,
         method: &str,
+        value: IpcValue,
+    ) -> Result<EncodedCall, CallError> {
+        self.encode_call_inner(resource, method, None, value)
+    }
+
+    /// Like `encode_call`, but supplies a `RawHandle` to prepend to the
+    /// args tuple. Required for `Message` / `Destructor` methods.
+    pub fn encode_call_with_handle(
+        &self,
+        resource: &str,
+        method: &str,
+        handle: u64,
+        value: IpcValue,
+    ) -> Result<EncodedCall, CallError> {
+        self.encode_call_inner(resource, method, Some(handle), value)
+    }
+
+    fn encode_call_inner(
+        &self,
+        resource: &str,
+        method: &str,
+        handle: Option<u64>,
         value: IpcValue,
     ) -> Result<EncodedCall, CallError> {
         let task_id = self
@@ -196,6 +370,22 @@ impl Registry {
         let schema = self
             .method(resource, method)
             .ok_or_else(|| CallError::UnknownMethod(resource.into(), method.into()))?;
+
+        match (schema.kind.takes_handle(), handle) {
+            (true, None) => {
+                return Err(CallError::MissingHandle(
+                    resource.into(),
+                    method.into(),
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(CallError::UnexpectedHandle(
+                    resource.into(),
+                    method.into(),
+                ));
+            }
+            _ => {}
+        }
 
         let IpcValue::Struct(mut fields) = value else {
             return Err(CallError::Encode(EncodeError::ExpectedStruct));
@@ -225,7 +415,8 @@ impl Registry {
             lease_data.push(data);
         }
 
-        // Remaining fields are the non-lease args. Encode via postcard.
+        // Remaining fields are the non-lease args. Encode via postcard,
+        // prepending a RawHandle when the method expects one.
         let param_schemas: Vec<(&str, &OwnedNamedType)> = schema
             .params
             .iter()
@@ -233,8 +424,8 @@ impl Registry {
             .collect();
 
         let args_value = IpcValue::Struct(fields);
-        let wire_args =
-            encode::encode_args(&param_schemas, &args_value).map_err(CallError::Encode)?;
+        let wire_args = encode::encode_args_with_handle(&param_schemas, handle, &args_value)
+            .map_err(CallError::Encode)?;
 
         Ok(EncodedCall {
             task_id,
@@ -267,6 +458,10 @@ impl std::error::Error for RegistryError {}
 #[derive(Debug)]
 pub enum CallError {
     UnknownMethod(String, String),
+    /// Method kind expects a `RawHandle` prefix but none was provided.
+    MissingHandle(String, String),
+    /// Handle was provided for a method kind that doesn't take one.
+    UnexpectedHandle(String, String),
     Encode(EncodeError),
 }
 
@@ -274,6 +469,12 @@ impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownMethod(r, m) => write!(f, "unknown method: {r}::{m}"),
+            Self::MissingHandle(r, m) => {
+                write!(f, "method {r}::{m} requires a handle but none was supplied")
+            }
+            Self::UnexpectedHandle(r, m) => {
+                write!(f, "method {r}::{m} does not take a handle")
+            }
             Self::Encode(e) => write!(f, "encode: {e}"),
         }
     }

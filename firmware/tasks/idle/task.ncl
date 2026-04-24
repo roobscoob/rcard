@@ -5,8 +5,8 @@ fun ctx => {
   priority = lib.workgroup.idle,
   features = ["insomniac"],
   regions = {
-    code  = { place = ctx.places.image },
-    stack = { place = ctx.places.task_ram, size = 256 },
-    data  = { place = ctx.places.task_ram },
+    code  = { place = ctx.places.bulk },
+    stack = { place = ctx.places.fast, size = 256 },
+    data  = { place = ctx.places.fast },
   },
 }

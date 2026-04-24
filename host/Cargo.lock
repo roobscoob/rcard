@@ -189,6 +189,7 @@ dependencies = [
  "ipc-protocol",
  "ipc-runtime",
  "nusb 0.2.3",
+ "postcard",
  "rcard-log",
  "rcard-places",
  "rcard-usb-proto",
@@ -4100,6 +4101,7 @@ version = "0.1.0"
 name = "rcard-usb-proto"
 version = "0.1.0"
 dependencies = [
+ "rcard-log",
  "zerocopy",
 ]
 
@@ -4878,6 +4880,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
+ "zerocopy",
  "zip",
 ]
 

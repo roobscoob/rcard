@@ -19,16 +19,24 @@ fn load_fob_config() {
     assert!(config.memory.contains_key("mpi1"));
     assert!(config.memory.contains_key("mpi2"));
 
-    // Places from layout
-    assert!(config.places.contains_key("kernel_ram"));
-    assert!(config.places.contains_key("task_ram"));
-    assert!(config.places.contains_key("image"));
+    // Places from layout — RAM targets.
+    assert!(config.places.contains_key("scratch"));
+    assert!(config.places.contains_key("fast"));
+    assert!(config.places.contains_key("bulk"));
+    assert!(config.places.contains_key("psram"));
+    // Places from layout — flash partitions.
+    assert!(config.places.contains_key("boot"));
+    assert!(config.places.contains_key("firmware"));
+    assert!(config.places.contains_key("xip_rom"));
     assert!(config.places.contains_key("logs"));
-    assert!(config.places.contains_key("framebuf"));
+    assert!(config.places.contains_key("fs_main"));
 
-    // Unmapped places
+    // Unmapped places — storage partitions have no CPU exec window.
     assert!(config.places["logs"].unmapped);
-    assert!(!config.places["image"].unmapped);
+    assert!(config.places["firmware"].unmapped);
+    assert!(config.places["boot"].unmapped);
+    // xip_rom is the opt-in XIP place — keeps its CPU mappings.
+    assert!(!config.places["xip_rom"].unmapped);
 
     // Bootloader
     let bl = config.bootloader.as_ref().expect("bootloader should be present");
@@ -40,7 +48,11 @@ fn load_fob_config() {
     let boot = config.boot.as_ref().expect("boot config should exist");
     assert!(boot.ftab.offset.is_some());
     assert!(boot.image.offset.is_some());
-    assert_eq!(boot.image.name.as_deref(), Some("image"));
+    // `boot.image` resolves to the `firmware` flash partition. Sanity-check
+    // via the CPU mapping (the only stable identifier not subject to
+    // `stamp_place_names`, which only stamps top-level/region places).
+    assert_eq!(boot.image.offset, config.places["firmware"].offset);
+    assert_eq!(boot.image.size, config.places["firmware"].size);
 
     // Kernel
     assert_eq!(config.kernel.crate_info.package.name, "kernel-sf32lb52");
@@ -61,7 +73,10 @@ fn load_stub_config() {
         .iter()
         .map(|t| t.crate_info.package.name.as_str())
         .collect();
-    assert!(entry_crates.contains(&"stub"));
+    // Stub app entries are the flashing-support sysmodules (host_proxy +
+    // usb_protocol + storage); the fob app crate must not be in there.
+    assert!(entry_crates.contains(&"sysmodule_host_proxy"));
+    assert!(entry_crates.contains(&"sysmodule_storage"));
     assert!(!entry_crates.contains(&"fob"));
 }
 

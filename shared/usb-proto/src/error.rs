@@ -1,5 +1,7 @@
+use rcard_log::Format;
+
 /// Error decoding a frame header.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Format)]
 pub enum HeaderError {
     /// Not enough bytes to decode the header.
     TooShort,

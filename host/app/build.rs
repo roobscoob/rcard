@@ -28,43 +28,50 @@ fn main() {
         Some(&|event| {
             use tfw::build::*;
             match &event {
-                BuildEvent::Crate { name: _, kind: _, update: ResourceUpdate::Event(event) } => {
-                    match event {
-                        CrateEvent::CargoMessage(msg) => {
-                            if let Ok(decoded) = msg.decode() {
-                                if let escargot::format::Message::CompilerMessage(cm) = decoded {
-                                    let text = cm.message.rendered
-                                        .as_ref()
-                                        .map(|s| s.as_ref())
-                                        .unwrap_or(cm.message.message.as_ref());
-                                    eprint!("{text}");
-                                }
+                BuildEvent::Crate {
+                    name: _,
+                    kind: _,
+                    update: ResourceUpdate::Event(event),
+                } => match event {
+                    CrateEvent::CargoMessage(msg) => {
+                        if let Ok(decoded) = msg.decode() {
+                            if let escargot::format::Message::CompilerMessage(cm) = decoded {
+                                let text = cm
+                                    .message
+                                    .rendered
+                                    .as_ref()
+                                    .map(|s| s.as_ref())
+                                    .unwrap_or(cm.message.message.as_ref());
+                                eprint!("{text}");
                             }
                         }
-                        CrateEvent::CargoError(e) => {
-                            eprintln!("{e}");
-                        }
-                        _ => {}
                     }
-                }
-                BuildEvent::HostCrate { name: _, update: ResourceUpdate::Event(event) } => {
-                    match event {
-                        HostCrateEvent::CargoMessage(msg) => {
-                            if let Ok(decoded) = msg.decode() {
-                                if let escargot::format::Message::CompilerMessage(cm) = decoded {
-                                    let text = cm.message.rendered
-                                        .as_ref()
-                                        .map(|s| s.as_ref())
-                                        .unwrap_or(cm.message.message.as_ref());
-                                    eprint!("{text}");
-                                }
+                    CrateEvent::CargoError(e) => {
+                        eprintln!("{e}");
+                    }
+                    _ => {}
+                },
+                BuildEvent::HostCrate {
+                    name: _,
+                    update: ResourceUpdate::Event(event),
+                } => match event {
+                    HostCrateEvent::CargoMessage(msg) => {
+                        if let Ok(decoded) = msg.decode() {
+                            if let escargot::format::Message::CompilerMessage(cm) = decoded {
+                                let text = cm
+                                    .message
+                                    .rendered
+                                    .as_ref()
+                                    .map(|s| s.as_ref())
+                                    .unwrap_or(cm.message.message.as_ref());
+                                eprint!("{text}");
                             }
                         }
-                        HostCrateEvent::CargoError(e) => {
-                            eprintln!("{e}");
-                        }
                     }
-                }
+                    HostCrateEvent::CargoError(e) => {
+                        eprintln!("{e}");
+                    }
+                },
                 _ => {}
             }
         }),

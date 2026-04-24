@@ -240,23 +240,52 @@ fn gen_call_args(m: &ParsedMethod) -> Vec<TokenStream2> {
         .collect()
 }
 
+/// Postcard-encode `value_expr` into `__buf[__off..]`, advancing `__off`.
+///
+/// Mirrors the Message-reply encoding in `wire_format::gen_encode_return_value`
+/// so constructor replies use the same wire format as the schema says
+/// (postcard varint for `RawHandle`, not zerocopy fixed-8-bytes-LE).
+fn gen_postcard_append(value_expr: TokenStream2) -> TokenStream2 {
+    quote! {
+        {
+            // SAFETY: postcard::to_slice only *writes* to the buffer.
+            let __tail: &mut [u8] = unsafe {
+                core::slice::from_raw_parts_mut(
+                    __buf.as_mut_ptr().add(__off) as *mut u8,
+                    __buf.len() - __off,
+                )
+            };
+            match ipc::__postcard::to_slice(&(#value_expr), __tail) {
+                Ok(slice) => { __off += slice.len(); }
+                Err(_) => {
+                    ipc::__ipc_panic!("postcard ctor reply encode failed");
+                }
+            }
+        }
+    }
+}
+
 fn gen_ctor_body(
     method_name: &Ident,
     call_args: &[TokenStream2],
     ctor_return: &ConstructorReturn,
 ) -> TokenStream2 {
+    let encode_handle = gen_postcard_append(quote! { handle });
+    let encode_err = gen_postcard_append(quote! { e });
     match ctor_return {
         ConstructorReturn::Bare => {
             quote! {
                 let value = T::#method_name(meta, #(#call_args),*);
                 match self.arena.alloc(value, sender_index, __priority) {
                     Ok(handle) => {
-                        let mut __buf: [core::mem::MaybeUninit<u8>; 1 + ipc::RawHandle::SIZE] =
+                        let mut __buf: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
                             unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-                        ipc::wire::set_uninit(&mut __buf, 0, 0); // Ok
-                        ipc::wire::write_uninit(&mut __buf[1..], &handle);
+                        let mut __off = 0usize;
+                        ipc::wire::set_uninit(&mut __buf, __off, 0); // outer Ok
+                        __off += 1;
+                        #encode_handle
                         reply.reply_ok(unsafe {
-                            ipc::wire::assume_init_slice(&__buf, 1 + ipc::RawHandle::SIZE)
+                            ipc::wire::assume_init_slice(&__buf, __off)
                         });
                     }
                     Err(_) => {
@@ -271,23 +300,28 @@ fn gen_ctor_body(
                 let ctor_result = T::#method_name(meta, #(#call_args),*);
                 let mut __buf: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
                     unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+                let mut __off = 0usize;
                 match ctor_result {
                     Ok(value) => match self.arena.alloc(value, sender_index, __priority) {
                         Ok(handle) => {
-                            ipc::wire::set_uninit(&mut __buf, 0, 0); // outer Ok
-                            ipc::wire::set_uninit(&mut __buf, 1, 0); // inner Ok
-                            let __n = ipc::wire::write_uninit(&mut __buf[2..], &handle);
-                            reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__buf, 2 + __n) });
+                            ipc::wire::set_uninit(&mut __buf, __off, 0); // outer Ok
+                            __off += 1;
+                            ipc::wire::set_uninit(&mut __buf, __off, 0); // inner Ok tag
+                            __off += 1;
+                            #encode_handle
+                            reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__buf, __off) });
                         }
                         Err(_) => {
                             reply.reply_ok(&[1u8, ipc::Error::ArenaFull as u8]); // outer Err
                         }
                     },
                     Err(e) => {
-                        ipc::wire::set_uninit(&mut __buf, 0, 0); // outer Ok
-                        ipc::wire::set_uninit(&mut __buf, 1, 1); // inner Err
-                        let __n = ipc::wire::write_uninit(&mut __buf[2..], &e);
-                        reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__buf, 2 + __n) });
+                        ipc::wire::set_uninit(&mut __buf, __off, 0); // outer Ok
+                        __off += 1;
+                        ipc::wire::set_uninit(&mut __buf, __off, 1); // inner Err tag
+                        __off += 1;
+                        #encode_err
+                        reply.reply_ok(unsafe { ipc::wire::assume_init_slice(&__buf, __off) });
                     }
                 }
             }
@@ -298,13 +332,16 @@ fn gen_ctor_body(
                 match ctor_result {
                     Some(value) => match self.arena.alloc(value, sender_index, __priority) {
                         Ok(handle) => {
-                            let mut __buf: [core::mem::MaybeUninit<u8>; 2 + ipc::RawHandle::SIZE] =
+                            let mut __buf: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
                                 unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-                            ipc::wire::set_uninit(&mut __buf, 0, 0); // outer Ok
-                            ipc::wire::set_uninit(&mut __buf, 1, 0); // Some
-                            ipc::wire::write_uninit(&mut __buf[2..], &handle);
+                            let mut __off = 0usize;
+                            ipc::wire::set_uninit(&mut __buf, __off, 0); // outer Ok
+                            __off += 1;
+                            ipc::wire::set_uninit(&mut __buf, __off, 0); // Some tag
+                            __off += 1;
+                            #encode_handle
                             reply.reply_ok(unsafe {
-                                ipc::wire::assume_init_slice(&__buf, 2 + ipc::RawHandle::SIZE)
+                                ipc::wire::assume_init_slice(&__buf, __off)
                             });
                         }
                         Err(_) => {

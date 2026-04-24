@@ -119,14 +119,19 @@ pub fn gen_client(
                     }
                     // Send implicit destroy (0xFF) — best-effort, ignore errors.
                     let handle = self.handle.get();
-                    let argbuffer = zerocopy::IntoBytes::as_bytes(&handle);
+                    let mut argbuffer = [0u8; ipc::RawHandle::SIZE + 2];
+                    let n = match ipc::__postcard::to_slice(&handle, &mut argbuffer) {
+                        Ok(s) => s.len(),
+                        // Buffer is always large enough; unreachable in practice.
+                        Err(_) => return,
+                    };
                     let opcode = ipc::opcode(#kind_lit, ipc::IMPLICIT_DESTROY_METHOD);
                     let mut retbuffer = [0u8; 0];
                     let mut leases = [];
                     let _ = ipc::kern::sys_send(
                         self.server.get(),
                         opcode,
-                        argbuffer,
+                        &argbuffer[..n],
                         &mut retbuffer,
                         &mut leases,
                     );
@@ -231,14 +236,18 @@ pub fn gen_dyn_client(
             impl Drop for #dyn_name {
                 fn drop(&mut self) {
                     let handle = self.handle.get();
-                    let argbuffer = zerocopy::IntoBytes::as_bytes(&handle);
+                    let mut argbuffer = [0u8; ipc::RawHandle::SIZE + 2];
+                    let n = match ipc::__postcard::to_slice(&handle, &mut argbuffer) {
+                        Ok(s) => s.len(),
+                        Err(_) => return,
+                    };
                     let opcode = ipc::opcode(self.kind, ipc::IMPLICIT_DESTROY_METHOD);
                     let mut retbuffer = [0u8; 0];
                     let mut leases = [];
                     let _ = ipc::kern::sys_send(
                         self.server.get(),
                         opcode,
-                        argbuffer,
+                        &argbuffer[..n],
                         &mut retbuffer,
                         &mut leases,
                     );

@@ -15,8 +15,8 @@ fun ctx => {
   # NACKs inbound IpcRequests if the build has no dispatcher.
   peers = ["sysmodule_host_proxy"],
   regions = {
-    code  = { place = ctx.places.image },
-    stack = { place = ctx.places.task_ram, size = lib.kiB 4 },
-    data  = { place = ctx.places.task_ram },
+    code  = { place = ctx.places.bulk },
+    stack = { place = ctx.places.fast, size = lib.kiB 4 },
+    data  = { place = ctx.places.fast },
   },
 }

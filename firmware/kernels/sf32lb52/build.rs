@@ -46,6 +46,11 @@ fn main() {
         let content = fs::read_to_string(&json_path).unwrap();
         let root: serde_json::Value = serde_json::from_str(&content).unwrap();
 
+        // Optional `pins` section from the chip ncl — per-pin metadata
+        // including `default_pull` ("up"/"down"/"none"). Absent on boards
+        // that don't carry this (treat as "none" = no pull).
+        let pins_map = root.get("pins").and_then(|v| v.as_object());
+
         if let Some(pin_assignments) = root.get("pin_assignments").and_then(|v| v.as_object()) {
             for (peripheral_name, signals) in pin_assignments {
                 let signals = signals.as_object().unwrap();
@@ -60,7 +65,15 @@ fn main() {
                     let pin = pin_value.as_str().unwrap();
                     let pin_num = pin.strip_prefix("PA").unwrap().parse::<u32>().unwrap();
 
-                    let writes = gen_pin_writes(pin_num, &kind, instance.as_deref(), signal);
+                    // Look up the pin's default_pull from chip ncl. Missing
+                    // entry or unrecognised value → no pull.
+                    let pull = pins_map
+                        .and_then(|m| m.get(pin))
+                        .and_then(|p| p.get("default_pull"))
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("none");
+
+                    let writes = gen_pin_writes(pin_num, &kind, instance.as_deref(), signal, pull);
                     for line in &writes {
                         writeln!(pin_code, "    {line}").unwrap();
                     }
@@ -119,6 +132,13 @@ fn is_input_signal(kind: &str, signal: &str) -> bool {
         // SPI
         ("spi", "di") => true,
         ("spi", _) => false,
+        // MPI: dio0–dio3 are bidirectional (chip drives them in read
+        // operations and during quad reads the controller drives them).
+        // Without IE=1 the pad doesn't propagate the chip's MISO bits
+        // back to the MPI receive path — JEDEC reads return 0 even
+        // though the chip is correctly driving the line.
+        ("mpi", s) if matches!(s, "dio0" | "dio1" | "dio2" | "dio3") => true,
+        ("mpi", _) => false,
         // Timer inputs (ETR = external trigger)
         ("gptim", "etr") => true,
         ("gptim", _) => false,
@@ -263,7 +283,13 @@ fn pinr_info(kind: &str, instance: Option<&str>, signal: &str) -> Option<(u32, u
 }
 
 /// Generate the volatile register write statements for a single pin assignment.
-fn gen_pin_writes(pin: u32, kind: &str, instance: Option<&str>, signal: &str) -> Vec<String> {
+fn gen_pin_writes(
+    pin: u32,
+    kind: &str,
+    instance: Option<&str>,
+    signal: &str,
+    pull: &str,
+) -> Vec<String> {
     let mut lines = Vec::new();
     let pad = pad_addr(pin);
     let needs_ie = if kind == "gpio" {
@@ -277,7 +303,7 @@ fn gen_pin_writes(pin: u32, kind: &str, instance: Option<&str>, signal: &str) ->
     } else {
         format!("{kind} {signal}")
     };
-    lines.push(format!("// PA{pin:02} -> {desc}"));
+    lines.push(format!("// PA{pin:02} -> {desc}  (pull={pull})"));
 
     // Determine FSEL value
     let fsel = if let Some(f) = pinr_fsel(kind) {
@@ -291,24 +317,23 @@ fn gen_pin_writes(pin: u32, kind: &str, instance: Option<&str>, signal: &str) ->
         return lines;
     };
 
-    // Step 1: Write PAD register (FSEL + optional IE)
-    if needs_ie {
-        // Clear FSEL[3:0] and IE[6], then set both
-        let val = (1u32 << 6) | fsel; // IE=1, FSEL=fsel
-        let mask = 0x4F; // bits [6] and [3:0]
-        lines.push(format!("let pad = 0x{pad:08X} as *mut u32;"));
-        lines.push(format!(
-            "pad.write_volatile((pad.read_volatile() & !0x{mask:X}) | 0x{val:X});"
-        ));
-    } else if fsel == 0 {
-        lines.push(format!("let pad = 0x{pad:08X} as *mut u32;"));
-        lines.push("pad.write_volatile(pad.read_volatile() & !0xF);".to_string());
-    } else {
-        lines.push(format!("let pad = 0x{pad:08X} as *mut u32;"));
-        lines.push(format!(
-            "pad.write_volatile((pad.read_volatile() & !0xF) | {fsel});"
-        ));
-    }
+    // Pad register layout:
+    //   [3:0] FSEL, [4] PE (pull enable), [5] PS (pull select, 1=up),
+    //   [6] IE (input enable).
+    // Emit one RMW that sets all of them atomically so callers don't need
+    // to care about register-field interleaving.
+    let (pe, ps) = match pull {
+        "up" => (1u32, 1u32),
+        "down" => (1u32, 0u32),
+        _ => (0u32, 0u32), // "none" or anything else
+    };
+    let ie = if needs_ie { 1u32 } else { 0u32 };
+    let val = (ie << 6) | (ps << 5) | (pe << 4) | (fsel & 0xF);
+    let mask = 0x7Fu32; // bits [6:0] — FSEL + PE + PS + IE
+    lines.push(format!("let pad = 0x{pad:08X} as *mut u32;"));
+    lines.push(format!(
+        "pad.write_volatile((pad.read_volatile() & !0x{mask:X}) | 0x{val:X});"
+    ));
 
     // Step 2: Write PINR register if this is a routed (FSEL 4/5) peripheral
     if pinr_fsel(kind).is_some() {

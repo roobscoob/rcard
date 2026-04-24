@@ -9,3 +9,4 @@ std = []
 
 [dependencies]
 zerocopy = { version = "0.8", features = ["derive"] }
+rcard-log = { path = "../log", features = [] }

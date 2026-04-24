@@ -8,6 +8,7 @@ use rcard_usb_proto::FrameReader;
 use tokio_util::sync::CancellationToken;
 use zerocopy::TryFromBytes;
 
+use crate::crc;
 use crate::error::UsbError;
 use crate::{IN_BUFFER_SIZE, IN_PIPELINE_DEPTH};
 
@@ -41,7 +42,18 @@ pub(crate) async fn run(
             }
         };
 
-        reader.push(&buf[..buf.len()]);
+        // Each bulk IN completion is one IPC frame + trailing CRC16 (+
+        // optional pad). Validate, strip, push. See host_reader in lib.rs
+        // for the mirroring logic.
+        match crc::unwrap_frame(&buf[..buf.len()]) {
+            Ok(frame_bytes) => {
+                reader.push(frame_bytes);
+            }
+            Err(_) => {
+                sink.error(UsbError::CrcMismatch);
+                reader.reset();
+            }
+        }
 
         loop {
             match reader.next_frame() {

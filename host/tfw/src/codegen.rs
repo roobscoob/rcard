@@ -41,6 +41,12 @@ pub struct GeneratedConfig {
     /// Pin assignments from the board config.
     pub pin_assignments: BTreeMap<String, BTreeMap<String, String>>,
 
+    /// Per-pin metadata from the chip ncl. The kernel's build.rs reads
+    /// `pins[PIN].default_pull` to emit PE/PS register writes alongside
+    /// each FSEL — without this, every pin lands at the chip-reset
+    /// default of "no pull" regardless of what the chip ncl declares.
+    pub pins: BTreeMap<String, PinEntry>,
+
     /// IPC ACL: server crate name → list of allowed caller task indices.
     pub ipc_acl: BTreeMap<String, Vec<usize>>,
 
@@ -84,6 +90,11 @@ pub struct DeviceGeometryEntry {
     pub erase_size: u64,
     pub program_size: u64,
     pub read_size: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PinEntry {
+    pub default_pull: String,
 }
 
 /// Build the master config from the resolved AppConfig.
@@ -175,6 +186,25 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
             }
         }
     }
+
+    // App-level trusted_senders also get blanket partition access. The
+    // same rationale as for `ipc_acl`: trusted dispatchers (host_proxy)
+    // need to reach arbitrary partitions on behalf of the host without
+    // having to enumerate every one as `uses_partitions`.
+    let trusted_partition_indices: Vec<usize> = config
+        .trusted_senders
+        .iter()
+        .filter_map(|t| task_indices.get(&t.crate_info.package.name).copied())
+        .collect();
+    if !trusted_partition_indices.is_empty() {
+        for place_name in partitions.iter().map(|p| p.name.clone()) {
+            let list = partition_acl.entry(place_name).or_default();
+            for &idx in &trusted_partition_indices {
+                list.push(idx);
+            }
+        }
+    }
+
     for list in partition_acl.values_mut() {
         list.sort_unstable();
         list.dedup();
@@ -294,6 +324,18 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
         device_geometry,
         filesystems,
         pin_assignments: config.pin_assignments.clone(),
+        pins: config
+            .pins
+            .iter()
+            .map(|(name, def)| {
+                (
+                    name.clone(),
+                    PinEntry {
+                        default_pull: def.default_pull.clone(),
+                    },
+                )
+            })
+            .collect(),
         ipc_acl,
         peers,
         task_irqs,

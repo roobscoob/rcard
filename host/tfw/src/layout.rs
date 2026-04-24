@@ -71,6 +71,26 @@ fn is_cpu_mapped(place: &Place) -> bool {
     !place.unmapped && !place.mappings.is_empty()
 }
 
+/// Find which place in `config.places` contains the given CPU address.
+/// Skips unmapped places. Used to map a layout-allocated base back to
+/// its hosting place name.
+pub(crate) fn find_place_name(config: &AppConfig, addr: u64) -> Option<String> {
+    for (name, place) in &config.places {
+        if place.unmapped || place.mappings.is_empty() {
+            continue;
+        }
+        let offset = place.offset.unwrap_or(0);
+        for mapping in &place.mappings {
+            let start = mapping.address + offset;
+            let end = start + place.size;
+            if addr >= start && addr < end {
+                return Some(name.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Unique key for a place (by its first mapping address + offset, or size as fallback).
 fn place_key(place: &Place) -> u64 {
     resolve_cpu_address(place, false).unwrap_or(place.offset.unwrap_or(0))

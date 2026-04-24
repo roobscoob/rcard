@@ -18,4 +18,7 @@ pub mod decode;
 pub mod registry;
 
 pub use value::IpcValue;
-pub use registry::{EncodedCall, Registry};
+pub use registry::{
+    extract_handle, CallError, EncodedCall, HandleExtractError, MethodKind, MethodSchema,
+    Registry, ReplyDecodeError,
+};

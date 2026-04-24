@@ -85,7 +85,10 @@ fn mpi() -> &'static Mpi {
 
 // ── Lease forwarding helpers ───────────────────────────────────────
 
-/// Read from MPI into a caller's write-lease via intermediate buffer.
+/// Read from MPI into a caller's write-lease. Uses bulk `write_range`
+/// rather than per-byte `write` — the per-byte path issues one syscall
+/// per byte, and (per the comment in `sysmodule_usb`) is "corruption-
+/// prone" in addition to being slow.
 fn mpi_read_to_lease(
     address: u32,
     lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
@@ -97,16 +100,17 @@ fn mpi_read_to_lease(
         let chunk = (len - offset).min(256);
         mpi()
             .read(address + offset as u32, &mut tmp[..chunk])
-            .unwrap_or(());
-        for (i, &byte) in tmp[..chunk].iter().enumerate() {
-            let _ = lease.write(offset + i, byte);
-        }
+            .map_err(|_| StorageError::device(0xFFFE))?;
+        lease
+            .write_range(offset, &tmp[..chunk])
+            .ok_or_else(|| StorageError::device(0xFFFD))?;
         offset += chunk;
     }
     Ok(())
 }
 
-/// Write from a caller's read-lease to MPI via intermediate buffer.
+/// Write from a caller's read-lease to MPI. Uses bulk `read_range` —
+/// see `mpi_read_to_lease` for why per-byte is bad.
 fn mpi_program_from_lease(
     address: u32,
     lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
@@ -116,12 +120,12 @@ fn mpi_program_from_lease(
     let mut offset = 0;
     while offset < len {
         let chunk = (len - offset).min(256);
-        for (i, byte) in tmp[..chunk].iter_mut().enumerate() {
-            *byte = lease.read(offset + i).unwrap_or(0);
-        }
+        lease
+            .read_range(offset, &mut tmp[..chunk])
+            .ok_or_else(|| StorageError::device(0xFFFD))?;
         mpi()
             .write(address + offset as u32, &tmp[..chunk])
-            .unwrap_or(());
+            .map_err(|_| StorageError::device(0xFFFE))?;
         offset += chunk;
     }
     Ok(())
@@ -141,7 +145,8 @@ impl Partition for PartitionResource {
         let config = &PARTITIONS[idx];
 
         let caller = meta.sender.task_index();
-        let is_fs_task = generated::peers::PEERS.sysmodule_fs
+        let is_fs_task = generated::peers::PEERS
+            .sysmodule_fs
             .map_or(false, |id| caller == id.task_index());
 
         if is_managed(config) {
@@ -248,6 +253,117 @@ impl Drop for PartitionResource {
     }
 }
 
+// ── FlashLayout — read the installed places.bin partition table ─────
+
+/// CPU-space base of the mpi2 mapping. Every address the ftab stores is
+/// in this address space; subtract to get an mpi-relative offset.
+const MPI2_MAPPING_BASE: u32 = 0x1200_0000;
+
+/// SiFli sec_configuration magic ('SECF', little-endian).
+const SEC_CONFIG_MAGIC: u32 = 0x5345_4346;
+
+/// sec_configuration.ftab starts at this byte offset within sec_config.
+const SECFG_FTAB_OFFSET: u32 = 4;
+
+/// Each ftab entry is 16 bytes: base, size, xip_base, flags (all u32).
+const FTAB_ENTRY_SIZE: u32 = 16;
+
+/// Our-own-use ftab slot that `tfw::pack` writes containing
+/// `(places_base, places_size)`. Mirrors `FTAB_PLACES_SLOT` in pack.rs.
+const FTAB_PLACES_SLOT: u32 = 14;
+
+/// places.bin footer magic 'PLCB' — last 4 bytes of the image.
+const PLACES_MAGIC: u32 = 0x504C_4342;
+
+/// Size of the places.bin trailing footer.
+const PLACES_FOOTER_SIZE: u32 = 24;
+
+/// Size of one partition-table entry in places.bin.
+const PLACES_PARTITION_SIZE: u32 = 16;
+
+fn mpi_read_u32(address: u32) -> Result<u32, LayoutError> {
+    let mut buf = [0u8; 4];
+    mpi()
+        .read(address, &mut buf)
+        .map_err(|_| LayoutError::ReadFailure)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+/// Locate the on-flash `places.bin` via the sec_config's pack-written
+/// slot at `ftab[FTAB_PLACES_SLOT]`. Returns `(mpi_base, size)`, or
+/// `Unpartitioned` if the ftab is missing / that slot is erased (older
+/// firmware that predates this convention, or blank flash).
+fn locate_places() -> Result<(u32, u32), LayoutError> {
+    // sec_config lives at mpi offset 0 by construction.
+    let magic = mpi_read_u32(0)?;
+    if magic != SEC_CONFIG_MAGIC {
+        return Err(LayoutError::Unpartitioned);
+    }
+
+    let entry = SECFG_FTAB_OFFSET + FTAB_PLACES_SLOT * FTAB_ENTRY_SIZE;
+    let cpu_base = mpi_read_u32(entry)?;
+    let size = mpi_read_u32(entry + 4)?;
+
+    // Erased (0xFFFFFFFF) or plainly nonsensical → treat as unpartitioned.
+    if cpu_base == u32::MAX || size == u32::MAX || size == 0 {
+        return Err(LayoutError::Unpartitioned);
+    }
+    if cpu_base < MPI2_MAPPING_BASE {
+        return Err(LayoutError::Unpartitioned);
+    }
+    Ok((cpu_base - MPI2_MAPPING_BASE, size))
+}
+
+struct FlashLayoutImpl;
+
+impl FlashLayout for FlashLayoutImpl {
+    fn get_layout(_meta: ipc::Meta, start: u32) -> Result<Layout, LayoutError> {
+        let (places_base, places_size) = locate_places()?;
+        if places_size < PLACES_FOOTER_SIZE {
+            return Err(LayoutError::Unpartitioned);
+        }
+
+        // Footer is the last 24 bytes of places.bin.
+        let footer = places_base + places_size - PLACES_FOOTER_SIZE;
+        let tables_offset = mpi_read_u32(footer)?;
+        let _segment_count = mpi_read_u32(footer + 4)?;
+        let partition_count = mpi_read_u32(footer + 8)?;
+        let magic = mpi_read_u32(footer + 20)?;
+        if magic != PLACES_MAGIC {
+            return Err(LayoutError::Unpartitioned);
+        }
+
+        if start >= partition_count {
+            return Err(LayoutError::OutOfRange);
+        }
+
+        let count = core::cmp::min((partition_count - start) as usize, MAX_ENTRIES_PER_CALL);
+        let mut entries = [LayoutEntry {
+            name_hash: 0,
+            offset: 0,
+            size: 0,
+            flags: 0,
+        }; MAX_ENTRIES_PER_CALL];
+
+        for i in 0..count {
+            let part = places_base + tables_offset + (start + i as u32) * PLACES_PARTITION_SIZE;
+            entries[i] = LayoutEntry {
+                name_hash: mpi_read_u32(part)?,
+                offset: mpi_read_u32(part + 4)?,
+                size: mpi_read_u32(part + 8)?,
+                flags: mpi_read_u32(part + 12)?,
+            };
+        }
+
+        Ok(Layout {
+            total: partition_count,
+            start,
+            count: count as u32,
+            entries,
+        })
+    }
+}
+
 // ── Entry point ─────────────────────────────────────────────────────
 
 #[export_name = "main"]
@@ -259,12 +375,15 @@ fn main() -> ! {
         2,
         MpiConfig {
             prescaler: 2,
-            addr_size: AddrSize::ThreeBytes,
+            // 4-byte addressing — needed to reach the upper half of the
+            // 256 Mb GD25Q256E. The MPI driver issues EN4B at open and
+            // uses the 4-byte command opcodes (4SE/4PP/4READ/etc.).
+            addr_size: AddrSize::FourBytes,
             imode: LineMode::Single,
             admode: LineMode::Single,
             dmode: LineMode::Single,
             read_dummy_cycles: 0,
-            clock_polarity: ClockPolarity::Normal,
+            clock_polarity: ClockPolarity::Inverted,
         },
     )
     .log_unwrap()
@@ -273,5 +392,6 @@ fn main() -> ! {
 
     ipc::server! {
         Partition: PartitionResource,
+        FlashLayout: FlashLayoutImpl,
     }
 }

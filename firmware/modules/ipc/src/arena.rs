@@ -634,9 +634,13 @@ impl<T, const N: usize> SharedArena<T, N> {
     ) -> Option<crate::dispatch::PendingReply> {
         use crate::handle::*;
 
+        // All implicit-opcode args and replies go via postcard, matching
+        // the rest of the IPC wire format (ctor/message args + replies).
         match method_id {
             IMPLICIT_DESTROY_METHOD => {
-                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                let Ok((handle, _)) =
+                    postcard::take_from_bytes::<RawHandle>(msg.raw_data())
+                else {
                     reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
                     return None;
                 };
@@ -645,44 +649,41 @@ impl<T, const N: usize> SharedArena<T, N> {
                 None
             }
             CLONE_METHOD => {
-                let Some((handle, rest)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
-                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
-                    return None;
-                };
-                let Some((new_owner, _)) = crate::wire::read::<u16>(rest) else {
+                let Ok(((handle, new_owner), _)) =
+                    postcard::take_from_bytes::<(RawHandle, u16)>(msg.raw_data())
+                else {
                     reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
                     return None;
                 };
                 let new_owner_priority = priority_fn(new_owner);
                 match self.clone_handle(handle, sender_index, new_owner, new_owner_priority) {
                     Ok(new_handle) => {
-                        let mut buf = [0u8; 1 + RawHandle::SIZE];
+                        // Reply = `Ok(RawHandle)` as `[0, varint(new_handle)]`.
+                        let mut buf = [0u8; 1 + 10];
                         buf[0] = 0; // Ok
-                        crate::wire::write(&mut buf[1..], &new_handle);
-                        reply.reply_ok(&buf);
+                        let written = match postcard::to_slice(&new_handle, &mut buf[1..]) {
+                            Ok(s) => s.len(),
+                            Err(_) => {
+                                reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
+                                return None;
+                            }
+                        };
+                        reply.reply_ok(&buf[..1 + written]);
                     }
                     Err(CloneError::InvalidHandle) => {
-                        let mut buf = [0u8; 2];
-                        buf[0] = 1; // Err
-                        buf[1] = crate::Error::HandleLost as u8;
-                        reply.reply_ok(&buf);
+                        reply.reply_ok(&[1u8, crate::Error::HandleLost as u8]);
                     }
                     Err(CloneError::ArenaFull) => {
-                        let mut buf = [0u8; 2];
-                        buf[0] = 1; // Err
-                        buf[1] = crate::Error::ArenaFull as u8;
-                        reply.reply_ok(&buf);
+                        reply.reply_ok(&[1u8, crate::Error::ArenaFull as u8]);
                     }
                     Err(CloneError::ServerDied) => unreachable!(),
                 };
                 None
             }
             PREPARE_TRANSFER_METHOD => {
-                let Some((handle, rest)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
-                    reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
-                    return None;
-                };
-                let Some((target, _)) = crate::wire::read::<u16>(rest) else {
+                let Ok(((handle, target), _)) =
+                    postcard::take_from_bytes::<(RawHandle, u16)>(msg.raw_data())
+                else {
                     reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
                     return None;
                 };
@@ -694,7 +695,9 @@ impl<T, const N: usize> SharedArena<T, N> {
                 None
             }
             CANCEL_TRANSFER_METHOD => {
-                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                let Ok((handle, _)) =
+                    postcard::take_from_bytes::<RawHandle>(msg.raw_data())
+                else {
                     reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
                     return None;
                 };
@@ -703,7 +706,9 @@ impl<T, const N: usize> SharedArena<T, N> {
                 None
             }
             ACQUIRE_METHOD => {
-                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                let Ok((handle, _)) =
+                    postcard::take_from_bytes::<RawHandle>(msg.raw_data())
+                else {
                     reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
                     return None;
                 };
@@ -716,7 +721,9 @@ impl<T, const N: usize> SharedArena<T, N> {
                 None
             }
             TRY_DROP_METHOD => {
-                let Some((handle, _)) = crate::wire::read::<RawHandle>(msg.raw_data()) else {
+                let Ok((handle, _)) =
+                    postcard::take_from_bytes::<RawHandle>(msg.raw_data())
+                else {
                     reply.reply_error(crate::MALFORMED_MESSAGE, &[]);
                     return None;
                 };

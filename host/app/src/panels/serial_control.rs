@@ -128,6 +128,9 @@ fn tunnel_error_label(code: TunnelErrorCode) -> &'static str {
             "NoHostForwarding — firmware lacks sysmodule_host_proxy"
         }
         TunnelErrorCode::Busy => "Busy — transport already has a pending request",
+        TunnelErrorCode::RequestCorrupted => {
+            "RequestCorrupted — retransmit budget exhausted"
+        }
         TunnelErrorCode::Internal => "Internal — unspecified tunnel error",
     }
 }

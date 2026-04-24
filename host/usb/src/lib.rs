@@ -1,3 +1,4 @@
+mod crc;
 pub mod error;
 pub mod fob_reader;
 pub mod hotplug;
@@ -30,9 +31,16 @@ const HOST_DRIVEN_INTERFACE: u8 = 0;
 const FOB_DRIVEN_INTERFACE: u8 = 1;
 
 /// Size of each bulk IN buffer, in bytes. Must be a multiple of the
-/// endpoint's `max_packet_size` (64 on FS, 512 on HS); 4096 is safe for
-/// both.
-const IN_BUFFER_SIZE: usize = 4096;
+/// endpoint's `max_packet_size` (64 on FS, 512 on HS) — nusb / the OS
+/// USB stack rejects non-aligned buffers, and the failure mode is that
+/// `next_complete` immediately returns a transfer error which kills
+/// the reader task.
+///
+/// Each bulk transfer carries exactly one IPC frame + 2-byte CRC16 +
+/// optional 1-byte pad, so the buffer needs to fit the largest possible
+/// frame (`MAX_DECODED_FRAME`) plus 3 framing bytes, rounded up to the
+/// next 512-byte boundary (works on both FS and HS).
+const IN_BUFFER_SIZE: usize = (rcard_usb_proto::MAX_DECODED_FRAME + 3 + 511) / 512 * 512;
 
 /// Number of outstanding IN transfers to keep in-flight per reader.
 /// More = higher throughput at the cost of memory; 2 is enough to keep
@@ -108,7 +116,7 @@ impl Usb {
             "usb",
             USB_IPC_PRIORITY,
             protocol.clone(),
-            sender,
+            sender.clone(),
         ));
 
         let cancel = CancellationToken::new();
@@ -116,6 +124,7 @@ impl Usb {
         let host_task = tokio::spawn(host_reader(
             host_in,
             protocol.clone(),
+            sender,
             sink.clone(),
             cancel.clone(),
         ));
@@ -218,14 +227,15 @@ impl std::error::Error for ConnectError {}
 async fn host_reader(
     mut endpoint: nusb::Endpoint<Bulk, In>,
     protocol: Arc<IpcProtocol>,
+    sender: Arc<dyn ipc_protocol::FrameSender>,
     sink: LogSink,
     cancel: CancellationToken,
 ) {
     use ipc::ResolvedResponse;
     use rcard_usb_proto::FrameReader;
-    use rcard_usb_proto::messages::tunnel_error::TunnelError;
+    use rcard_usb_proto::messages::tunnel_error::{TunnelError, TunnelErrorCode};
 
-    let mut reader = FrameReader::<4096>::new();
+    let mut reader = FrameReader::<{ rcard_usb_proto::MAX_DECODED_FRAME }>::new();
 
     for _ in 0..IN_PIPELINE_DEPTH {
         endpoint.submit(nusb::transfer::Buffer::new(IN_BUFFER_SIZE));
@@ -246,7 +256,19 @@ async fn host_reader(
             }
         };
 
-        reader.push(&buf[..buf.len()]);
+        // Each bulk IN completion is exactly one IPC frame + trailing
+        // CRC16 (+ optional pad). Validate, strip, push. On mismatch,
+        // discard the transfer — resync is automatic because the next
+        // bulk transfer is, by USB definition, a fresh frame.
+        match crc::unwrap_frame(&buf[..buf.len()]) {
+            Ok(frame_bytes) => {
+                reader.push(frame_bytes);
+            }
+            Err(_) => {
+                sink.error(error::UsbError::CrcMismatch);
+                reader.reset();
+            }
+        }
 
         loop {
             match reader.next_frame() {
@@ -266,7 +288,19 @@ async fn host_reader(
                         } else {
                             ResolvedResponse::UnexpectedFrame
                         };
-                        protocol.resolve(seq, resolved).await;
+
+                        // `RequestCorrupted` is unkeyed — the firmware
+                        // couldn't recover the seq from a corrupt packet,
+                        // so it sets seq=0xFFFF and expects us to retransmit
+                        // every still-pending request.
+                        if matches!(
+                            resolved,
+                            ResolvedResponse::TunnelError(TunnelErrorCode::RequestCorrupted)
+                        ) {
+                            protocol.retransmit_pending(&sender).await;
+                        } else {
+                            protocol.resolve(seq, resolved).await;
+                        }
                     }
 
                     reader.consume(size);

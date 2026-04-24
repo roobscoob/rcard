@@ -55,7 +55,14 @@ pub fn gen_deserialize_args(
             match ipc::__postcard::from_bytes(__buf) {
                 Ok(t) => t,
                 Err(_) => {
-                    reply.reply_error(ipc::MALFORMED_MESSAGE, &[]);
+                    // Diagnostic payload: [buf_len, first up to 16 bytes]
+                    // Lets the host tell "no bytes" vs "wrong bytes"
+                    // vs "too many bytes" apart at a glance.
+                    let mut __diag = [0u8; 17];
+                    __diag[0] = __buf.len() as u8;
+                    let __copy_len = __buf.len().min(16);
+                    __diag[1..1 + __copy_len].copy_from_slice(&__buf[..__copy_len]);
+                    reply.reply_error(ipc::MALFORMED_MESSAGE, &__diag[..1 + __copy_len]);
                     return;
                 }
             };

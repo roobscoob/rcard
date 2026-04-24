@@ -21,8 +21,8 @@ fun args =>
     pin_assignments = args.board.pin_assignments,
 
     boot = {
-      ftab = args.places.sec_config,
-      image = args.places.image,
+      ftab = args.places.boot,
+      image = args.places.firmware,
     },
 
     notifications = {

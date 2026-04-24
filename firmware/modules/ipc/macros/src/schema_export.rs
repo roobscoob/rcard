@@ -8,10 +8,11 @@
 //! build `ipc-metadata.json`.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::Ident;
 
-use crate::parse::{MethodKind, ParsedMethod, ResourceAttr};
+use crate::parse::{interface_op_path, MethodKind, ParsedMethod, ResourceAttr};
+use crate::util::to_pascal_case;
 use crate::wire_format::types::wire_type_for;
 
 pub fn gen_schema_export(
@@ -22,11 +23,39 @@ pub fn gen_schema_export(
     let resource_name = trait_name.to_string();
     let kind = attrs.kind;
 
-    let method_descs: Vec<TokenStream2> = methods
+    // When a resource `implements(iface)`, method IDs are remapped at
+    // runtime (see `op_enum.rs`): Message/StaticMessage methods inherit
+    // the interface's ID by name, while Constructor/Destructor methods
+    // sit past the interface's METHOD_COUNT in declaration order. The
+    // schema dump must emit these *runtime* IDs so the host can target
+    // methods with the correct opcode.
+    let iface_op = attrs.implements.as_ref().map(interface_op_path);
+    let mut non_message_offset: u8 = 0;
+
+    let method_ids: Vec<TokenStream2> = methods
         .iter()
         .map(|m| {
+            let fallback = m.method_id;
+            if let Some(ref iface_op) = iface_op {
+                let variant = format_ident!("{}", to_pascal_case(&m.name.to_string()));
+                if m.kind == MethodKind::Message || m.kind == MethodKind::StaticMessage {
+                    quote! { #iface_op::#variant as u8 }
+                } else {
+                    let offset = proc_macro2::Literal::u8_suffixed(non_message_offset);
+                    non_message_offset += 1;
+                    quote! { #iface_op::METHOD_COUNT + #offset }
+                }
+            } else {
+                quote! { #fallback }
+            }
+        })
+        .collect();
+
+    let method_descs: Vec<TokenStream2> = methods
+        .iter()
+        .zip(method_ids.iter())
+        .map(|(m, id)| {
             let name = m.name.to_string();
-            let id = m.method_id;
             let kind_str = match m.kind {
                 MethodKind::Constructor => "constructor",
                 MethodKind::Message => "message",

@@ -80,10 +80,14 @@ impl<'a> IpcCall<'a> {
         }
     }
 
-    /// Write a zerocopy value into the argument buffer at the current offset.
+    /// Serialize a postcard-serializable value into the argument buffer
+    /// at the current offset. Matches the wire format used by
+    /// `gen_serialize_wire`, `arena.rs::dispatch_implicit`, etc.
     #[inline]
-    pub fn push_arg<T: zerocopy::IntoBytes + zerocopy::Immutable>(&mut self, val: &T) {
-        self.arglen += crate::wire::write(&mut self.argbuf[self.arglen..], val);
+    pub fn push_arg<T: serde::Serialize>(&mut self, val: &T) {
+        let written = crate::__postcard::to_slice(val, &mut self.argbuf[self.arglen..])
+            .expect("ipc: IpcCall argbuf overflow");
+        self.arglen += written.len();
     }
 
     /// Set the payload from a pre-serialized byte slice.

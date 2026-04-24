@@ -8,18 +8,38 @@ use crate::compile::CompileArtifact;
 use crate::config::AppConfig;
 use crate::layout::Layout;
 
+/// Where a place's bytes ended up inside `places.bin`.
+///
+/// `file_offset` is the byte offset within `places.bin` where this
+/// place's blob starts. `blob_base` is the lowest paddr among the
+/// segments packed into the blob — i.e. the linker address that maps
+/// to byte 0 of the blob. Together they let callers convert a paddr
+/// in this place to its absolute flash byte address (e.g. for
+/// populating ftab entries that drive the BOOTROM copy path).
+#[derive(Debug, Clone)]
+pub struct PlaceLayout {
+    pub file_offset: u32,
+    pub blob_base: u64,
+}
+
 /// Combine multiple task ELFs + kernel ELF into a places binary.
 ///
 /// Groups all PT_LOAD segments by place (using the layout's address ranges),
 /// merges segments within each place into one contiguous blob, and writes
 /// a `places.bin` using the `rcard_places` format.
+///
+/// Returns the path to the written file plus a `place_name → PlaceLayout`
+/// map so downstream consumers (notably `pack::build_ftab_from_config`)
+/// can derive the on-flash byte address of a region whose linker address
+/// lives in another place (e.g. the bootloader, linked into SRAM but
+/// physically packed into the firmware partition).
 pub fn link_image(
     artifacts: &[CompileArtifact],
     config: &AppConfig,
     layout: &Layout,
     out_dir: &Path,
     emit: crate::build::EventFn<'_>,
-) -> Result<PathBuf, LinkError> {
+) -> Result<(PathBuf, BTreeMap<String, PlaceLayout>), LinkError> {
     std::fs::create_dir_all(out_dir).map_err(LinkError::Io)?;
 
     let places_path = out_dir.join("places.bin");
@@ -99,6 +119,7 @@ pub fn link_image(
     let mut place_names: Vec<&str> = by_place.keys().copied().collect();
     place_names.sort_by_key(|n| if Some(*n) == host_place_name { 0 } else { 1 });
 
+    let mut place_layouts: BTreeMap<String, PlaceLayout> = BTreeMap::new();
     let mut tail_cursor: u32 = 0;
     for place_name in place_names {
         let mut segs = by_place[place_name].clone();
@@ -170,13 +191,18 @@ pub fn link_image(
             }),
         ));
 
+        place_layouts.insert(
+            place_name.to_string(),
+            PlaceLayout { file_offset, blob_base: base },
+        );
+
         builder.add_segment(base as u32, file_offset, &blob, mem_size);
     }
 
     let places_bin = builder.build();
     std::fs::write(&places_path, &places_bin).map_err(LinkError::Io)?;
 
-    Ok(places_path)
+    Ok((places_path, place_layouts))
 }
 
 /// Measure the flat-binary size of an ELF (like the length of

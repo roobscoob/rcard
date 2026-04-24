@@ -23,6 +23,29 @@ use sysmodule_reactor_api::OverflowStrategy;
 
 const MAX_FRAME: usize = rcard_usb_proto::MAX_DECODED_FRAME;
 
+/// Accumulator buffer size — one frame + 2-byte CRC + 1-byte pad.
+const ACCUM_BUF_SIZE: usize = MAX_FRAME + 3;
+
+/// Per-packet CRC-16/CCITT-FALSE (poly=0x1021, init=0xFFFF, no reflect,
+/// xorout=0). Used over the whole IPC frame on each bulk transfer.
+fn crc16(data: &[u8]) -> u16 {
+    crc16_update(0xFFFF, data)
+}
+
+fn crc16_update(mut crc: u16, data: &[u8]) -> u16 {
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
 // ---------------------------------------------------------------------------
 // Pending request staging
 //
@@ -54,10 +77,29 @@ static PENDING: GlobalState<PendingRequest> = GlobalState::new(PendingRequest {
 static EP_OUT: OnceCell<UsbEndpoint> = OnceCell::new();
 static EP_IN: OnceCell<UsbEndpoint> = OnceCell::new();
 
-/// Frame reader buffer. Persists across notification wakes so partial
-/// frames received in one wake can be completed in a later wake.
-static READER: GlobalState<rcard_usb_proto::FrameReader<4096>> =
-    GlobalState::new(rcard_usb_proto::FrameReader::new());
+/// Per-transfer accumulation buffer. Each USB bulk OUT transfer carries
+/// exactly one IPC frame plus a trailing CRC16 (plus an optional 1-byte
+/// pad to force a short-packet terminator). We accumulate packets here
+/// until a short packet (< 64 bytes) marks end-of-transfer, then
+/// validate CRC and dispatch. USB packets themselves are trusted as raw
+/// bytes — the integrity check lives at the frame layer so the already-
+/// existing frame framing (header's `length` field) handles resync for
+/// us: any corruption fails CRC, the whole transfer is discarded, and
+/// the next bulk transfer is by USB definition a fresh frame.
+struct Accum {
+    buf: [u8; ACCUM_BUF_SIZE],
+    len: usize,
+    /// Set when a transfer exceeded `ACCUM_BUF_SIZE`. Further packets in
+    /// that transfer are discarded. On end-of-transfer (short packet),
+    /// we NACK and reset.
+    overflowed: bool,
+}
+
+static ACCUM: GlobalState<Accum> = GlobalState::new(Accum {
+    buf: [0u8; ACCUM_BUF_SIZE],
+    len: 0,
+    overflowed: false,
+});
 
 // ---------------------------------------------------------------------------
 // USB write helper
@@ -113,26 +155,92 @@ impl HostTransport for HostTransportImpl {
     fn deliver_reply(
         _meta: ipc::Meta,
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
-    ) -> Result<(), HostTransportError>
-    {
+    ) -> Result<(), HostTransportError> {
         let Some(ep_in) = EP_IN.get() else {
             return Err(HostTransportError::WireWriteFailed);
         };
 
-        // Stream the lease to USB in 64-byte chunks — matches the USB
-        // bulk max packet size and avoids an 8 KB stack-local copy.
+        // Emit the reply as one USB bulk transfer: `[frame][crc16][pad?]`.
+        // The host verifies CRC over `[frame]` and strips it. The optional
+        // 1-byte pad is appended iff `(len + 2) % 64 == 0` so the transfer
+        // always terminates with a short packet.
+        //
+        // Two passes over the lease: compute CRC, then emit in 64-byte
+        // packets. We avoid a full-frame scratch buffer — that's another
+        // 8 KiB static per task that we don't need, given the streaming
+        // `read_range` API.
         let len = buf.len();
-        let mut offset = 0;
         let mut result = Ok(());
-        while offset < len {
-            let mut chunk = [0u8; 64];
-            let chunk_len = (len - offset).min(64);
-            let _ = buf.read_range(offset, &mut chunk[..chunk_len]);
-            if let Err(e) = write_usb(ep_in, &chunk[..chunk_len]) {
-                result = Err(e);
-                break;
+
+        // Pass 1: compute CRC over the whole lease.
+        let mut crc: u16 = 0xFFFF;
+        {
+            let mut scratch = [0u8; 64];
+            let mut off = 0;
+            while off < len {
+                let chunk = (len - off).min(64);
+                let _ = buf.read_range(off, &mut scratch[..chunk]);
+                crc = crc16_update(crc, &scratch[..chunk]);
+                off += chunk;
             }
-            offset += chunk_len;
+        }
+
+        // Pass 2: emit in 64-byte USB packets. Only the final packet may
+        // be short — that's what terminates the bulk transfer.
+        let full_lease_chunks = len / 64;
+        let tail_lease_len = len - full_lease_chunks * 64;
+        let mut packet = [0u8; 64];
+
+        'emit: {
+            for i in 0..full_lease_chunks {
+                let _ = buf.read_range(i * 64, &mut packet[..64]);
+                if let Err(e) = write_usb(ep_in, &packet[..64]) {
+                    result = Err(e);
+                    break 'emit;
+                }
+            }
+
+            if tail_lease_len > 0 {
+                // Tail lease + CRC (+ optional pad) in the final packet(s).
+                let _ = buf.read_range(full_lease_chunks * 64, &mut packet[..tail_lease_len]);
+                packet[tail_lease_len] = (crc >> 8) as u8;
+                packet[tail_lease_len + 1] = crc as u8;
+                let total = tail_lease_len + 2;
+                if total <= 64 {
+                    if let Err(e) = write_usb(ep_in, &packet[..total]) {
+                        result = Err(e);
+                        break 'emit;
+                    }
+                    if total == 64 {
+                        // Wire is a multiple of 64 — need a short pad packet.
+                        let pad = [0u8];
+                        if let Err(e) = write_usb(ep_in, &pad) {
+                            result = Err(e);
+                            break 'emit;
+                        }
+                    }
+                } else {
+                    // total == 65 (tail_lease_len == 63). Split into a full
+                    // 64-byte packet and a 1-byte short terminator.
+                    if let Err(e) = write_usb(ep_in, &packet[..64]) {
+                        result = Err(e);
+                        break 'emit;
+                    }
+                    if let Err(e) = write_usb(ep_in, &packet[64..total]) {
+                        result = Err(e);
+                        break 'emit;
+                    }
+                }
+            } else {
+                // Lease ended at a 64-byte boundary. Emit CRC as a 2-byte
+                // short terminator — `(len + 2) % 64 != 0` here since
+                // len % 64 == 0, so no pad needed.
+                let trailer = [(crc >> 8) as u8, crc as u8];
+                if let Err(e) = write_usb(ep_in, &trailer) {
+                    result = Err(e);
+                    break 'emit;
+                }
+            }
         }
 
         // Always clear the pending slot even if USB write failed — the
@@ -168,21 +276,35 @@ const HOST_FORWARDING_AVAILABLE: bool = PEERS.sysmodule_host_proxy.is_some();
 /// (which the bus enters after ~3 ms of no SOFs — i.e. constantly when
 /// the host isn't actively moving data) also reports as not-Configured
 /// from the driver, so without this gate every quiet moment spams the log.
-static USB_DISCONNECTED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(true);
+static USB_DISCONNECTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 /// Encode and write a `TunnelError` frame straight to EP IN. Used both for
-/// no-host-forwarding NACKs and for malformed-request rejects.
+/// no-host-forwarding NACKs and for malformed-request rejects. Wraps the
+/// frame with CRC16 + optional 1-byte pad so the host's `unwrap_frame`
+/// accepts it — same wire format as `deliver_reply` and the fob channel.
 fn write_tunnel_error(
     ep_in: &UsbEndpoint,
     seq: u16,
     code: rcard_usb_proto::messages::TunnelErrorCode,
 ) {
     let msg = rcard_usb_proto::messages::TunnelError { code };
-    let mut buf = [0u8; 16];
-    if let Some(n) = rcard_usb_proto::simple::encode_simple(&msg, &mut buf, seq) {
-        let _ = write_usb(ep_in, &buf[..n]);
+    let mut frame = [0u8; 16];
+    let Some(n) = rcard_usb_proto::simple::encode_simple(&msg, &mut frame, seq) else {
+        return;
+    };
+    // Tunnel error frames are tiny (~7–8 bytes), so wrapped wire never
+    // exceeds 64 — always one short packet, no chunking needed.
+    let crc = crc16(&frame[..n]);
+    let mut wire = [0u8; 19]; // 16 + 2 CRC + 1 pad
+    wire[..n].copy_from_slice(&frame[..n]);
+    wire[n] = (crc >> 8) as u8;
+    wire[n + 1] = crc as u8;
+    let mut total = n + 2;
+    if total % 64 == 0 {
+        wire[total] = 0;
+        total += 1;
     }
+    let _ = write_usb(ep_in, &wire[..total]);
 }
 
 #[ipc::notification_handler(usb_event)]
@@ -190,36 +312,74 @@ fn handle_usb_event(_sender: u16, _code: u32) {
     let Some(ep_out) = EP_OUT.get() else { return };
 
     // If host_proxy hasn't consumed the previous request yet, don't drain
-    // further USB bytes into the reader. The protocol is synchronous so
-    // the host won't send more anyway, and this keeps backpressure clean.
+    // further USB bytes. The protocol is synchronous so the host won't
+    // send more anyway, and this keeps backpressure clean.
     let busy = PENDING.with(|p| p.set).unwrap_or(false);
     if busy {
         return;
     }
 
-    // Drain everything currently buffered in EP OUT into the frame reader.
+    // Drain packets into ACCUM. A short packet (< 64 bytes) marks
+    // end-of-transfer; each bulk transfer carries exactly one IPC frame
+    // + trailing CRC16 (+ optional 1-byte pad). When end-of-transfer
+    // arrives, we validate CRC and dispatch or NACK.
     let mut usb_buf = [0u8; 64];
     loop {
         match ep_out.read(&mut usb_buf) {
             Ok(Ok(n)) if n > 0 => {
-                // Successful read ⇒ bus is Configured. Note the transition
-                // back to connected so the next disconnect will log again.
                 USB_DISCONNECTED.store(false, core::sync::atomic::Ordering::Relaxed);
-                READER
-                    .with(|r| r.push(&usb_buf[..n as usize]))
+                let n = n as usize;
+                let is_short = n < 64;
+                ACCUM
+                    .with(|a| {
+                        if a.overflowed {
+                            // Already over capacity for this transfer; keep
+                            // discarding. Short packet below triggers NACK.
+                            return;
+                        }
+                        if a.len + n > a.buf.len() {
+                            a.overflowed = true;
+                            a.len = 0;
+                            return;
+                        }
+                        a.buf[a.len..a.len + n].copy_from_slice(&usb_buf[..n]);
+                        a.len += n;
+                    })
                     .log_unwrap();
+
+                if is_short {
+                    // End of transfer — either validate and dispatch, or NACK.
+                    let staged = process_accumulated_frame();
+                    if staged {
+                        let _ = Reactor::push(
+                            notifications::GROUP_ID_HOST_REQUEST,
+                            0,
+                            20,
+                            OverflowStrategy::Reject,
+                        );
+                    }
+                    // A synchronous host won't pipeline — return so the
+                    // next frame's first packets don't accidentally append
+                    // onto a freshly-cleared ACCUM mid-stream.
+                    return;
+                }
             }
             Ok(Err(UsbError::Disconnected)) => {
                 // Only act on the transition from connected → disconnected.
                 // `UsbError::Disconnected` is also returned for transient
                 // non-Configured states (Suspend, Default during enumeration),
                 // so firing every time would spam the log and repeatedly wipe
-                // PENDING/READER for no reason.
-                let was_connected = !USB_DISCONNECTED
-                    .swap(true, core::sync::atomic::Ordering::Relaxed);
+                // PENDING/ACCUM for no reason.
+                let was_connected =
+                    !USB_DISCONNECTED.swap(true, core::sync::atomic::Ordering::Relaxed);
                 if was_connected {
                     warn!("USB disconnected");
-                    READER.with(|r| r.reset()).log_unwrap();
+                    ACCUM
+                        .with(|a| {
+                            a.len = 0;
+                            a.overflowed = false;
+                        })
+                        .log_unwrap();
                     PENDING
                         .with(|p| {
                             p.set = false;
@@ -232,87 +392,109 @@ fn handle_usb_event(_sender: u16, _code: u32) {
             _ => break,
         }
     }
+}
 
-    // Walk the reader for the next complete frame and either stage it
-    // (if host forwarding is available) or NACK it (if not). Stop after
-    // one stage — subsequent frames wait for host_proxy to drain the
-    // current one. NACKs don't gate further frames since there's no
-    // pending state to maintain.
-    let mut staged = false;
-    READER
-        .with(|reader| loop {
-            match reader.next_frame() {
-                Ok(Some(frame)) => {
-                    let size = frame.header.frame_size();
-                    let seq = frame.header.seq;
-                    if frame.as_ipc_request().is_some() {
-                        if !HOST_FORWARDING_AVAILABLE {
-                            // No host_proxy in this build — NACK the request
-                            // immediately and keep draining.
-                            if let Some(ep_in) = EP_IN.get() {
-                                write_tunnel_error(
-                                    ep_in,
-                                    seq,
-                                    rcard_usb_proto::messages::TunnelErrorCode::NoHostForwarding,
-                                );
-                            }
-                            reader.consume(size);
-                            continue;
-                        }
-                        // Copy the frame bytes into PENDING before consuming.
-                        // host_proxy needs the wire-format frame (header
-                        // + payload) so it can re-parse via FrameReader.
-                        let payload_len = frame.payload.len();
-                        let total = rcard_usb_proto::header::HEADER_SIZE + payload_len;
-                        let ok = PENDING
-                            .with(|p| {
-                                if total > p.buf.len() {
-                                    return false;
-                                }
-                                let mut header_buf =
-                                    [0u8; rcard_usb_proto::header::HEADER_SIZE];
-                                frame.header.encode(&mut header_buf);
-                                p.buf[..rcard_usb_proto::header::HEADER_SIZE]
-                                    .copy_from_slice(&header_buf);
-                                p.buf[rcard_usb_proto::header::HEADER_SIZE..total]
-                                    .copy_from_slice(frame.payload);
-                                p.len = total;
-                                p.set = true;
-                                true
-                            })
-                            .unwrap_or(false);
-                        reader.consume(size);
-                        if ok {
-                            staged = true;
-                            return;
-                        }
-                    } else {
-                        warn!("Unexpected frame type on host channel");
-                        reader.consume(size);
-                    }
-                }
-                Ok(None) => return,
-                Err(rcard_usb_proto::ReaderError::Oversized { declared_size }) => {
-                    warn!("Oversized frame, skipping");
-                    reader.skip_frame(declared_size);
-                }
-                Err(rcard_usb_proto::ReaderError::Header(_)) => {
-                    error!("Bad frame header, resetting");
-                    reader.reset();
-                    return;
-                }
+/// Validate the CRC over the accumulated transfer buffer and dispatch
+/// the frame. Always clears ACCUM. Returns `true` iff a request was
+/// staged into PENDING for `host_proxy`.
+///
+/// On CRC mismatch, malformed header, overflow, or any other framing
+/// failure, sends a `RequestCorrupted` NACK so the host retransmits.
+/// (`NoHostForwarding` is sent separately for the one case where the
+/// frame is valid but we can't route it.)
+fn process_accumulated_frame() -> bool {
+    ACCUM
+        .with(|a| {
+            let n = a.len;
+            let overflowed = a.overflowed;
+            a.len = 0;
+            a.overflowed = false;
+
+            if overflowed {
+                info!("USB RX transfer overflowed ACCUM, NACKing");
+                send_request_corrupted();
+                return false;
             }
-        })
-        .log_unwrap();
 
-    if staged {
-        // Wake host_proxy. Reject strategy: if it somehow can't be queued,
-        // the next usb_event wake will re-push it.
-        let _ = Reactor::push(
-            notifications::GROUP_ID_HOST_REQUEST,
-            0,
-            20,
-            OverflowStrategy::Reject,
+            // Need at least header + 2-byte CRC.
+            const HEADER_SIZE: usize = rcard_usb_proto::header::HEADER_SIZE;
+            if n < HEADER_SIZE + 2 {
+                info!("USB RX transfer too short ({} bytes), NACKing", n);
+                send_request_corrupted();
+                return false;
+            }
+
+            let header = match rcard_usb_proto::FrameHeader::decode(&a.buf[..n]) {
+                Ok(h) => h,
+                Err(_) => {
+                    info!("USB RX bad frame header, NACKing");
+                    send_request_corrupted();
+                    return false;
+                }
+            };
+
+            let frame_size = HEADER_SIZE + header.length as usize;
+            if frame_size + 2 > n {
+                info!(
+                    "USB RX transfer short for declared length ({} < {} + 2), NACKing",
+                    n, frame_size
+                );
+                send_request_corrupted();
+                return false;
+            }
+
+            let expected = u16::from_be_bytes([a.buf[frame_size], a.buf[frame_size + 1]]);
+            let actual = crc16(&a.buf[..frame_size]);
+            if expected != actual {
+                info!("USB RX CRC mismatch, NACKing");
+                send_request_corrupted();
+                return false;
+            }
+
+            // Dispatch. `RawFrame` borrows the payload slice directly from
+            // ACCUM's buffer for the duration of this closure.
+            let frame = rcard_usb_proto::RawFrame {
+                header,
+                payload: &a.buf[HEADER_SIZE..frame_size],
+            };
+
+            if frame.as_ipc_request().is_none() {
+                warn!("Unexpected frame type on host channel");
+                return false;
+            }
+
+            if !HOST_FORWARDING_AVAILABLE {
+                if let Some(ep_in) = EP_IN.get() {
+                    write_tunnel_error(
+                        ep_in,
+                        header.seq,
+                        rcard_usb_proto::messages::TunnelErrorCode::NoHostForwarding,
+                    );
+                }
+                return false;
+            }
+
+            PENDING
+                .with(|p| {
+                    if frame_size > p.buf.len() {
+                        return false;
+                    }
+                    p.buf[..frame_size].copy_from_slice(&a.buf[..frame_size]);
+                    p.len = frame_size;
+                    p.set = true;
+                    true
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn send_request_corrupted() {
+    if let Some(ep_in) = EP_IN.get() {
+        write_tunnel_error(
+            ep_in,
+            0xFFFF,
+            rcard_usb_proto::messages::TunnelErrorCode::RequestCorrupted,
         );
     }
 }

@@ -1101,12 +1101,16 @@ pub struct AppState {
     // Channels.
     pub cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::bridge::Command>,
     pub event_rx: crossbeam_channel::Receiver<crate::bridge::Event>,
+    /// Handle to the tokio runtime. Used to spawn async work (e.g.
+    /// flash-smoke IPC calls) from the sync egui event loop.
+    pub tokio_handle: tokio::runtime::Handle,
 }
 
 impl AppState {
     pub fn new(
         cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::bridge::Command>,
         event_rx: crossbeam_channel::Receiver<crate::bridge::Event>,
+        tokio_handle: tokio::runtime::Handle,
     ) -> Self {
         let firmware_dir = PathBuf::new();
         let firmware_dir_input = String::new();
@@ -1154,6 +1158,7 @@ impl AppState {
             file_drag: None,
             cmd_tx,
             event_rx,
+            tokio_handle,
         };
 
         // Auto-register every port from the registry that we can see right
@@ -1927,34 +1932,67 @@ impl AppState {
                     }
                 }
                 crate::bridge::Event::FlashProgress { device_id, phase } => {
-                    // Smoke test: when the stub is up (Done), try an IPC
-                    // call to Log::log to verify the end-to-end path.
+                    // When the stub is up (Done), use its IPC to write the
+                    // target firmware: places.bin → `firmware` partition,
+                    // then ftab.bin → `boot` partition.
                     if matches!(&phase, crate::bridge::FlashPhase::Done) {
-                        eprintln!("[flash] stub up — testing IPC call to Log::log");
-                        let test_args = ipc_runtime::IpcValue::Struct(indexmap::indexmap! {
-                            "level".into() => ipc_runtime::IpcValue::Enum {
-                                variant: "Info".into(),
-                                payload: vec![],
-                            },
-                            "species".into() => ipc_runtime::IpcValue::U64(0),
-                            "argument_stream".into() => ipc_runtime::IpcValue::Bytes(vec![]),
-                        });
-                        match self.ipc_call(device_id, "Log", "log", test_args) {
-                            Ok(rx) => {
-                                eprintln!("[flash] IPC call sent, awaiting reply...");
-                                std::thread::spawn(move || {
-                                    match rx.blocking_recv() {
-                                        Ok(Ok(result)) => eprintln!(
-                                            "[flash] IPC reply: rc={} return={} bytes",
-                                            result.rc,
-                                            result.return_value.len(),
-                                        ),
-                                        Ok(Err(e)) => eprintln!("[flash] IPC transport error: {e}"),
-                                        Err(_) => eprintln!("[flash] IPC reply channel dropped (timeout?)"),
+                        let firmware_id = match &self.flash_modal {
+                            Some(FlashModalState::Flashing {
+                                device_id: d,
+                                firmware_id,
+                                ..
+                            }) if *d == device_id => Some(*firmware_id),
+                            Some(FlashModalState::Picker {
+                                firmware_id,
+                                selected_device,
+                            }) if *selected_device == Some(device_id) => Some(*firmware_id),
+                            _ => None,
+                        };
+
+                        if let (Some(fw_id), Some(dev)) =
+                            (firmware_id, self.devices.get(&device_id))
+                        {
+                            let archive_bytes = self.firmware.get(&fw_id).and_then(|fw| {
+                                match &fw.path {
+                                    Some(p) => match std::fs::read(p) {
+                                        Ok(b) => Some(b),
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[flash] read archive {}: {e}",
+                                                p.display()
+                                            );
+                                            None
+                                        }
+                                    },
+                                    // Builtin = embedded stub; we'd never
+                                    // flash it as a target.
+                                    None => {
+                                        eprintln!(
+                                            "[flash] refusing to flash builtin firmware as target"
+                                        );
+                                        None
                                     }
-                                });
+                                }
+                            });
+
+                            match (archive_bytes, dev.ipc_registry.clone()) {
+                                (Some(bytes), Some(registry)) => {
+                                    let cmd_tx = self.cmd_tx.clone();
+                                    self.tokio_handle.spawn(async move {
+                                        run_flash(device_id, bytes, registry, cmd_tx).await;
+                                    });
+                                }
+                                (None, _) => {
+                                    // Already logged above.
+                                }
+                                (_, None) => {
+                                    eprintln!("[flash] no IPC registry loaded; cannot flash");
+                                }
                             }
-                            Err(e) => eprintln!("[flash] IPC call failed: {e}"),
+                        } else if firmware_id.is_none() {
+                            eprintln!(
+                                "[flash] no firmware_id in flash_modal for device {device_id:?}; skipping"
+                            );
                         }
                     }
 
@@ -2346,4 +2384,262 @@ fn discover_ncl_names(firmware_dir: &Path, subdir: &str) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// Write the target firmware (places.bin + ftab.bin) to the fob's flash
+/// over IPC. Called after the RAMboot stub comes up — at that point the
+/// stub is the only code running and has exclusive access to both
+/// partitions.
+///
+/// Order is places → ftab deliberately: the ftab (sec_config) is the
+/// BOOTROM's entry pointer, so writing it last makes the flash commit
+/// atomic from the BOOTROM's perspective — either the new image is
+/// fully staged or the old one is still being pointed at.
+async fn run_flash(
+    device_id: DeviceId,
+    archive_bytes: Vec<u8>,
+    registry: std::sync::Arc<ipc_runtime::Registry>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::bridge::Command>,
+) {
+    use std::io::{Cursor, Read};
+    use zip::ZipArchive;
+
+    let mut archive = match ZipArchive::new(Cursor::new(&archive_bytes)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[flash] archive open FAILED: {e}");
+            return;
+        }
+    };
+
+    let read_entry = |archive: &mut ZipArchive<Cursor<&Vec<u8>>>, name: &str| -> Option<Vec<u8>> {
+        let mut entry = match archive.by_name(name) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[flash] archive missing {name:?}: {e}");
+                return None;
+            }
+        };
+        let mut buf = Vec::new();
+        if let Err(e) = entry.read_to_end(&mut buf) {
+            eprintln!("[flash] read {name:?} FAILED: {e}");
+            return None;
+        }
+        Some(buf)
+    };
+
+    let Some(places) = read_entry(&mut archive, "places.bin") else {
+        return;
+    };
+    let Some(ftab) = read_entry(&mut archive, "ftab.bin") else {
+        return;
+    };
+    drop(archive);
+
+    if let Err(e) =
+        flash_partition(device_id, &registry, &cmd_tx, "firmware", &places).await
+    {
+        eprintln!("[flash] firmware partition FAILED: {e}");
+        return;
+    }
+    if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, "boot", &ftab).await {
+        eprintln!("[flash] boot partition FAILED: {e}");
+        return;
+    }
+    eprintln!("[flash] DONE ({} + {} bytes)", places.len(), ftab.len());
+}
+
+/// Acquire `partition_name`, erase enough to cover `data.len()`, then
+/// program `data` in lease-sized chunks at offset 0. Uses separate
+/// `erase` + `program` rather than `write` so the final chunk doesn't
+/// need erase-size padding.
+async fn flash_partition(
+    device_id: DeviceId,
+    registry: &std::sync::Arc<ipc_runtime::Registry>,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::bridge::Command>,
+    partition_name: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    use ipc_runtime::IpcValue;
+
+    let name_bytes = partition_name.as_bytes();
+    if name_bytes.len() > 16 {
+        return Err(format!("partition name too long: {partition_name:?}"));
+    }
+    let mut padded = [0u8; 16];
+    padded[..name_bytes.len()].copy_from_slice(name_bytes);
+    let name_arr = IpcValue::Tuple(padded.iter().map(|b| IpcValue::U8(*b)).collect());
+    let acquire_args = IpcValue::Struct(indexmap::indexmap! {
+        "name".into() => name_arr,
+    });
+
+    eprintln!(
+        "[flash] Partition::acquire({partition_name:?}) for {} bytes",
+        data.len()
+    );
+    let partition = crate::ipc_handle::acquire(
+        device_id,
+        registry,
+        cmd_tx,
+        "Partition",
+        "acquire",
+        acquire_args,
+    )
+    .await
+    .map_err(|e| format!("acquire: {e}"))?;
+
+    let geometry = partition
+        .call("geometry", IpcValue::Struct(indexmap::IndexMap::new()))
+        .await
+        .map_err(|e| format!("geometry: {e}"))?;
+    let erase_size = geometry_field(&geometry, "erase_size")
+        .ok_or_else(|| "missing erase_size in geometry".to_string())?
+        as usize;
+    if erase_size == 0 {
+        return Err("erase_size=0 in geometry".into());
+    }
+    let erase_len = data.len().div_ceil(erase_size) * erase_size;
+
+    eprintln!(
+        "[flash]   erase(0, {erase_len}) (covers {} bytes, erase_size={erase_size})",
+        data.len()
+    );
+    let erase_args = IpcValue::Struct(indexmap::indexmap! {
+        "offset".into() => IpcValue::U32(0),
+        "len".into()    => IpcValue::U32(erase_len as u32),
+    });
+    match partition.call("erase", erase_args).await {
+        Ok(IpcValue::Ok(_)) => {}
+        Ok(other) => return Err(format!("erase unexpected reply: {other:?}")),
+        Err(e) => return Err(format!("erase: {e}")),
+    }
+
+    // Program in ~half-lease-pool chunks. The lease pool is 8 KiB
+    // (rcard_usb_proto::LEASE_POOL_SIZE); 4 KiB leaves headroom for the
+    // read-lease used by replies on the same pool.
+    const CHUNK: usize = 4096;
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let end = (offset + CHUNK).min(data.len());
+        let program_args = IpcValue::Struct(indexmap::indexmap! {
+            "offset".into() => IpcValue::U32(offset as u32),
+            "buf".into()    => IpcValue::Bytes(data[offset..end].to_vec()),
+        });
+        match partition.call("program", program_args).await {
+            Ok(IpcValue::Ok(_)) => {}
+            Ok(other) => {
+                return Err(format!("program @ {offset:#x} unexpected reply: {other:?}"));
+            }
+            Err(e) => return Err(format!("program @ {offset:#x}: {e}")),
+        }
+        offset = end;
+    }
+
+    eprintln!(
+        "[flash]   {partition_name:?} programmed ({} bytes in {} chunk(s))",
+        data.len(),
+        data.len().div_ceil(CHUNK)
+    );
+
+    // Read back and compare. Same chunk size — `Partition::read` fills
+    // the writable lease the caller provides, returned via writeback.
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let end = (offset + CHUNK).min(data.len());
+        let chunk_len = end - offset;
+        let read_args = IpcValue::Struct(indexmap::indexmap! {
+            "offset".into() => IpcValue::U32(offset as u32),
+            "buf".into()    => IpcValue::Bytes(vec![0u8; chunk_len]),
+        });
+        let (reply, writeback) = partition
+            .call_with_writeback("read", read_args)
+            .await
+            .map_err(|e| format!("verify read @ {offset:#x}: {e}"))?;
+        match reply {
+            IpcValue::Ok(_) => {}
+            other => return Err(format!("verify read @ {offset:#x} unexpected reply: {other:?}")),
+        }
+        if writeback.len() != chunk_len {
+            return Err(format!(
+                "verify @ {offset:#x}: short read ({} of {})",
+                writeback.len(),
+                chunk_len
+            ));
+        }
+        if writeback != data[offset..end] {
+            let want = &data[offset..end];
+            let first_diff = writeback
+                .iter()
+                .zip(want.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            let mismatches = writeback
+                .iter()
+                .zip(want.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+
+            // Hex dump head + tail to see the corruption pattern.
+            let dump = |label: &str, base: usize| {
+                let hi = (base + 32).min(want.len());
+                let w: Vec<String> = want[base..hi].iter().map(|b| format!("{b:02x}")).collect();
+                let g: Vec<String> = writeback[base..hi]
+                    .iter()
+                    .map(|b| format!("{b:02x}")).collect();
+                eprintln!(
+                    "[flash]   {partition_name} {label} @{:#06x}",
+                    offset + base
+                );
+                eprintln!("[flash]     want: {}", w.join(" "));
+                eprintln!("[flash]      got: {}", g.join(" "));
+            };
+            dump("head", 0);
+            if first_diff > 32 {
+                dump("first-diff", first_diff.saturating_sub(8));
+            }
+
+            // Common corruption patterns worth checking explicitly.
+            // Stride-2: every other byte got dropped.
+            let stride2 = (0..writeback.len().min(want.len() / 2))
+                .filter(|i| writeback[*i] == want[i * 2])
+                .count();
+            // Off-by-one shift.
+            let shift1 = (0..writeback.len().saturating_sub(1).min(want.len()))
+                .filter(|i| writeback[*i] == want.get(i + 1).copied().unwrap_or(0))
+                .count();
+            // All-zero / all-0xFF readback.
+            let all_zero = writeback.iter().all(|&b| b == 0);
+            let all_ff = writeback.iter().all(|&b| b == 0xFF);
+            eprintln!(
+                "[flash]   pattern: stride2={stride2}/{} shift1={shift1}/{} all_zero={all_zero} all_ff={all_ff}",
+                want.len() / 2,
+                want.len() - 1,
+            );
+
+            return Err(format!(
+                "verify mismatch @ {:#x}: {mismatches}/{chunk_len} bytes differ, first at +{first_diff}",
+                offset + first_diff,
+            ));
+        }
+        offset = end;
+    }
+
+    eprintln!(
+        "[flash]   {partition_name:?} verified ({} bytes round-tripped)",
+        data.len()
+    );
+    drop(partition);
+    Ok(())
+}
+
+/// Extract a named u64 field from a decoded `Geometry` struct.
+fn geometry_field(v: &ipc_runtime::IpcValue, name: &str) -> Option<u64> {
+    let ipc_runtime::IpcValue::Struct(fields) = v else {
+        return None;
+    };
+    match fields.get(name)? {
+        ipc_runtime::IpcValue::U32(n) => Some(*n as u64),
+        ipc_runtime::IpcValue::U64(n) => Some(*n),
+        _ => None,
+    }
 }

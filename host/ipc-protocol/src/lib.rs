@@ -95,6 +95,21 @@ pub struct PreparedCall {
     pub result_rx: oneshot::Receiver<ResolvedResponse>,
 }
 
+/// Maximum number of `RequestCorrupted`-triggered retransmits before a
+/// pending call is given up on. Three corruption events in a row means
+/// the link is degraded enough that the timeout path is a better signal
+/// than an infinite loop.
+const MAX_RETRANSMITS: u8 = 3;
+
+/// Pending-map entry. Retains the encoded frame bytes so a transport-
+/// signaled retransmit (`TunnelErrorCode::RequestCorrupted`) can re-push
+/// them without the caller having to re-encode.
+struct PendingEntry {
+    tx: oneshot::Sender<ResolvedResponse>,
+    frame_bytes: Vec<u8>,
+    retransmits: u8,
+}
+
 /// Sans-io IPC protocol handler. Owns the frame encoder (sequence
 /// numbers) and the pending-request map.
 ///
@@ -103,7 +118,7 @@ pub struct PreparedCall {
 /// / `call`).
 pub struct IpcProtocol {
     writer: Mutex<FrameWriter>,
-    pending: Mutex<HashMap<u16, oneshot::Sender<ResolvedResponse>>>,
+    pending: Mutex<HashMap<u16, PendingEntry>>,
     /// Set once the transport is gone. New calls return `TransportClosed`
     /// immediately instead of registering a pending request that will
     /// never be resolved.
@@ -145,7 +160,11 @@ impl IpcProtocol {
         }
         let (tx, rx) = oneshot::channel();
 
-        let mut buf = [0u8; 4096];
+        // Must fit the largest wire frame: header + fixed fields + 256 args
+        // + lease descriptors + 8192 bytes of lease payload. `MAX_DECODED_FRAME`
+        // is the single source of truth for that upper bound. Heap-allocated
+        // so we don't park ~8 KB on the async task's stack.
+        let mut buf = vec![0u8; rcard_usb_proto::MAX_DECODED_FRAME];
         let (seq, n) = {
             let mut writer = self.writer.lock().await;
             let seq = writer.current_seq();
@@ -155,11 +174,21 @@ impl IpcProtocol {
             (seq, n)
         };
 
-        // Register pending BEFORE sending to avoid race.
-        self.pending.lock().await.insert(seq, tx);
+        // Register pending BEFORE sending to avoid race. Retain the
+        // encoded bytes so a `RequestCorrupted` NACK can retransmit
+        // without re-encoding.
+        let frame_bytes = buf[..n].to_vec();
+        self.pending.lock().await.insert(
+            seq,
+            PendingEntry {
+                tx,
+                frame_bytes: frame_bytes.clone(),
+                retransmits: 0,
+            },
+        );
 
         Ok(PreparedCall {
-            frame_bytes: buf[..n].to_vec(),
+            frame_bytes,
             seq,
             result_rx: rx,
         })
@@ -197,6 +226,17 @@ impl IpcProtocol {
             }
         };
 
+        // Retransmit-exhausted pendings are fulfilled with RequestCorrupted
+        // by `retransmit_pending` — translate that to a typed error here so
+        // the caller sees a single, actionable failure rather than a raw
+        // tunnel-level code.
+        if matches!(
+            response,
+            ResolvedResponse::TunnelError(TunnelErrorCode::RequestCorrupted)
+        ) {
+            return Err(IpcError::TunnelError(TunnelErrorCode::RequestCorrupted));
+        }
+
         match response {
             ResolvedResponse::Reply(result) => Ok(result),
             ResolvedResponse::TunnelError(code) => Err(IpcError::TunnelError(code)),
@@ -209,11 +249,56 @@ impl IpcProtocol {
     /// fulfilled. If not (e.g. unsolicited control events), returns
     /// `false` so the transport can dispatch the frame elsewhere.
     pub async fn resolve(&self, seq: u16, response: ResolvedResponse) -> bool {
-        if let Some(tx) = self.pending.lock().await.remove(&seq) {
-            let _ = tx.send(response);
+        if let Some(entry) = self.pending.lock().await.remove(&seq) {
+            let _ = entry.tx.send(response);
             true
         } else {
             false
+        }
+    }
+
+    /// Called by the transport's reader task when the device signals
+    /// `TunnelErrorCode::RequestCorrupted` — the firmware lost a
+    /// host→device packet to per-packet CRC and cannot reconstruct the
+    /// seq, so every still-pending request is retransmitted via `sender`.
+    ///
+    /// Each retransmit increments a per-entry counter; once any entry has
+    /// been retransmitted `MAX_RETRANSMITS` times, it's fulfilled with
+    /// `RequestCorrupted` so the caller sees a typed failure rather than
+    /// looping forever on a degraded link.
+    pub async fn retransmit_pending(&self, sender: &Arc<dyn FrameSender>) {
+        // Collect frame bytes to resend and exhausted senders to notify,
+        // without holding the pending lock across the awaits on
+        // `send_frame`.
+        let (to_resend, exhausted) = {
+            let mut pending = self.pending.lock().await;
+            let mut to_resend: Vec<Vec<u8>> = Vec::new();
+            let mut exhausted: Vec<oneshot::Sender<ResolvedResponse>> = Vec::new();
+            let seqs: Vec<u16> = pending.keys().copied().collect();
+            for seq in seqs {
+                let entry = pending.get_mut(&seq).expect("seq just enumerated");
+                if entry.retransmits >= MAX_RETRANSMITS {
+                    let removed = pending.remove(&seq).expect("seq just enumerated");
+                    exhausted.push(removed.tx);
+                } else {
+                    entry.retransmits += 1;
+                    to_resend.push(entry.frame_bytes.clone());
+                }
+            }
+            (to_resend, exhausted)
+        };
+
+        for tx in exhausted {
+            let _ = tx.send(ResolvedResponse::TunnelError(
+                TunnelErrorCode::RequestCorrupted,
+            ));
+        }
+
+        for bytes in to_resend {
+            // Best-effort: a failed send here will either be caught by the
+            // caller's timeout, or by the next `RequestCorrupted` signal if
+            // the bus is merely flaky.
+            let _ = sender.send_frame(bytes).await;
         }
     }
 }

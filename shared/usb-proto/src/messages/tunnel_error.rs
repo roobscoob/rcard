@@ -23,6 +23,12 @@ pub enum TunnelErrorCode {
     /// normal operation, but a retrying host can see it. Safe to retry
     /// after the previous reply is delivered.
     Busy = 0x05,
+    /// The per-packet CRC on a host→device packet failed. The request
+    /// frame cannot be reconstructed; the host should retransmit every
+    /// still-pending request. The `seq` in the carrying frame header is
+    /// meaningless (set to `0xFFFF` by the firmware) because the corrupt
+    /// packet likely contained the seq.
+    RequestCorrupted = 0x06,
     /// Unspecified internal error in the tunnel sysmodule.
     Internal = 0xFF,
 }
@@ -35,6 +41,7 @@ impl TunnelErrorCode {
             0x03 => Self::BadRequest,
             0x04 => Self::NoHostForwarding,
             0x05 => Self::Busy,
+            0x06 => Self::RequestCorrupted,
             _ => Self::Internal,
         }
     }

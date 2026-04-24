@@ -639,8 +639,9 @@ pub fn build(
 
     emit(BuildEvent::Build(BuildState::Packing));
 
-    let final_bin = crate::link::link_image(&artifacts, &config, &layout, &img_dir, emit)
-        .map_err(BuildError::Link)?;
+    let (final_bin, place_layouts) =
+        crate::link::link_image(&artifacts, &config, &layout, &img_dir, emit)
+            .map_err(BuildError::Link)?;
 
     let bootloader_size = if let Some(ref bl_art) = bl_artifact {
         crate::link::measure_flat_binary_size(bl_art).map_err(BuildError::Link)?
@@ -678,6 +679,7 @@ pub fn build(
         &layout,
         &artifacts,
         &final_bin,
+        &place_layouts,
         bootloader_size,
         Some(&log_metadata_path),
         Some(&ipc_metadata_path),
@@ -696,24 +698,6 @@ pub fn build(
 }
 
 // ── Memory event helpers ──────────────────────────────────────────────
-
-/// Find the place name from `config.places` that contains the given CPU address.
-fn find_place_name(config: &AppConfig, addr: u64) -> Option<String> {
-    for (name, place) in &config.places {
-        if place.unmapped || place.mappings.is_empty() {
-            continue;
-        }
-        let offset = place.offset.unwrap_or(0);
-        for mapping in &place.mappings {
-            let start = mapping.address + offset;
-            let end = start + place.size;
-            if addr >= start && addr < end {
-                return Some(name.clone());
-            }
-        }
-    }
-    None
-}
 
 /// Look up the `RegionRequest` for a given (owner, region) pair from the config.
 fn find_region_request<'a>(
@@ -759,8 +743,8 @@ pub fn emit_memory_allocations(
         if alloc.size == 0 {
             continue;
         }
-        let actual_place =
-            find_place_name(config, alloc.base).unwrap_or_else(|| "unknown".into());
+        let actual_place = crate::layout::find_place_name(config, alloc.base)
+            .unwrap_or_else(|| "unknown".into());
 
         let request = if let Some(req) = find_region_request(config, owner, region) {
             AllocationRequest {

@@ -36,6 +36,8 @@ pub mod wire;
     Debug, Copy, Clone,
     zerocopy::TryFromBytes, zerocopy::IntoBytes,
     zerocopy::KnownLayout, zerocopy::Immutable,
+    serde::Serialize, serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum Error {

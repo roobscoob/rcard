@@ -24,14 +24,25 @@ pub fn encode_args(
     schemas: &[(&str, &OwnedNamedType)],
     value: &IpcValue,
 ) -> Result<Vec<u8>, EncodeError> {
-    // The user passes an IpcValue::Struct with field names matching
-    // the method's parameter names. We extract each field in schema
-    // order, resolve enums, and serialize as a postcard tuple.
+    encode_args_with_handle(schemas, None, value)
+}
+
+/// Like `encode_args`, but prepends a `RawHandle` (u64) as the first
+/// tuple element when the method is `Message` or `Destructor`. Matches
+/// the server-side deserialize tuple shape `(RawHandle, arg1, arg2...)`.
+pub fn encode_args_with_handle(
+    schemas: &[(&str, &OwnedNamedType)],
+    handle: Option<u64>,
+    value: &IpcValue,
+) -> Result<Vec<u8>, EncodeError> {
     let IpcValue::Struct(fields) = value else {
         return Err(EncodeError::ExpectedStruct);
     };
 
-    let mut resolved_items = Vec::with_capacity(schemas.len());
+    let mut resolved_items = Vec::with_capacity(schemas.len() + 1);
+    if let Some(h) = handle {
+        resolved_items.push(IpcValue::U64(h));
+    }
     for (param_name, param_schema) in schemas {
         let field_value = fields
             .get(*param_name)
@@ -39,7 +50,6 @@ pub fn encode_args(
         resolved_items.push(resolve_enums(param_schema, field_value)?);
     }
 
-    // Serialize as a tuple — matches the firmware's tuple encoding.
     let tuple = IpcValue::Tuple(resolved_items);
     postcard::to_allocvec(&tuple).map_err(|e| EncodeError::Postcard(e.to_string()))
 }

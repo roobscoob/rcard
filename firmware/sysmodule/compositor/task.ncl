@@ -9,9 +9,9 @@ fun ctx => {
   ],
   uses_notifications = ["present"],
   regions = {
-    code          = { place = ctx.places.image },
-    stack         = { place = ctx.places.task_ram, size = lib.kiB 8 },
-    data          = { place = ctx.places.task_ram },
-    frame_buffers = { place = ctx.places.framebuf, size = lib.kiB 512, align = 32 },
+    code          = { place = ctx.places.bulk },
+    stack         = { place = ctx.places.fast, size = lib.kiB 8 },
+    data          = { place = ctx.places.fast },
+    frame_buffers = { place = ctx.places.psram, size = lib.kiB 512, align = 32 },
   },
 }

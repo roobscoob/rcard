@@ -37,11 +37,15 @@ pub fn gen_cloneable_impl(
     quote! {
         impl<S: #server_trait_name> ipc::Cloneable for #handle_name<S> {
             fn clone_for(&self, new_owner: ipc::kern::TaskId) -> core::result::Result<ipc::DynHandle, ipc::CloneError> {
-                let mut argbuffer = [0u8; ipc::RawHandle::SIZE + core::mem::size_of::<u16>()];
-                let mut n = 0usize;
-                n += ipc::wire::write(&mut argbuffer[n..], &self.handle.get());
                 let owner_idx = new_owner.task_index();
-                n += ipc::wire::write(&mut argbuffer[n..], &owner_idx);
+                let mut argbuffer = [0u8; ipc::RawHandle::SIZE + 2 + 3];
+                let n = match ipc::__postcard::to_slice(
+                    &(self.handle.get(), owner_idx),
+                    &mut argbuffer,
+                ) {
+                    Ok(s) => s.len(),
+                    Err(_) => #_p!("ipc: clone arg encode failed"),
+                };
                 let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
                     unsafe { core::mem::MaybeUninit::uninit().assume_init() };
                 let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
@@ -65,13 +69,17 @@ pub fn gen_cloneable_impl(
                 if len == 0 { #_p!("ipc: empty clone reply"); }
                 let new_handle = match retbuffer[0] {
                     0u8 => {
-                        let Some((h, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[1..len]) else {
+                        let Ok((h, _)) =
+                            ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[1..len])
+                        else {
                             #_p!("ipc: malformed clone reply");
                         };
                         h
                     }
                     1u8 => {
-                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                        let Ok((err, _)) =
+                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
+                        else {
                             #_p!("ipc: malformed clone error reply");
                         };
                         match err {

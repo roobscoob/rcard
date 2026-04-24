@@ -13,6 +13,8 @@ pub enum UsbError {
     LogMetadata,
     /// Value decoder error in log payload — entry skipped.
     LogDecode,
+    /// Per-packet CRC16 check failed — buffer discarded.
+    CrcMismatch,
 }
 
 impl fmt::Display for UsbError {
@@ -25,6 +27,7 @@ impl fmt::Display for UsbError {
             }
             Self::LogMetadata => write!(f, "log metadata deserialization failed"),
             Self::LogDecode => write!(f, "log value decode error"),
+            Self::CrcMismatch => write!(f, "per-packet CRC16 check failed"),
         }
     }
 }

@@ -30,8 +30,9 @@ pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream
                     Ok(__decoded)
                 }
                 1u8 => {
-                    __off += 1;
-                    let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[__off..len]) else {
+                    let Ok((err, _)) =
+                        ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
+                    else {
                         #_p!(
                             "ipc: server {} sent malformed error reply ({} bytes received)",
                             #server_expr, len,
@@ -53,7 +54,9 @@ pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream
             match retbuffer[0] {
                 0u8 => Ok(()),
                 1u8 => {
-                    let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                    let Ok((err, _)) =
+                        ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
+                    else {
                         #_p!(
                             "ipc: server {} sent malformed error reply ({} bytes received)",
                             #server_expr, len,
@@ -95,13 +98,17 @@ pub fn gen_ctor_reply(
                 if len == 0 { #_p!("ipc: server {} sent empty ctor reply", server.get()); }
                 match retbuffer[0] {
                     0u8 => {
-                        let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[1..len]) else {
+                        let Ok((handle, _)) =
+                            ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[1..len])
+                        else {
                             #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
                         };
                         Ok(#make_self)
                     }
                     1u8 => {
-                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                        let Ok((err, _)) =
+                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
+                        else {
                             #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
                         };
                         Err(#err_type::from_wire(err))
@@ -119,13 +126,17 @@ pub fn gen_ctor_reply(
                         if len < 2 { #_p!("ipc: server {} sent truncated ctor reply", server.get()); }
                         match retbuffer[1] {
                             0u8 => {
-                                let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[2..len]) else {
+                                let Ok((handle, _)) =
+                                    ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[2..len])
+                                else {
                                     #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
                                 };
                                 Ok(Ok(#make_self))
                             }
                             1u8 => {
-                                let Some((e, _)) = ipc::wire::read::<#error_type>(&retbuffer[2..len]) else {
+                                let Ok((e, _)) =
+                                    ipc::__postcard::take_from_bytes::<#error_type>(&retbuffer[2..len])
+                                else {
                                     #_p!("ipc: server {} sent malformed ctor domain error ({} bytes)", server.get(), len);
                                 };
                                 Ok(Err(e))
@@ -134,7 +145,9 @@ pub fn gen_ctor_reply(
                         }
                     }
                     1u8 => {
-                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                        let Ok((err, _)) =
+                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
+                        else {
                             #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
                         };
                         Err(#err_type::from_wire(err))
@@ -152,7 +165,9 @@ pub fn gen_ctor_reply(
                         if len < 2 { #_p!("ipc: server {} sent truncated ctor reply", server.get()); }
                         match retbuffer[1] {
                             0u8 => {
-                                let Some((handle, _)) = ipc::wire::read::<ipc::RawHandle>(&retbuffer[2..len]) else {
+                                let Ok((handle, _)) =
+                                    ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[2..len])
+                                else {
                                     #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
                                 };
                                 Ok(Some(#make_self))
@@ -162,7 +177,9 @@ pub fn gen_ctor_reply(
                         }
                     }
                     1u8 => {
-                        let Some((err, _)) = ipc::wire::read::<ipc::Error>(&retbuffer[1..len]) else {
+                        let Ok((err, _)) =
+                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
+                        else {
                             #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
                         };
                         Err(#err_type::from_wire(err))
