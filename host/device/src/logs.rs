@@ -10,12 +10,17 @@ pub struct Log {
     pub adapter: AdapterId,
     pub contents: LogContents,
     /// Host wall-clock at which the *first byte* of this log was
-    /// observed on the adapter's wire. Used by the host to order logs
-    /// from multiple adapters into a single coherent stream — arrival
-    /// time at the main-thread event handler is *not* sufficient,
-    /// since different adapters have different decode latencies and
-    /// may be gated behind discovery probes.
+    /// observed on the adapter's wire. Used as a fallback ordering
+    /// key when `device_tick` is unavailable (e.g. early boot text
+    /// before the kernel timer starts).
     pub received_at: Instant,
+    /// Device-side kernel tick at which this log was produced. When
+    /// present, used to order logs from multiple adapters into a
+    /// single coherent stream — immune to USB-serial buffering jitter
+    /// that makes `received_at` unreliable for cross-adapter ordering.
+    /// Populated from `LogMetadata.timestamp` (structured logs) or
+    /// parsed from the `T<hex>` prefix (USART1 text lines).
+    pub device_tick: Option<u64>,
 }
 
 /// The content of a log event.

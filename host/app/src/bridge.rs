@@ -73,6 +73,13 @@ pub enum Command {
     /// USART1 wire that now has a ready listener. See the `usart1_settling`
     /// counter in `run()` for the transition logic.
     ProbeMoshiMoshi,
+    /// IPC partition writes finished successfully — remove from pending_flash.
+    FlashComplete { device_id: DeviceId },
+    /// IPC partition writes (or pre-IPC setup) failed — remove from pending_flash
+    /// and surface the error in the UI.
+    FlashFailed { device_id: DeviceId, message: String },
+    /// IPC flash phase progress — forwarded as Event::FlashProgress.
+    FlashPhaseUpdate { device_id: DeviceId, phase: FlashPhase },
 }
 
 // ── Events (bridge → GUI) ──────────────────────────────────────────────
@@ -248,26 +255,52 @@ pub enum Event {
 }
 
 /// Phase of a flash operation, driven by the bridge.
+///
+/// Step indices for `Failed::at_step`:
+///   0 = Resetting, 1 = WritingStub, 2 = VerifyingStub, 3 = BootingStub,
+///   4 = Erasing, 5 = Programming, 6 = Verifying
 pub enum FlashPhase {
-    /// Attempting to reset the device via SifliDebug.
+    /// Step 0: Attempting to reset the device via SifliDebug.
     Resetting,
-    /// Auto-reset failed — asking the user to reset manually.
+    /// Step 0: Auto-reset failed — asking the user to reset manually.
     WaitingForReset,
-    /// Writing stub firmware to RAM.
-    Writing {
+    /// Step 1: Writing stub firmware to RAM.
+    WritingStub {
         bytes_written: u32,
         bytes_total: u32,
     },
-    /// Stub loaded, device is booting.
-    Booting,
-    /// Flash finished successfully.
+    /// Step 2: Verifying stub was written correctly.
+    VerifyingStub {
+        bytes_verified: u32,
+        bytes_total: u32,
+    },
+    /// Step 3: Stub loaded, device is booting.
+    BootingStub,
+    /// Step 3: Stub is running and USB-enumerated.
+    StubBooted,
+    /// Step 4: Erasing flash partition(s).
+    Erasing,
+    /// Step 5: Programming firmware to flash.
+    Programming {
+        bytes_written: u32,
+        bytes_total: u32,
+    },
+    /// Step 6: Verifying firmware in flash.
+    Verifying {
+        bytes_verified: u32,
+        bytes_total: u32,
+    },
+    /// Full flash finished successfully.
     Done,
     /// Flash failed at the step that was in progress.
-    ///
-    /// `at_step` is the step index (0 = reset, 1 = writing, 2 = booting) so
-    /// the modal can render a red X next to the failed task and leave any
-    /// subsequent tasks as "not started".
     Failed { at_step: usize, message: String },
+}
+
+const MAX_FLASH_ATTEMPTS: u32 = 3;
+
+struct PendingFlash {
+    tfw_path: PathBuf,
+    attempts: u32,
 }
 
 // ── Persistent device registry helper ──────────────────────────────────
@@ -357,8 +390,9 @@ pub async fn run(
     let next_device_id: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    // Pending flash: device_id → tfw_path. Checked by USART1 loop after bootrom entry.
-    let pending_flash: Arc<Mutex<HashMap<DeviceId, PathBuf>>> =
+    // Pending flash: device_id → flash state. Checked by USART1 loop after bootrom
+    // entry. Entry persists until the full flash succeeds or the retry limit is hit.
+    let pending_flash: Arc<Mutex<HashMap<DeviceId, PendingFlash>>> =
         Arc::new(Mutex::new(HashMap::new()));
     // Notified when a new flash request lands — wakes the USART1 loop
     // so it can try to enter debug immediately (without waiting for reset).
@@ -366,8 +400,10 @@ pub async fn run(
     // Oneshot receivers waiting for a specific ChipUid to re-enumerate
     // over USB after a stub flash. The USB supervisor fires these when
     // it attaches a fob with the matching serial descriptor.
-    let flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>> =
+    let flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let flash_generation: Arc<std::sync::atomic::AtomicU64> =
+        Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Spawn the native-USB supervisor. Owns attach/detach lifecycle for
     // all rcard fobs enumerated over native USB. Uses polling today
@@ -509,7 +545,7 @@ pub async fn run(
                 firmware_id: _,
                 tfw_path,
             } => {
-                pending_flash.lock().unwrap().insert(device_id, tfw_path);
+                pending_flash.lock().unwrap().insert(device_id, PendingFlash { tfw_path, attempts: 0 });
                 flash_notify.notify_waiters();
                 let _ = event_tx.send(Event::FlashProgress {
                     device_id,
@@ -551,6 +587,7 @@ pub async fn run(
                     pending_flash.clone(),
                     flash_notify.clone(),
                     flash_wait_usb.clone(),
+                    flash_generation.clone(),
                     devices.clone(),
                     usart1_settling.clone(),
                     cmd_tx.clone(),
@@ -894,6 +931,32 @@ pub async fn run(
                 });
             }
 
+            Command::FlashComplete { device_id } => {
+                pending_flash.lock().unwrap().remove(&device_id);
+                let _ = event_tx.send(Event::FlashProgress {
+                    device_id,
+                    phase: FlashPhase::Done,
+                });
+                ctx.request_repaint();
+            }
+
+            Command::FlashFailed { device_id, message } => {
+                pending_flash.lock().unwrap().remove(&device_id);
+                let _ = event_tx.send(Event::FlashProgress {
+                    device_id,
+                    phase: FlashPhase::Failed { at_step: 4, message },
+                });
+                ctx.request_repaint();
+            }
+
+            Command::FlashPhaseUpdate { device_id, phase } => {
+                let _ = event_tx.send(Event::FlashProgress {
+                    device_id,
+                    phase,
+                });
+                ctx.request_repaint();
+            }
+
             Command::ProbeMoshiMoshi => {
                 // Fire MoshiMoshi on every registered USART2 serial
                 // adapter, regardless of whether its device has been
@@ -946,9 +1009,10 @@ async fn serial_connect_loop(
     cancel: tokio_util::sync::CancellationToken,
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
-    pending_flash: Arc<Mutex<HashMap<DeviceId, PathBuf>>>,
+    pending_flash: Arc<Mutex<HashMap<DeviceId, PendingFlash>>>,
     flash_notify: Arc<tokio::sync::Notify>,
-    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
+    flash_generation: Arc<std::sync::atomic::AtomicU64>,
     bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
     // USART1-specific settling counter + cmd_tx for self-enqueueing
     // the batched ProbeMoshiMoshi. USART2 doesn't touch these.
@@ -972,6 +1036,7 @@ async fn serial_connect_loop(
                 pending_flash,
                 flash_notify,
                 flash_wait_usb,
+                flash_generation,
                 usart1_settling,
                 cmd_tx,
             )
@@ -1027,9 +1092,10 @@ async fn usart1_connect_loop(
     cancel: tokio_util::sync::CancellationToken,
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
-    pending_flash: Arc<Mutex<HashMap<DeviceId, PathBuf>>>,
+    pending_flash: Arc<Mutex<HashMap<DeviceId, PendingFlash>>>,
     flash_notify: Arc<tokio::sync::Notify>,
-    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
+    flash_generation: Arc<std::sync::atomic::AtomicU64>,
     usart1_settling: Arc<AtomicUsize>,
     cmd_tx: mpsc::UnboundedSender<Command>,
 ) {
@@ -1233,9 +1299,10 @@ async fn usart1_connect_loop(
                         break;
                     };
 
-                    let line = raw_line.trim_end_matches('\r').to_string();
+                    let trimmed = raw_line.trim_end_matches('\r');
+                    let (device_tick, line) = parse_tick_prefix(trimmed);
 
-                    // Forward the raw line to the serial adapter terminal.
+                    // Forward the stripped line to the serial adapter terminal.
                     let _ = tx.send(Event::SerialRawLine {
                         index,
                         line: line.clone(),
@@ -1355,9 +1422,43 @@ async fn usart1_connect_loop(
                                     ctx.request_repaint();
 
                                     // Check for pending flash on this device.
-                                    let flash_tfw = pending_flash.lock().unwrap().remove(&persistent_id);
+                                    let flash_tfw = {
+                                        let mut map = pending_flash.lock().unwrap();
+                                        if let Some(pf) = map.get_mut(&persistent_id) {
+                                            pf.attempts += 1;
+                                            if pf.attempts > MAX_FLASH_ATTEMPTS {
+                                                let pf = map.remove(&persistent_id).unwrap();
+                                                eprintln!(
+                                                    "[usart1:{port}] flash retry limit ({MAX_FLASH_ATTEMPTS}) exceeded"
+                                                );
+                                                let _ = tx.send(Event::FlashProgress {
+                                                    device_id: persistent_id,
+                                                    phase: FlashPhase::Failed {
+                                                        at_step: 0,
+                                                        message: format!(
+                                                            "device reset {} times, giving up",
+                                                            pf.attempts - 1,
+                                                        ),
+                                                    },
+                                                });
+                                                ctx.request_repaint();
+                                                None
+                                            } else {
+                                                Some(pf.tfw_path.clone())
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    };
                                     if let Some(_tfw_path) = flash_tfw {
-                                        eprintln!("[usart1:{port}] pending flash — writing stub");
+                                        let attempt = pending_flash.lock().unwrap()
+                                            .get(&persistent_id).map(|pf| pf.attempts).unwrap_or(1);
+                                        eprintln!("[usart1:{port}] pending flash — writing stub (attempt {attempt}/{MAX_FLASH_ATTEMPTS})");
+                                        let _ = tx.send(Event::FlashProgress {
+                                            device_id: persistent_id,
+                                            phase: FlashPhase::Resetting,
+                                        });
+                                        ctx.request_repaint();
 
                                         match flash_stub_via_debug(&session, &tx, persistent_id, &ctx).await {
                                             Ok(()) => {
@@ -1369,8 +1470,9 @@ async fn usart1_connect_loop(
                                                 // USB presence, and its attach event means the
                                                 // adapter is fully claimed and IPC is live, not
                                                 // just that the OS saw the descriptor.
+                                                let generation = flash_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                 let (wait_tx, wait_rx) = tokio::sync::oneshot::channel::<()>();
-                                                flash_wait_usb.lock().unwrap().insert(uid, wait_tx);
+                                                flash_wait_usb.lock().unwrap().insert(uid, (generation, wait_tx));
                                                 let flash_tx = tx.clone();
                                                 let flash_ctx = ctx.clone();
                                                 let flash_port = port.clone();
@@ -1383,24 +1485,31 @@ async fn usart1_connect_loop(
                                                     .await;
                                                     match result {
                                                         Ok(Ok(())) => {
-                                                            eprintln!("[usart1:{flash_port}] stub USB up, flash done");
+                                                            eprintln!("[usart1:{flash_port}] stub USB up");
                                                             let _ = flash_tx.send(Event::FlashProgress {
                                                                 device_id: persistent_id,
-                                                                phase: FlashPhase::Done,
+                                                                phase: FlashPhase::StubBooted,
                                                             });
                                                         }
                                                         _ => {
-                                                            // Drop the waiter so a late attach
-                                                            // doesn't resolve against a stale entry.
-                                                            flash_wait_usb_cleanup.lock().unwrap().remove(&uid);
-                                                            eprintln!("[usart1:{flash_port}] stub USB never appeared");
-                                                            let _ = flash_tx.send(Event::FlashProgress {
-                                                                device_id: persistent_id,
-                                                                phase: FlashPhase::Failed {
-                                                                    at_step: 2,
-                                                                    message: "stub USB device did not appear within 30s".into(),
-                                                                },
-                                                            });
+                                                            let mut map = flash_wait_usb_cleanup.lock().unwrap();
+                                                            let superseded = !matches!(map.get(&uid), Some((g, _)) if *g == generation);
+                                                            if !superseded {
+                                                                map.remove(&uid);
+                                                            }
+                                                            drop(map);
+                                                            if superseded {
+                                                                eprintln!("[usart1:{flash_port}] superseded by newer flash, ignoring");
+                                                            } else {
+                                                                eprintln!("[usart1:{flash_port}] stub USB never appeared");
+                                                                let _ = flash_tx.send(Event::FlashProgress {
+                                                                    device_id: persistent_id,
+                                                                    phase: FlashPhase::Failed {
+                                                                        at_step: 3,
+                                                                        message: "stub USB device did not appear within 30s".into(),
+                                                                    },
+                                                                });
+                                                            }
                                                         }
                                                     }
                                                     flash_ctx.request_repaint();
@@ -1526,10 +1635,6 @@ async fn usart1_connect_loop(
                         }
                     }
 
-                    // Forward all lines as text logs. The received_at is
-                    // the first-byte-of-line timestamp captured by the
-                    // parallel reader task, so ordering in the device
-                    // viewer reflects real arrival time.
                     if let Some(dev_id) = current_device {
                         let _ = tx.send(Event::Log {
                             device: dev_id,
@@ -1537,6 +1642,7 @@ async fn usart1_connect_loop(
                                 adapter: adapter_id,
                                 contents: device::logs::LogContents::Text(line),
                                 received_at: line_received_at,
+                                device_tick,
                             },
                         });
                         ctx.request_repaint();
@@ -1875,7 +1981,7 @@ async fn write_chunk_with_progress(
         let bytes_written = completed_payload_before + payload_this_chunk;
         let _ = tx.send(Event::FlashProgress {
             device_id,
-            phase: FlashPhase::Writing {
+            phase: FlashPhase::WritingStub {
                 bytes_written,
                 bytes_total,
             },
@@ -1976,7 +2082,7 @@ async fn flash_stub_via_debug(
 
     let _ = tx.send(Event::FlashProgress {
         device_id,
-        phase: FlashPhase::Writing {
+        phase: FlashPhase::WritingStub {
             bytes_written: 0,
             bytes_total,
         },
@@ -2020,6 +2126,15 @@ async fn flash_stub_via_debug(
     // 1024-word (4 KiB) chunks to stay well under any per-frame size
     // limit on the SifliDebug protocol.
     eprintln!("[flash] verifying {} write(s)...", writes.len());
+    let mut bytes_verified: u32 = 0;
+    let _ = tx.send(Event::FlashProgress {
+        device_id,
+        phase: FlashPhase::VerifyingStub {
+            bytes_verified: 0,
+            bytes_total,
+        },
+    });
+    ctx.request_repaint();
     for (write_idx, write) in writes.iter().enumerate() {
         const VERIFY_CHUNK_WORDS: usize = 1024;
         let mut word_offset = 0usize;
@@ -2045,7 +2160,6 @@ async fn flash_stub_via_debug(
                         "[flash] VERIFY MISMATCH write {} addr {:#x}: expected {:#010x} got {:#010x}",
                         write_idx, bad_addr, w, g
                     );
-                    // Show a window of context.
                     let lo = i.saturating_sub(4);
                     let hi = (i + 4).min(want.len());
                     for j in lo..hi {
@@ -2063,6 +2177,15 @@ async fn flash_stub_via_debug(
                     ));
                 }
             }
+            bytes_verified += (want.len() * 4) as u32;
+            let _ = tx.send(Event::FlashProgress {
+                device_id,
+                phase: FlashPhase::VerifyingStub {
+                    bytes_verified,
+                    bytes_total,
+                },
+            });
+            ctx.request_repaint();
             word_offset += VERIFY_CHUNK_WORDS;
         }
     }
@@ -2072,7 +2195,7 @@ async fn flash_stub_via_debug(
     // start poking debug registers (SP, PC, resume).
     let _ = tx.send(Event::FlashProgress {
         device_id,
-        phase: FlashPhase::Booting,
+        phase: FlashPhase::BootingStub,
     });
     ctx.request_repaint();
 
@@ -2142,6 +2265,30 @@ async fn flash_stub_via_debug(
 // ── eFuse reader ───────────────────────────────────────────────────────
 
 /// Parse a single ASCII hex digit — returns `None` for any non-hex byte.
+/// Parse the `T<16 hex digits> ` tick prefix emitted by the supervisor.
+/// Returns `(Some(tick), stripped_text)` on success, or `(None, original)` if
+/// the line doesn't carry a tick prefix (e.g. early boot before the kernel
+/// timer starts).
+fn parse_tick_prefix(line: &str) -> (Option<u64>, String) {
+    let bytes = line.as_bytes();
+    // 'T' + 16 hex + ' ' = 18 bytes minimum
+    if bytes.len() >= 18 && bytes[0] == b'T' && bytes[17] == b' ' {
+        let mut tick: u64 = 0;
+        for &b in &bytes[1..17] {
+            let nib = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => return (None, line.to_string()),
+            };
+            tick = (tick << 4) | nib as u64;
+        }
+        (Some(tick), line[18..].to_string())
+    } else {
+        (None, line.to_string())
+    }
+}
+
 fn hex_nibble(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
@@ -2353,7 +2500,7 @@ async fn usb_supervisor_loop(
     bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
-    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
 ) {
     use futures_util::StreamExt;
 
@@ -2450,7 +2597,7 @@ fn handle_usb_attach(
     bridge_devices: &Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
     persistent_devices: &Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: &Arc<AtomicU64>,
-    flash_wait_usb: &Arc<Mutex<HashMap<ChipUid, tokio::sync::oneshot::Sender<()>>>>,
+    flash_wait_usb: &Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
 ) -> Result<UsbEntry, String> {
     // Resolve / mint the persistent DeviceId for this chip UID.
     let device_id = get_or_create_persistent_device(
@@ -2516,8 +2663,8 @@ fn handle_usb_attach(
     // If a USART1 flash handler is waiting for this UID to come up over
     // USB, fire the oneshot. Remove the entry regardless so a late
     // spurious fire doesn't clobber a future flash attempt.
-    if let Some(waiter) = flash_wait_usb.lock().unwrap().remove(&uid) {
-        let _ = waiter.send(());
+    if let Some((_gen, sender)) = flash_wait_usb.lock().unwrap().remove(&uid) {
+        let _ = sender.send(());
     }
 
     // Spawn a task to forward device events for future expansion

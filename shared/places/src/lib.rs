@@ -185,11 +185,10 @@ impl<'a> PlacesImage<'a> {
 
     /// Get partition `i`.
     ///
-    /// # Panics
+    /// # Safety
     ///
-    /// Panics if `i >= partition_count()`.
-    pub fn partition(&self, i: u32) -> Partition {
-        assert!(i < self.partition_count);
+    /// `i` must be less than `partition_count()`.
+    pub unsafe fn partition(&self, i: u32) -> Partition {
         let base = self.tables_offset as usize + i as usize * PARTITION_SIZE;
         Partition {
             name_hash: read_u32(self.data, base),
@@ -202,7 +201,8 @@ impl<'a> PlacesImage<'a> {
     /// Find a partition by name hash.
     pub fn find_partition(&self, hash: u32) -> Option<Partition> {
         for i in 0..self.partition_count {
-            let p = self.partition(i);
+            // SAFETY: i < partition_count.
+            let p = unsafe { self.partition(i) };
             if p.name_hash == hash {
                 return Some(p);
             }
@@ -212,11 +212,10 @@ impl<'a> PlacesImage<'a> {
 
     /// Get segment `i`.
     ///
-    /// # Panics
+    /// # Safety
     ///
-    /// Panics if `i >= segment_count()`.
-    pub fn segment(&self, i: u32) -> Segment<'a> {
-        assert!(i < self.segment_count);
+    /// `i` must be less than `segment_count()`.
+    pub unsafe fn segment(&self, i: u32) -> Segment<'a> {
         let seg_table_base = self.tables_offset as usize
             + self.partition_count as usize * PARTITION_SIZE;
         let base = seg_table_base + i as usize * SEGMENT_SIZE;
@@ -224,7 +223,9 @@ impl<'a> PlacesImage<'a> {
         let file_offset = read_u32(self.data, base + 4);
         let file_size = read_u32(self.data, base + 8);
         let mem_size = read_u32(self.data, base + 12);
-        let data = &self.data[file_offset as usize..file_offset as usize + file_size as usize];
+        let start = file_offset as usize;
+        let end = start + file_size as usize;
+        let data = unsafe { self.data.get_unchecked(start..end) };
         Segment { data, dest, file_offset, file_size, mem_size }
     }
 
@@ -285,7 +286,8 @@ impl<'a> Iterator for SegmentIter<'a> {
         if self.index >= self.image.segment_count {
             return None;
         }
-        let seg = self.image.segment(self.index);
+        // SAFETY: index < segment_count is checked above.
+        let seg = unsafe { self.image.segment(self.index) };
         self.index += 1;
         Some(seg)
     }
@@ -310,7 +312,8 @@ impl<'a> Iterator for PartitionIter<'a> {
         if self.index >= self.image.partition_count {
             return None;
         }
-        let part = self.image.partition(self.index);
+        // SAFETY: index < partition_count is checked above.
+        let part = unsafe { self.image.partition(self.index) };
         self.index += 1;
         Some(part)
     }
@@ -445,13 +448,18 @@ impl PlacesBuilder {
 
 // ── Byte helpers (little-endian) ─────────────────────────────────────────────
 
+/// # Safety
+/// Caller must ensure `offset + 4 <= data.len()`. All call sites are
+/// guarded by the bounds checks in `PlacesImage::parse`.
 fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
+    unsafe {
+        u32::from_le_bytes([
+            *data.get_unchecked(offset),
+            *data.get_unchecked(offset + 1),
+            *data.get_unchecked(offset + 2),
+            *data.get_unchecked(offset + 3),
+        ])
+    }
 }
 
 #[cfg(feature = "std")]
@@ -486,12 +494,12 @@ mod tests {
         assert_eq!(img.partition_count(), 2);
         assert_eq!(img.segment_count(), 2);
 
-        let s0 = img.segment(0);
+        let s0 = unsafe { img.segment(0) };
         assert_eq!(s0.dest(), 0x1200_0000);
         assert_eq!(s0.file_offset(), 0);
         assert_eq!(s0.data(), &xip_bytes[..]);
 
-        let s1 = img.segment(1);
+        let s1 = unsafe { img.segment(1) };
         assert_eq!(s1.dest(), 0x2000_0000);
         assert_eq!(s1.file_offset(), 64);
         assert_eq!(s1.data(), &ram_init[..]);

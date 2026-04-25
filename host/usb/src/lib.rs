@@ -14,8 +14,8 @@ use nusb::transfer::{Bulk, In, Out};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub use ipc::{IpcCallResult, IpcError, IpcProtocol, UsbSender};
 pub use hotplug::{FobEvent, watch_fobs};
+pub use ipc::{IpcCallResult, IpcError, IpcProtocol, UsbSender};
 
 /// Priority of the USB transport relative to other `ipc_protocol::Ipc`
 /// providers — higher wins. USB is preferred over USART2 because it's
@@ -64,11 +64,7 @@ impl Usb {
     /// Connect to the USB device whose string serial descriptor matches
     /// `serial` (case-insensitive). Errors if no such device is present
     /// or if its interfaces can't be claimed.
-    pub fn connect(
-        id: AdapterId,
-        serial: &str,
-        sink: LogSink,
-    ) -> Result<Self, ConnectError> {
+    pub fn connect(id: AdapterId, serial: &str, sink: LogSink) -> Result<Self, ConnectError> {
         let dev_info = nusb::list_devices()
             .wait()
             .map_err(ConnectError::Enumerate)?
@@ -249,8 +245,15 @@ async fn host_reader(
         };
 
         let buf = match completion.status {
-            Ok(()) => completion.buffer,
+            Ok(()) => {
+                eprintln!(
+                    "[usb-reader] IN completion: {} bytes",
+                    completion.buffer.len(),
+                );
+                completion.buffer
+            }
             Err(e) => {
+                eprintln!("[usb-reader] IN transfer error: {e}");
                 sink.error(error::UsbError::Transfer(e));
                 break;
             }
@@ -262,11 +265,37 @@ async fn host_reader(
         // bulk transfer is, by USB definition, a fresh frame.
         match crc::unwrap_frame(&buf[..buf.len()]) {
             Ok(frame_bytes) => {
+                eprintln!("[usb-reader] CRC OK, frame {} bytes", frame_bytes.len(),);
                 reader.push(frame_bytes);
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!(
+                    "[usb-reader] CRC FAILED ({e:?}), raw {} bytes — requesting retransmit",
+                    buf.len(),
+                );
                 sink.error(error::UsbError::CrcMismatch);
                 reader.reset();
+
+                // Ask the device to retransmit the last reply.
+                use rcard_usb_proto::messages::tunnel_error::{TunnelError, TunnelErrorCode};
+                let msg = TunnelError {
+                    code: TunnelErrorCode::ReplyCorrupted,
+                };
+                let mut frame_buf = [0u8; 16];
+                if let Some(n) =
+                    rcard_usb_proto::simple::encode_simple(&msg, &mut frame_buf, 0xFFFF)
+                {
+                    let wrapped = crc::wrap_frame(&frame_buf[..n]);
+                    let _ = sender.send_frame(wrapped).await;
+                    eprintln!("[usb-reader] sent ReplyCorrupted, awaiting retransmit");
+                }
+
+                // Resubmit the IN buffer before looping back — otherwise
+                // the pipeline drains and next_complete panics.
+                let mut buf = buf;
+                buf.clear();
+                endpoint.submit(buf);
+                continue;
             }
         }
 
@@ -278,14 +307,22 @@ async fn host_reader(
                     if let Some(response) = frame.as_ipc_response() {
                         let seq = response.seq;
                         let resolved = if let Some(reply) = response.as_reply() {
+                            eprintln!(
+                                "[usb-reader] IPC reply seq={seq} rc={} return={} wb={}",
+                                reply.rc,
+                                reply.return_value.len(),
+                                reply.lease_writeback.len(),
+                            );
                             ResolvedResponse::Reply(IpcCallResult {
                                 rc: reply.rc,
                                 return_value: reply.return_value.to_vec(),
                                 lease_writeback: reply.lease_writeback.to_vec(),
                             })
                         } else if let Some(err) = response.parse_simple::<TunnelError>() {
+                            eprintln!("[usb-reader] tunnel error seq={seq} code={:?}", err.code,);
                             ResolvedResponse::TunnelError(err.code)
                         } else {
+                            eprintln!("[usb-reader] unexpected frame seq={seq}");
                             ResolvedResponse::UnexpectedFrame
                         };
 
@@ -299,18 +336,28 @@ async fn host_reader(
                         ) {
                             protocol.retransmit_pending(&sender).await;
                         } else {
-                            protocol.resolve(seq, resolved).await;
+                            let matched = protocol.resolve(seq, resolved).await;
+                            if !matched {
+                                eprintln!("[usb-reader] seq={seq} had no pending caller!",);
+                            }
                         }
+                    } else {
+                        eprintln!(
+                            "[usb-reader] non-IPC frame, type={}, size={}",
+                            frame.header.frame_type as u8, size,
+                        );
                     }
 
                     reader.consume(size);
                 }
                 Ok(None) => break,
                 Err(rcard_usb_proto::ReaderError::Oversized { declared_size }) => {
+                    eprintln!("[usb-reader] oversized frame: {declared_size}");
                     sink.error(error::UsbError::FrameOversize { declared_size });
                     reader.skip_frame(declared_size);
                 }
                 Err(e) => {
+                    eprintln!("[usb-reader] bad frame header: {e:?}");
                     sink.error(error::UsbError::BadFrameHeader(e));
                     reader.reset();
                     break;
@@ -333,11 +380,7 @@ async fn host_reader(
 
 /// Find the address of the bulk OUT (`out=true`) or bulk IN endpoint on
 /// a given interface of the device's active configuration.
-fn find_bulk_endpoint_address(
-    dev: &nusb::Device,
-    interface_num: u8,
-    out: bool,
-) -> Option<u8> {
+fn find_bulk_endpoint_address(dev: &nusb::Device, interface_num: u8, out: bool) -> Option<u8> {
     use nusb::descriptors::TransferType;
     use nusb::transfer::Direction;
 

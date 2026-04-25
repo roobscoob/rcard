@@ -26,14 +26,6 @@ fn main() {
     if !json_path.exists() {
         writeln!(out, "pub const PARTITIONS: &[PartitionConfig] = &[];").unwrap();
         writeln!(out, "pub const FILESYSTEMS: &[FilesystemMap] = &[];").unwrap();
-        // Fallback geometry for bare cargo check (no config.json staged).
-        // Real builds always override this via device_geometry from NCL.
-        writeln!(
-            out,
-            "pub const FLASH_GEOMETRY: FlashGeometry = FlashGeometry {{ \
-             erase_size: 4096, program_size: 256, read_size: 1 }};"
-        )
-        .unwrap();
         writeln!(
             out,
             "pub fn is_partition_allowed(_name: &str, _caller: u16) -> bool {{ true }}"
@@ -44,26 +36,6 @@ fn main() {
 
     let data: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
-
-    // Flash geometry — pulled from the NCL `memory.mpi2.geometry` block.
-    // The storage sysmodule hardcodes mpi2 as its backing device (see
-    // `main.rs::main`), so we reach for that entry specifically.
-    let geo = data["device_geometry"]["mpi2"].as_object().unwrap_or_else(|| {
-        panic!(
-            "config.json missing `device_geometry.mpi2`; set `memory.mpi2.geometry` \
-             in the board NCL"
-        )
-    });
-    let erase_size = geo["erase_size"].as_u64().unwrap();
-    let program_size = geo["program_size"].as_u64().unwrap();
-    let read_size = geo["read_size"].as_u64().unwrap();
-    writeln!(
-        out,
-        "pub const FLASH_GEOMETRY: FlashGeometry = FlashGeometry {{ \
-         erase_size: {erase_size}u32, program_size: {program_size}u32, read_size: {read_size}u32 }};"
-    )
-    .unwrap();
-    writeln!(out).unwrap();
 
     // Partitions that back filesystem mounts get PART_MANAGED set —
     // mirrors the flag the host writes into places.bin so the two

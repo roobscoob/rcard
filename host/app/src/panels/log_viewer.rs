@@ -36,6 +36,7 @@ pub fn show(ui: &mut egui::Ui, dev: &DeviceHandle, state: &AppState) {
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .stick_to_bottom(true)
         .column(Column::exact(70.0))  // adapter
+        .column(Column::exact(80.0))  // tick
         .column(Column::exact(80.0))  // source
         .column(Column::exact(70.0))  // level
         .column(Column::remainder()); // message
@@ -43,6 +44,7 @@ pub fn show(ui: &mut egui::Ui, dev: &DeviceHandle, state: &AppState) {
     table
         .header(ROW_HEIGHT, |mut header| {
             header.col(|ui| { ui.colored_label(theme::TEXT_SECONDARY, format!("{} Adapter", icon::PLUG)); });
+            header.col(|ui| { ui.colored_label(theme::TEXT_SECONDARY, format!("{} Tick", icon::CLOCK)); });
             header.col(|ui| { ui.colored_label(theme::TEXT_SECONDARY, format!("{} Source", icon::GEAR)); });
             header.col(|ui| { ui.colored_label(theme::TEXT_SECONDARY, "Level"); });
             header.col(|ui| { ui.colored_label(theme::TEXT_SECONDARY, "Message"); });
@@ -62,6 +64,16 @@ pub fn show(ui: &mut egui::Ui, dev: &DeviceHandle, state: &AppState) {
                         egui::Color32::from_rgb(0x60, 0x65, 0x80),
                         name,
                     );
+                });
+
+                // Tick column.
+                row.col(|ui| {
+                    if let Some(tick) = log.device_tick {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0x60, 0x65, 0x80),
+                            format!("{tick}"),
+                        );
+                    }
                 });
 
                 match &log.contents {

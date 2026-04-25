@@ -92,6 +92,8 @@ fn usart1_write_u32_hex(label: &str, val: u32) {
     usart1_write_str("\r\n");
 }
 
+const TICK_ZERO: &str = "T0000000000000000 ";
+
 fn clock_setup() -> u32 {
     use sifli_pac::hpsys_rcc::vals::SelSys;
 
@@ -100,6 +102,7 @@ fn clock_setup() -> u32 {
     let aon = sifli_pac::HPSYS_AON;
     let pmuc = sifli_pac::PMUC;
 
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: start\r\n");
 
     // 1. Bandgap + PSW
@@ -107,26 +110,31 @@ fn clock_setup() -> u32 {
         w.set_hpbg_en(true);
         w.set_hpbg_vddpsw_en(true);
     });
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: bandgap enabled\r\n");
 
     // 2. DVFS S1 voltages (≤240MHz: ldo=0xD, buck=0xF)
     pmuc.buck_vout().modify(|w| w.set_vout(0xF));
     pmuc.hpsys_vout().modify(|w| w.set_vout(0xD));
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: voltages set\r\n");
 
     // 3. Switch to S-mode LDO, wait 250µs for buck to settle
     cfg.syscr().modify(|w| w.set_ldo_vsel(false));
     cortex_m::asm::delay(12_000); // 250µs @ 48MHz
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: LDO -> S-mode\r\n");
 
     // 4. Start HXT48 crystal, wait for stable
     aon.acr().modify(|w| w.set_hxt48_req(true));
     while !aon.acr().read().hxt48_rdy() {}
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: HXT48 ready\r\n");
 
     // 5. Enable HXT48 -> DLL buffer.
     //    Without this the DLL has no reference and locks to nothing.
     pmuc.hxt_cr1().modify(|w| w.set_buf_dll_en(true));
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: DLL buffer enabled\r\n");
 
     // 6. RAM/ROM timing for 240MHz — must be before the clock switch
@@ -139,6 +147,7 @@ fn clock_setup() -> u32 {
         w.set_rom_rm(3);
         w.set_rom_rme(true);
     });
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: ULPMCR set\r\n");
 
     // 7. Configure DLL1 for 240MHz and wait for lock.
@@ -151,6 +160,7 @@ fn clock_setup() -> u32 {
         w.set_en(true);
     });
     while !rcc.dllcr(0).read().ready() {}
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: DLL1 locked\r\n");
 
     // 8. Set dividers before switching — keeps APB within spec at 240MHz.
@@ -160,6 +170,7 @@ fn clock_setup() -> u32 {
         w.set_pdiv1(1); // >>1 = /2
         w.set_pdiv2(6); // >>6 = /64
     });
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: dividers set\r\n");
 
     // 9. Switch system clock to DLL1
@@ -167,6 +178,7 @@ fn clock_setup() -> u32 {
     cortex_m::asm::dsb();
     cortex_m::asm::isb();
 
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: clock: finalized\r\n");
 
     240_000
@@ -200,6 +212,7 @@ const VECTOR_TABLE_OFFSET_REGISTER: *mut u32 = 0xE000_ED08 as *mut u32;
 
 #[entry]
 fn main() -> ! {
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: Awake\r\n");
 
     // Point the CPU at our vector table (VTOR = SCB + 0x08)
@@ -211,6 +224,7 @@ fn main() -> ! {
         );
     }
 
+    usart1_write_str(TICK_ZERO);
     usart1_write_u32_hex("kernel: Set VTOR to 0x", unsafe {
         core::ptr::read_volatile(VECTOR_TABLE_OFFSET_REGISTER)
     });
@@ -221,6 +235,7 @@ fn main() -> ! {
     let cycles_per_ms = clock_setup();
 
     // kernel time!
+    usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: starting hubris\r\n");
     unsafe { hubris_kern::startup::start_kernel(cycles_per_ms) }
 }

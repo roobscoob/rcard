@@ -53,29 +53,15 @@ pub struct AppConfig {
 
 // -- Memory devices --
 
-/// A physical memory device. Has a size, optional flash geometry, and
-/// zero or more CPU mappings.
+/// A physical memory device. Has a size and zero or more CPU mappings.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct MemoryDevice {
     pub size: u64,
-    /// Full flash/storage geometry (erase/program/read granularities).
-    /// Flows into the storage sysmodule as build-time constants.
-    #[serde(default)]
-    pub geometry: Option<DeviceGeometry>,
     #[serde(default)]
     pub mappings: Vec<Mapping>,
     /// Offset within a parent device (set by lib.partition).
     #[serde(default)]
     pub offset: Option<u64>,
-}
-
-/// Read/program/erase granularities of a flash device. Static hardware
-/// fact — baked at build time into the storage sysmodule.
-#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize)]
-pub struct DeviceGeometry {
-    pub erase_size: u64,
-    pub program_size: u64,
-    pub read_size: u64,
 }
 
 /// A CPU-visible mapping of a memory device.
@@ -98,9 +84,6 @@ pub struct Mapping {
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct Place {
     pub size: u64,
-    /// Inherited from the backing memory device.
-    #[serde(default)]
-    pub geometry: Option<DeviceGeometry>,
     #[serde(default)]
     pub mappings: Vec<Mapping>,
     #[serde(default)]

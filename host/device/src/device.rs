@@ -57,10 +57,12 @@ impl LogSink {
 
     /// Send a structured log entry with an explicit `received_at` stamp.
     pub fn structured_at(&self, entry: LogEntry, received_at: Instant) {
+        let device_tick = Some(entry.timestamp);
         let _ = self.tx.send(DeviceEvent::Log(Log {
             adapter: self.adapter,
             contents: LogContents::Structured(entry),
             received_at,
+            device_tick,
         }));
     }
 
@@ -75,6 +77,7 @@ impl LogSink {
             adapter: self.adapter,
             contents: LogContents::Text(text),
             received_at,
+            device_tick: None,
         }));
     }
 
@@ -89,6 +92,7 @@ impl LogSink {
             adapter: self.adapter,
             contents: LogContents::Auxiliary { name, text },
             received_at,
+            device_tick: None,
         }));
     }
 
@@ -103,6 +107,7 @@ impl LogSink {
             adapter: self.adapter,
             contents: LogContents::Renode { level, message },
             received_at,
+            device_tick: None,
         }));
     }
 

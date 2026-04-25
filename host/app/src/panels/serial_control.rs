@@ -131,6 +131,7 @@ fn tunnel_error_label(code: TunnelErrorCode) -> &'static str {
         TunnelErrorCode::RequestCorrupted => {
             "RequestCorrupted — retransmit budget exhausted"
         }
+        TunnelErrorCode::ReplyCorrupted => "ReplyCorrupted — host requested retransmit",
         TunnelErrorCode::Internal => "Internal — unspecified tunnel error",
     }
 }

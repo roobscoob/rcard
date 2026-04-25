@@ -102,6 +102,18 @@ static ACCUM: GlobalState<Accum> = GlobalState::new(Accum {
 });
 
 // ---------------------------------------------------------------------------
+// Last-sent tracking for ReplyCorrupted retransmit
+// ---------------------------------------------------------------------------
+
+enum LastSent {
+    None,
+    IpcReply,
+    Error { buf: [u8; 19], len: usize },
+}
+
+static LAST_SENT: GlobalState<LastSent> = GlobalState::new(LastSent::None);
+
+// ---------------------------------------------------------------------------
 // USB write helper
 // ---------------------------------------------------------------------------
 
@@ -111,7 +123,9 @@ fn write_usb(ep_in: &UsbEndpoint, data: &[u8]) -> Result<(), HostTransportError>
         let end = (offset + 64).min(data.len());
         match ep_in.write(&data[offset..end]) {
             Ok(Ok(n)) => offset += n as usize,
-            Ok(Err(UsbError::EndpointBusy)) => continue,
+            Ok(Err(UsbError::EndpointBusy)) => {
+                continue;
+            }
             Ok(Err(e)) => {
                 error!("USB write: {}", e);
                 return Err(HostTransportError::WireWriteFailed);
@@ -122,6 +136,7 @@ fn write_usb(ep_in: &UsbEndpoint, data: &[u8]) -> Result<(), HostTransportError>
             }
         }
     }
+
     Ok(())
 }
 
@@ -144,9 +159,7 @@ impl HostTransport for HostTransportImpl {
                 if buf.len() < p.len {
                     return Err(HostTransportError::LeaseTooSmall);
                 }
-                for (i, &b) in p.buf[..p.len].iter().enumerate() {
-                    let _ = buf.write(i, b);
-                }
+                let _ = buf.write_range(0, &p.buf[..p.len]);
                 Ok(p.len as u32)
             })
             .unwrap_or(Err(HostTransportError::NoPendingRequest))
@@ -159,6 +172,8 @@ impl HostTransport for HostTransportImpl {
         let Some(ep_in) = EP_IN.get() else {
             return Err(HostTransportError::WireWriteFailed);
         };
+
+        let t0 = userlib::sys_get_timer().now;
 
         // Emit the reply as one USB bulk transfer: `[frame][crc16][pad?]`.
         // The host verifies CRC over `[frame]` and strips it. The optional
@@ -184,6 +199,8 @@ impl HostTransport for HostTransportImpl {
                 off += chunk;
             }
         }
+
+        let t1 = userlib::sys_get_timer().now;
 
         // Pass 2: emit in 64-byte USB packets. Only the final packet may
         // be short — that's what terminates the bulk transfer.
@@ -242,6 +259,18 @@ impl HostTransport for HostTransportImpl {
                 }
             }
         }
+
+        let t2 = userlib::sys_get_timer().now;
+        info!(
+            "deliver_reply: crc={}ms emit={}ms len={}",
+            t1 - t0,
+            t2 - t1,
+            len
+        );
+
+        LAST_SENT.with(|ls| {
+            *ls = LastSent::IpcReply;
+        });
 
         // Always clear the pending slot even if USB write failed — the
         // dispatch is complete from host_proxy's perspective.
@@ -304,6 +333,12 @@ fn write_tunnel_error(
         wire[total] = 0;
         total += 1;
     }
+    LAST_SENT.with(|ls| {
+        *ls = LastSent::Error {
+            buf: wire,
+            len: total,
+        };
+    });
     let _ = write_usb(ep_in, &wire[..total]);
 }
 
@@ -457,6 +492,42 @@ fn process_accumulated_frame() -> bool {
                 header,
                 payload: &a.buf[HEADER_SIZE..frame_size],
             };
+
+            // Check for ReplyCorrupted (host asking us to retransmit
+            // the last reply). This is a Simple frame, not an IpcRequest.
+            if let Some(tunnel_err) = frame.parse_simple::<rcard_usb_proto::messages::TunnelError>()
+            {
+                if tunnel_err.code == rcard_usb_proto::messages::TunnelErrorCode::ReplyCorrupted {
+                    info!("host requested reply retransmit");
+                    let retransmitted = LAST_SENT
+                        .with(|ls| match ls {
+                            LastSent::IpcReply => {
+                                let _ = Reactor::push(
+                                    notifications::GROUP_ID_HOST_REQUEST,
+                                    1,
+                                    20,
+                                    OverflowStrategy::Reject,
+                                );
+                                true
+                            }
+                            LastSent::Error { buf, len } => {
+                                if let Some(ep_in) = EP_IN.get() {
+                                    let _ = write_usb(ep_in, &buf[..*len]);
+                                }
+                                true
+                            }
+                            LastSent::None => false,
+                        })
+                        .unwrap_or(false);
+                    if !retransmitted {
+                        warn!("retransmit requested but nothing cached");
+                    }
+                    return retransmitted;
+                } else {
+                    warn!("host reported tunnel error: {}", tunnel_err.code);
+                    return false;
+                }
+            }
 
             if frame.as_ipc_request().is_none() {
                 warn!("Unexpected frame type on host channel");

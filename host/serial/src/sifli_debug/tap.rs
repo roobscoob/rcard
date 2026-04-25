@@ -285,6 +285,10 @@ impl DebugHandle {
     /// Drains any stale response frames (e.g. from a previous Exit) before
     /// sending the Enter command.
     pub async fn enter(&self) -> Result<(), Error> {
+        {
+            let mut rx = self.frame_rx.lock().await;
+            while rx.try_recv().is_ok() {}
+        }
         self.request(&Command::Enter).await?;
         Ok(())
     }

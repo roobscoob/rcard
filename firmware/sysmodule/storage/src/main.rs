@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use generated::slots::SLOTS;
 use once_cell::OnceCell;
-use rcard_log::{OptionExt, ResultExt};
+use rcard_log::{error, warn, OptionExt, ResultExt};
 use storage_api::{Geometry, StorageError};
 use sysmodule_mpi_api::*;
 use sysmodule_storage_api::*;
@@ -25,13 +25,42 @@ pub enum PartitionFormat {
     RingBuffer,
 }
 
-/// Static geometry of the NOR flash backing this sysmodule. Baked from
-/// the board's `geometry` field in `build.rs`.
+/// Cached flash geometry sourced from BFPT at startup. Populated once
+/// inside `main()` via `Mpi::with_sfdp`; serves every later
+/// `Partition::geometry()` call without an extra IPC round trip.
+static FLASH_GEOMETRY: OnceCell<CachedGeometry> = OnceCell::new();
+
 #[derive(Debug, Clone, Copy)]
-pub struct FlashGeometry {
-    pub erase_size: u32,
-    pub program_size: u32,
-    pub read_size: u32,
+struct CachedGeometry {
+    /// Smallest erase granularity advertised in BFPT (typically 4 KiB).
+    erase_size: u32,
+    /// Page program size from BFPT rev-B+ (DWORD 11), or 256 if the
+    /// chip doesn't advertise it (safe default across all SPI NOR).
+    program_size: u32,
+    /// SPI NOR is byte-addressable on reads.
+    read_size: u32,
+}
+
+impl CachedGeometry {
+    fn from_bfpt(bfpt: &sysmodule_mpi_api::sfdp::Bfpt<'_>) -> Self {
+        // Smallest advertised erase type — in practice the 4K sector
+        // erase, because the driver prefers to subdivide erases into
+        // the smallest granularity when alignment demands it. If BFPT
+        // advertises none (very old chips), assume 4 KiB.
+        let erase_size = bfpt
+            .erase_types()
+            .iter()
+            .flatten()
+            .map(|e| e.size_bytes)
+            .min()
+            .unwrap_or(4096);
+
+        Self {
+            erase_size,
+            program_size: bfpt.page_size().unwrap_or(256),
+            read_size: 1,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -85,50 +114,156 @@ fn mpi() -> &'static Mpi {
 
 // ── Lease forwarding helpers ───────────────────────────────────────
 
+/// Total attempts (not retries) for an MPI IPC operation before giving
+/// up. An IPC-layer error means the MPI sysmodule died mid-call and got
+/// restarted by the supervisor — the partially-done work is gone, so we
+/// restart from offset 0. Three attempts buys us one clean death + one
+/// flaky restart without masking a genuine persistent fault.
+const MPI_IPC_MAX_ATTEMPTS: u32 = 3;
+
+/// Invoke a single MPI IPC call with retry-on-IPC-failure semantics.
+/// On `Err(_)` (IPC layer — sysmodule died) we warn and retry up to
+/// [`MPI_IPC_MAX_ATTEMPTS`] times. On `Ok(Err(_))` (operation layer —
+/// bad address, WEL-not-latched, hardware timeout) we return immediately,
+/// those aren't transient.
+///
+/// For chunked operations where a partial multi-chunk result must be
+/// discarded and restarted, inline the retry loop instead — see
+/// [`mpi_read_to_lease`] / [`mpi_program_from_lease`].
+fn mpi_retry_single<T, OE, IE>(
+    mut op: impl FnMut() -> Result<Result<T, OE>, IE>,
+    context: &str,
+    address: u32,
+) -> Result<T, StorageError> {
+    for attempt in 0..MPI_IPC_MAX_ATTEMPTS {
+        match op() {
+            Ok(Ok(v)) => return Ok(v),
+            Ok(Err(_)) => return Err(StorageError::device(0xFFFE)),
+            Err(_) => {
+                warn!(
+                    "MPI {} IPC failure at {} (attempt {}/{}), retrying",
+                    context,
+                    address,
+                    attempt + 1,
+                    MPI_IPC_MAX_ATTEMPTS,
+                );
+            }
+        }
+    }
+    error!(
+        "MPI {} failed at 0x{:08x} after {} IPC attempts",
+        context, address, MPI_IPC_MAX_ATTEMPTS,
+    );
+    Err(StorageError::device(0xFFFE))
+}
+
 /// Read from MPI into a caller's write-lease. Uses bulk `write_range`
 /// rather than per-byte `write` — the per-byte path issues one syscall
 /// per byte, and (per the comment in `sysmodule_usb`) is "corruption-
 /// prone" in addition to being slow.
+///
+/// If the MPI sysmodule dies mid-read (IPC-layer error), the whole read
+/// is restarted from offset 0 up to [`MPI_IPC_MAX_ATTEMPTS`] times. An
+/// operation-layer error (MpiOperationError — bad address, WEL latch,
+/// timeout) is returned immediately: those aren't transient.
 fn mpi_read_to_lease(
     address: u32,
     lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
 ) -> Result<(), StorageError> {
+    let t0 = userlib::sys_get_timer().now;
     let len = lease.len();
     let mut tmp = [0u8; 256];
-    let mut offset = 0;
-    while offset < len {
-        let chunk = (len - offset).min(256);
-        mpi()
-            .read(address + offset as u32, &mut tmp[..chunk])
-            .map_err(|_| StorageError::device(0xFFFE))?;
-        lease
-            .write_range(offset, &tmp[..chunk])
-            .ok_or_else(|| StorageError::device(0xFFFD))?;
-        offset += chunk;
+
+    'attempt: for attempt in 0..MPI_IPC_MAX_ATTEMPTS {
+        let mut offset = 0;
+        while offset < len {
+            let chunk = (len - offset).min(256);
+            match mpi().read(address + offset as u32, &mut tmp[..chunk]) {
+                Err(_) => {
+                    warn!(
+                        "MPI read IPC failure at {} (attempt {}/{}), retrying from start",
+                        address,
+                        attempt + 1,
+                        MPI_IPC_MAX_ATTEMPTS
+                    );
+                    continue 'attempt;
+                }
+                Ok(Err(_)) => {
+                    return Err(StorageError::device(0xFFFE));
+                }
+                Ok(Ok(())) => {
+                    lease
+                        .write_range(offset, &tmp[..chunk])
+                        .ok_or_else(|| StorageError::device(0xFFFD))?;
+                    offset += chunk;
+                }
+            }
+        }
+        let elapsed = userlib::sys_get_timer().now - t0;
+        if elapsed > 100 {
+            warn!(
+                "mpi_read_to_lease: {}ms for {} bytes at 0x{:08x}",
+                elapsed, len, address
+            );
+        }
+        return Ok(());
     }
-    Ok(())
+
+    error!(
+        "MPI read failed at 0x{:08x} after {} IPC attempts",
+        address, MPI_IPC_MAX_ATTEMPTS
+    );
+    Err(StorageError::device(0xFFFE))
 }
 
 /// Write from a caller's read-lease to MPI. Uses bulk `read_range` —
 /// see `mpi_read_to_lease` for why per-byte is bad.
+///
+/// Same IPC-retry policy as [`mpi_read_to_lease`]: on MPI sysmodule
+/// death we restart the whole multi-chunk program from offset 0. This
+/// is safe over an erased region because NOR page-program is idempotent
+/// (1-bits only ever clear to 0); re-programming the first N chunks
+/// writes the same bytes back.
 fn mpi_program_from_lease(
     address: u32,
     lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
 ) -> Result<(), StorageError> {
     let len = lease.len();
     let mut tmp = [0u8; 256];
-    let mut offset = 0;
-    while offset < len {
-        let chunk = (len - offset).min(256);
-        lease
-            .read_range(offset, &mut tmp[..chunk])
-            .ok_or_else(|| StorageError::device(0xFFFD))?;
-        mpi()
-            .write(address + offset as u32, &tmp[..chunk])
-            .map_err(|_| StorageError::device(0xFFFE))?;
-        offset += chunk;
+
+    'attempt: for attempt in 0..MPI_IPC_MAX_ATTEMPTS {
+        let mut offset = 0;
+        while offset < len {
+            let chunk = (len - offset).min(256);
+            lease
+                .read_range(offset, &mut tmp[..chunk])
+                .ok_or_else(|| StorageError::device(0xFFFD))?;
+            match mpi().write(address + offset as u32, &tmp[..chunk]) {
+                Err(_) => {
+                    warn!(
+                        "MPI write IPC failure at {} (attempt {}/{}), retrying from start",
+                        address,
+                        attempt + 1,
+                        MPI_IPC_MAX_ATTEMPTS
+                    );
+                    continue 'attempt;
+                }
+                Ok(Err(_)) => {
+                    return Err(StorageError::device(0xFFFE));
+                }
+                Ok(Ok(())) => {
+                    offset += chunk;
+                }
+            }
+        }
+        return Ok(());
     }
-    Ok(())
+
+    error!(
+        "MPI write failed at 0x{:08x} after {} IPC attempts",
+        address, MPI_IPC_MAX_ATTEMPTS
+    );
+    Err(StorageError::device(0xFFFE))
 }
 
 // ── Partition resource implementation ───────────────────────────────
@@ -192,18 +327,13 @@ impl Partition for PartitionResource {
             return Err(StorageError::out_of_range());
         }
         // Require erase-aligned offset and length.
-        if offset % FLASH_GEOMETRY.erase_size != 0 || len % FLASH_GEOMETRY.erase_size != 0 {
+        let erase = FLASH_GEOMETRY.get().log_expect("FLASH_GEOMETRY").erase_size;
+        if offset % erase != 0 || len % erase != 0 {
             return Err(StorageError::alignment());
         }
         // Erase then program
         let abs = self.offset_bytes + offset;
-        if mpi()
-            .erase(abs, len)
-            .unwrap_or(Err(EraseError::InvalidAddressAlignment))
-            .is_err()
-        {
-            return Err(StorageError::device(0xFFFF));
-        }
+        mpi_retry_single(|| mpi().erase(abs, len), "erase", abs)?;
         mpi_program_from_lease(abs, &buf)
     }
 
@@ -211,16 +341,12 @@ impl Partition for PartitionResource {
         if offset.saturating_add(len) > self.size_bytes {
             return Err(StorageError::out_of_range());
         }
-        if offset % FLASH_GEOMETRY.erase_size != 0 || len % FLASH_GEOMETRY.erase_size != 0 {
+        let erase = FLASH_GEOMETRY.get().log_expect("FLASH_GEOMETRY").erase_size;
+        if offset % erase != 0 || len % erase != 0 {
             return Err(StorageError::alignment());
         }
-        if mpi()
-            .erase(self.offset_bytes + offset, len)
-            .unwrap_or(Err(EraseError::InvalidAddressAlignment))
-            .is_err()
-        {
-            return Err(StorageError::device(0xFFFF));
-        }
+        let abs = self.offset_bytes + offset;
+        mpi_retry_single(|| mpi().erase(abs, len), "erase", abs)?;
         Ok(())
     }
 
@@ -238,11 +364,12 @@ impl Partition for PartitionResource {
     }
 
     fn geometry(&mut self, _meta: ipc::Meta) -> Geometry {
+        let cached = FLASH_GEOMETRY.get().log_expect("FLASH_GEOMETRY");
         Geometry {
             total_size: self.size_bytes,
-            erase_size: FLASH_GEOMETRY.erase_size,
-            program_size: FLASH_GEOMETRY.program_size,
-            read_size: FLASH_GEOMETRY.read_size,
+            erase_size: cached.erase_size,
+            program_size: cached.program_size,
+            read_size: cached.read_size,
         }
     }
 }
@@ -283,8 +410,7 @@ const PLACES_PARTITION_SIZE: u32 = 16;
 
 fn mpi_read_u32(address: u32) -> Result<u32, LayoutError> {
     let mut buf = [0u8; 4];
-    mpi()
-        .read(address, &mut buf)
+    mpi_retry_single(|| mpi().read(address, &mut buf), "layout-read", address)
         .map_err(|_| LayoutError::ReadFailure)?;
     Ok(u32::from_le_bytes(buf))
 }
@@ -370,25 +496,30 @@ impl FlashLayout for FlashLayoutImpl {
 fn main() -> ! {
     rcard_log::info!("Awake");
 
-    // Open MPI instance 2 (external NOR flash: GD25Q256EWIGR)
+    // Open MPI instance 2 (external NOR flash). Addressing width,
+    // fast-read opcodes, erase types, and page size are all derived
+    // from SFDP inside the MPI driver — no hand-tuning needed here.
     let flash = Mpi::open(
         2,
         MpiConfig {
             prescaler: 2,
-            // 4-byte addressing — needed to reach the upper half of the
-            // 256 Mb GD25Q256E. The MPI driver issues EN4B at open and
-            // uses the 4-byte command opcodes (4SE/4PP/4READ/etc.).
-            addr_size: AddrSize::FourBytes,
-            imode: LineMode::Single,
-            admode: LineMode::Single,
-            dmode: LineMode::Single,
-            read_dummy_cycles: 0,
             clock_polarity: ClockPolarity::Inverted,
+            preferred_mode: ModePreference::Fastest,
         },
     )
     .log_unwrap()
     .log_expect("storage: failed to open MPI");
     MPI.set(flash).ok();
+
+    // Cache SFDP-derived geometry once at startup so
+    // `Partition::geometry()` and write-alignment checks don't hit IPC
+    // on every call. `with_sfdp` reads the SFDP global header + all
+    // parameter headers + BFPT body under one helper call.
+    use sysmodule_mpi_api::sfdp::MpiExt;
+    let geometry = mpi()
+        .with_sfdp(|sfdp| CachedGeometry::from_bfpt(&sfdp.bfpt))
+        .log_unwrap();
+    FLASH_GEOMETRY.set(geometry).ok();
 
     ipc::server! {
         Partition: PartitionResource,

@@ -1,10 +1,12 @@
+use rcard_log::Format;
+
 use super::Message;
 
 pub const OP_TUNNEL_ERROR: u8 = 0x01;
 
 /// Tunnel-level error codes sent as a [`SimpleFrame`](crate::simple::SimpleFrameView)
 /// in response to an IPC request that could not be dispatched.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Format)]
 #[repr(u8)]
 pub enum TunnelErrorCode {
     /// The target task is dead or has restarted (generation mismatch).
@@ -29,6 +31,10 @@ pub enum TunnelErrorCode {
     /// meaningless (set to `0xFFFF` by the firmware) because the corrupt
     /// packet likely contained the seq.
     RequestCorrupted = 0x06,
+    /// The application-layer CRC on a device→host reply failed. The host
+    /// is asking the device to retransmit the last reply from its cache.
+    /// Direction: host → device only.
+    ReplyCorrupted = 0x07,
     /// Unspecified internal error in the tunnel sysmodule.
     Internal = 0xFF,
 }
@@ -42,6 +48,7 @@ impl TunnelErrorCode {
             0x04 => Self::NoHostForwarding,
             0x05 => Self::Busy,
             0x06 => Self::RequestCorrupted,
+            0x07 => Self::ReplyCorrupted,
             _ => Self::Internal,
         }
     }

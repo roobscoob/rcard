@@ -12,11 +12,6 @@ let miB = fun n => n * 1024 * 1024 in
 
   memory = std.record.insert "mpi2" {
       size = miB 8,
-      geometry = {
-        erase_size = 4096,
-        program_size = 256,
-        read_size = 1,
-      },
       mappings = [
         { address = 0x12000000, size = miB 224, read = true, execute = true },
         { address = 0x62000000, size = miB 992, read = true },

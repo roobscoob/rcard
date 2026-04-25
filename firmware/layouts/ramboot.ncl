@@ -28,5 +28,5 @@ fun memory =>
     fs_main  = flash.fs_main  & { unmapped = true },
 
     # Opt-in XIP-from-NOR. Discouraged.
-    xip_rom = flash.xip_rom,
+    xip_rom = memory.mpi1,
   }

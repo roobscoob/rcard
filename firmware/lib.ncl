@@ -14,7 +14,7 @@
   },
 
   ## Partition a memory device into named places.
-  ## Each place inherits the device's mappings and geometry.
+  ## Each place inherits the device's mappings.
   partition = fun device parts =>
     (std.array.fold_left
       (fun state part =>
@@ -25,7 +25,6 @@
             size = part.size,
             offset = off,
             mappings = device.mappings,
-            geometry = std.record.get_or "geometry" null device,
           } state.places,
         })
       { cursor = 0, places = {} }

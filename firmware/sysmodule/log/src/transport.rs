@@ -236,11 +236,7 @@ fn stage_ipc_request(usart: &Usart, body: &[u8]) -> bool {
     true
 }
 
-fn send_tunnel_error(
-    usart: &Usart,
-    seq: u16,
-    code: rcard_usb_proto::messages::TunnelErrorCode,
-) {
+fn send_tunnel_error(usart: &Usart, seq: u16, code: rcard_usb_proto::messages::TunnelErrorCode) {
     let msg = rcard_usb_proto::messages::TunnelError { code };
     let mut body = [0u8; 16];
     if let Some(n) = rcard_usb_proto::simple::encode_simple(&msg, &mut body, seq) {
@@ -267,9 +263,7 @@ impl HostTransport for LogHostTransport {
                 if buf.len() < fb.staged_len {
                     return Err(HostTransportError::LeaseTooSmall);
                 }
-                for (i, &b) in fb.buf[..fb.staged_len].iter().enumerate() {
-                    let _ = buf.write(i, b);
-                }
+                let _ = buf.write_range(0, &fb.buf[..fb.staged_len]);
                 Ok(fb.staged_len as u32)
             })
             .unwrap_or(Err(HostTransportError::NoPendingRequest))
@@ -306,9 +300,7 @@ impl HostTransport for LogHostTransport {
             while offset < len {
                 let chunk_len = (len - offset).min(256);
                 let _ = buf.read_range(offset, &mut scratch[..chunk_len]);
-                encoder
-                    .push(&scratch[..chunk_len])
-                    .map_err(|_| ())?;
+                encoder.push(&scratch[..chunk_len]).map_err(|_| ())?;
                 offset += chunk_len;
             }
 

@@ -56,9 +56,7 @@ pub fn lease_to_cstr(
     buf: &mut [u8; 64],
 ) -> usize {
     let len = lease.len().min(63);
-    for (i, byte) in buf.iter_mut().enumerate().take(len) {
-        *byte = lease.read(i).unwrap_or(0);
-    }
+    let _ = lease.read_range(0, &mut buf[..len]);
     buf[len] = 0;
     len
 }

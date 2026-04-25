@@ -533,7 +533,7 @@ pub fn build(
 
     emit(BuildEvent::Build(BuildState::CompilingTasks));
 
-    let mut artifacts = crate::compile::compile_all(
+    let artifacts = crate::compile::compile_all(
         firmware_dir,
         &config,
         &mut layout,
@@ -546,12 +546,6 @@ pub fn build(
 
     // Organizing and CompilingApp events are emitted inside compile_all
     // at the correct pipeline boundaries.
-
-    // Separate bootloader artifact from firmware artifacts.
-    let bl_artifact_idx = artifacts
-        .iter()
-        .position(|a| a.kind == crate::compile::ArtifactKind::Bootloader);
-    let bl_artifact = bl_artifact_idx.map(|i| artifacts.remove(i));
 
     // ── Extract metadata ───────────────────────────────────────────────
     // Scrape log/IPC metadata from ELFs, run the schema dumper.
@@ -643,16 +637,13 @@ pub fn build(
         crate::link::link_image(&artifacts, &config, &layout, &img_dir, emit)
             .map_err(BuildError::Link)?;
 
-    let bootloader_size = if let Some(ref bl_art) = bl_artifact {
-        crate::link::measure_flat_binary_size(bl_art).map_err(BuildError::Link)?
-    } else {
-        0
-    };
-
-    // Re-add bootloader for ELF packing.
-    if let Some(bl_art) = bl_artifact {
-        artifacts.push(bl_art);
-    }
+    let bootloader_size = artifacts
+        .iter()
+        .find(|a| a.kind == crate::compile::ArtifactKind::Bootloader)
+        .map(|bl_art| crate::link::measure_flat_binary_size(bl_art))
+        .transpose()
+        .map_err(BuildError::Link)?
+        .unwrap_or(0);
 
     let bin_size = std::fs::metadata(&final_bin).map(|m| m.len()).unwrap_or(0);
     emit(BuildEvent::Image(ResourceUpdate::State(

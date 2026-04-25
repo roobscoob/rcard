@@ -531,13 +531,23 @@ impl eframe::App for RcardApp {
                             let device_id = *device_id;
                             let phase_terminal = matches!(
                                 phase,
-                                FlashPhase::Booting
+                                FlashPhase::BootingStub
+                                    | FlashPhase::StubBooted
+                                    | FlashPhase::Erasing
+                                    | FlashPhase::Programming { .. }
+                                    | FlashPhase::Verifying { .. }
                                     | FlashPhase::Done
                                     | FlashPhase::Failed { .. }
                             );
                             let show_logs = matches!(
                                 phase,
-                                FlashPhase::Booting | FlashPhase::Done | FlashPhase::Failed { .. }
+                                FlashPhase::BootingStub
+                                    | FlashPhase::StubBooted
+                                    | FlashPhase::Erasing
+                                    | FlashPhase::Programming { .. }
+                                    | FlashPhase::Verifying { .. }
+                                    | FlashPhase::Done
+                                    | FlashPhase::Failed { .. }
                             );
 
                             use egui_taffy::taffy::prelude::*;
@@ -696,12 +706,15 @@ fn activity_button(
 
 /// Render the flash progress steps inside the modal.
 fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
-    // Step index for the current phase.
     let (step, failed) = match phase {
         FlashPhase::Resetting | FlashPhase::WaitingForReset => (0, false),
-        FlashPhase::Writing { .. } => (1, false),
-        FlashPhase::Booting => (2, false),
-        FlashPhase::Done => (3, false),
+        FlashPhase::WritingStub { .. } => (1, false),
+        FlashPhase::VerifyingStub { .. } => (2, false),
+        FlashPhase::BootingStub | FlashPhase::StubBooted => (3, false),
+        FlashPhase::Erasing => (4, false),
+        FlashPhase::Programming { .. } => (5, false),
+        FlashPhase::Verifying { .. } => (6, false),
+        FlashPhase::Done => (7, false),
         FlashPhase::Failed { at_step, .. } => (*at_step, true),
     };
 
@@ -710,7 +723,15 @@ fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
         _ => "Resetting device...",
     };
 
-    let labels = [step0_label, "Writing stub to RAM", "Booting stub..."];
+    let labels = [
+        step0_label,
+        "Writing stub to RAM",
+        "Verifying stub",
+        "Booting stub...",
+        "Erasing flash",
+        "Programming firmware",
+        "Verifying firmware",
+    ];
 
     for (i, label) in labels.iter().enumerate() {
         if i < step {
@@ -735,7 +756,6 @@ fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
             });
         }
 
-        // Helper text asking for a manual reset.
         if i == 0 && i == step && matches!(phase, FlashPhase::WaitingForReset) {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -748,34 +768,42 @@ fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
             ui.add_space(2.0);
         }
 
-        // Progress bar for the writing step.
-        if i == 1 {
-            if let FlashPhase::Writing {
-                bytes_written,
-                bytes_total,
-            } = phase
-            {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(24.0);
-                    let fraction = if *bytes_total > 0 {
-                        *bytes_written as f32 / *bytes_total as f32
-                    } else {
-                        0.0
-                    };
-                    let bar = egui::ProgressBar::new(fraction).text(format!(
-                        "{:.1} / {:.1} KB",
-                        *bytes_written as f32 / 1024.0,
-                        *bytes_total as f32 / 1024.0,
-                    ));
-                    ui.add(bar);
-                });
-                ui.add_space(2.0);
+        // Progress bars for steps that report byte counts.
+        let progress = match (i, phase) {
+            (1, FlashPhase::WritingStub { bytes_written, bytes_total }) => {
+                Some((*bytes_written, *bytes_total))
             }
+            (2, FlashPhase::VerifyingStub { bytes_verified, bytes_total }) => {
+                Some((*bytes_verified, *bytes_total))
+            }
+            (5, FlashPhase::Programming { bytes_written, bytes_total }) => {
+                Some((*bytes_written, *bytes_total))
+            }
+            (6, FlashPhase::Verifying { bytes_verified, bytes_total }) => {
+                Some((*bytes_verified, *bytes_total))
+            }
+            _ => None,
+        };
+        if let Some((done, total)) = progress {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                let fraction = if total > 0 {
+                    done as f32 / total as f32
+                } else {
+                    0.0
+                };
+                let bar = egui::ProgressBar::new(fraction).text(format!(
+                    "{:.1} / {:.1} KB",
+                    done as f32 / 1024.0,
+                    total as f32 / 1024.0,
+                ));
+                ui.add(bar);
+            });
+            ui.add_space(2.0);
         }
     }
 
-    // Done / Failed state.
     match phase {
         FlashPhase::Done => {
             ui.add_space(4.0);

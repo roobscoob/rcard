@@ -3,7 +3,7 @@
 
 use generated::slots::SLOTS;
 use once_cell::{GlobalState, OnceCell};
-use rcard_log::{info, ResultExt};
+use rcard_log::{info, panic, ResultExt};
 use sysmodule_usb_api::*;
 use sysmodule_usb_protocol_fob_api::*;
 
@@ -54,7 +54,7 @@ fn emit_packet(ep: &UsbEndpoint, data: &[u8]) -> Result<(), FobSendError> {
             Ok(Ok(_)) => return Ok(()),
             Ok(Err(UsbError::EndpointBusy)) => continue,
             Ok(Err(_)) => return Err(FobSendError::Disconnected),
-            Err(e) => panic!("USB IPC died: {:?}", e),
+            Err(e) => panic!("USB IPC died: {}", e),
         }
     }
 }

@@ -86,6 +86,16 @@ const MAX_FRAME: usize = rcard_usb_proto::MAX_DECODED_FRAME;
 
 static BUF: GlobalState<[u8; MAX_FRAME]> = GlobalState::new([0u8; MAX_FRAME]);
 
+struct LastDelivery {
+    transport: u8,
+    len: usize,
+}
+
+static LAST_DELIVERY: GlobalState<LastDelivery> = GlobalState::new(LastDelivery {
+    transport: 0,
+    len: 0,
+});
+
 // ---------------------------------------------------------------------------
 // Tunnel dispatch core (moved verbatim from the old usb_protocol_host)
 // ---------------------------------------------------------------------------
@@ -361,11 +371,46 @@ fn select_transport(sender: u16) -> Option<Transport> {
 }
 
 #[ipc::notification_handler(host_request)]
-fn handle_host_request(sender: u16, _code: u32) {
+fn handle_host_request(sender: u16, code: u32) {
     let Some(transport) = select_transport(sender) else {
         warn!("host_proxy: host_request from unknown sender {}", sender);
         return;
     };
+
+    if code == 1 {
+        // ReplyCorrupted — retransmit the last reply without re-dispatching.
+        let (last_transport, last_len) = LAST_DELIVERY
+            .with(|ld| (ld.transport, ld.len))
+            .unwrap_or((0, 0));
+        if last_len == 0 {
+            warn!("host_proxy: redeliver requested but no cached reply");
+            return;
+        }
+        let expected_transport = match transport {
+            Transport::Usb => 1u8,
+            Transport::Usart => 2u8,
+        };
+        if last_transport != expected_transport {
+            warn!("host_proxy: redeliver transport mismatch");
+            return;
+        }
+        BUF.with(|buf| {
+            info!("host_proxy: redelivering {} bytes", last_len);
+            let deliver_result = match transport {
+                Transport::Usb => UsbTransport::deliver_reply(&buf[..last_len]),
+                Transport::Usart => UsartTransport::deliver_reply(&buf[..last_len]),
+            };
+            match deliver_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("host_proxy: redeliver failed: {}", e),
+                Err(e) => error!("host_proxy: redeliver IPC failed: {}", e),
+            }
+        })
+        .log_unwrap();
+        return;
+    }
+
+    let t0 = userlib::sys_get_timer().now;
 
     BUF.with(|buf| {
         // 1. Fetch the staged request into BUF.
@@ -391,18 +436,37 @@ fn handle_host_request(sender: u16, _code: u32) {
             return;
         }
 
+        let t1 = userlib::sys_get_timer().now;
+
         // 2. Dispatch: parse → pool-compact → sys_send → gather wb →
         //    encode reply, all within BUF.
         let outcome = dispatch_tunneled_request(buf, request_len);
+
+        let t2 = userlib::sys_get_timer().now;
 
         // 3. Hand the encoded reply back to the originating transport.
         // BUF[..len] now holds the reply frame.
         match outcome {
             DispatchOutcome::Reply { len } | DispatchOutcome::Error { len } if len > 0 => {
+                LAST_DELIVERY
+                    .with(|ld| {
+                        ld.transport = match transport {
+                            Transport::Usb => 1,
+                            Transport::Usart => 2,
+                        };
+                        ld.len = len;
+                    })
+                    .log_unwrap();
+
                 let deliver_result = match transport {
                     Transport::Usb => UsbTransport::deliver_reply(&buf[..len]),
                     Transport::Usart => UsartTransport::deliver_reply(&buf[..len]),
                 };
+                let t3 = userlib::sys_get_timer().now;
+                info!(
+                    "host_proxy: fetch={}ms dispatch={}ms deliver={}ms total={}ms reply_len={}",
+                    t1 - t0, t2 - t1, t3 - t2, t3 - t0, len
+                );
                 match deliver_result {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => error!("host_proxy: deliver_reply failed: {}", e),

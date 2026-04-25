@@ -123,12 +123,8 @@ fn parse_scheme_path(
     buf: &mut [u8; 64],
 ) -> Result<(u8, usize), OpenError> {
     let len = lease.len().min(buf.len());
-    for (i, byte) in buf.iter_mut().enumerate().take(len) {
-        *byte = lease.read(i).unwrap_or(0);
-    }
-    for byte in buf.iter_mut().skip(len) {
-        *byte = 0;
-    }
+    let _ = lease.read_range(0, &mut buf[..len]);
+    buf[len..].fill(0);
 
     let colon = buf[..len]
         .iter()
@@ -221,9 +217,7 @@ impl File<FileSystemResource> for FileResource {
                 if n <= 0 {
                     break;
                 }
-                for (i, &byte) in tmp.iter().enumerate().take(n as usize) {
-                    let _ = buf.write(total as usize + i, byte);
-                }
+                let _ = buf.write_range(total as usize, &tmp[..n as usize]);
                 total += n as u32;
             }
             total

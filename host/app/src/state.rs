@@ -216,14 +216,16 @@ impl DeviceHandle {
     }
 
     pub fn push_log(&mut self, log: Log) {
-        // Sorted insertion by `received_at`. `partition_point` finds the
-        // first index whose stamp is *strictly greater* than the new
-        // log's stamp; inserting there keeps ties in arrival order
-        // (stable) — which is what we want for logs sharing a wall-clock
-        // nanosecond.
-        let idx = self
-            .log_buffer
-            .partition_point(|existing| existing.received_at <= log.received_at);
+        // Sorted insertion. When both logs carry a device-side tick,
+        // compare by tick — immune to USB-serial buffering jitter.
+        // Fall back to host `received_at` when either side lacks a
+        // device tick (early boot, auxiliary streams, etc.).
+        let idx = self.log_buffer.partition_point(|existing| {
+            match (existing.device_tick, log.device_tick) {
+                (Some(a), Some(b)) => a <= b,
+                _ => existing.received_at <= log.received_at,
+            }
+        });
         self.log_buffer.insert(idx, log);
     }
 
@@ -1333,7 +1335,11 @@ impl AppState {
     /// that an actual IPC call would land on.
     pub fn flash_method_for_device(&self, device_id: DeviceId) -> Option<FlashMethod> {
         let dev = self.devices.get(&device_id)?;
-        if dev.has_capability(KnownCapability::Ipc) {
+        // TODO: temporarily forcing SifliDebug to diagnose IPC-over-USB
+        // flash timeout. Remove this override once resolved.
+        if dev.has_capability(KnownCapability::SifliDebug) {
+            Some(FlashMethod::SifliDebug)
+        } else if dev.has_capability(KnownCapability::Ipc) {
             let transport = dev
                 .capabilities
                 .iter()
@@ -1344,8 +1350,6 @@ impl AppState {
                 .map(|(label, _)| label)
                 .unwrap_or("?");
             Some(FlashMethod::Ipc { transport })
-        } else if dev.has_capability(KnownCapability::SifliDebug) {
-            Some(FlashMethod::SifliDebug)
         } else {
             None
         }
@@ -1931,11 +1935,11 @@ impl AppState {
                         _ => {}
                     }
                 }
-                crate::bridge::Event::FlashProgress { device_id, phase } => {
+                crate::bridge::Event::FlashProgress { device_id, mut phase } => {
                     // When the stub is up (Done), use its IPC to write the
                     // target firmware: places.bin → `firmware` partition,
                     // then ftab.bin → `boot` partition.
-                    if matches!(&phase, crate::bridge::FlashPhase::Done) {
+                    if matches!(&phase, crate::bridge::FlashPhase::StubBooted) {
                         let firmware_id = match &self.flash_modal {
                             Some(FlashModalState::Flashing {
                                 device_id: d,
@@ -1983,10 +1987,25 @@ impl AppState {
                                     });
                                 }
                                 (None, _) => {
-                                    // Already logged above.
+                                    let msg: String = "could not read firmware archive".into();
+                                    phase = crate::bridge::FlashPhase::Failed {
+                                        at_step: 3,
+                                        message: msg.clone(),
+                                    };
+                                    let _ = self.cmd_tx.send(
+                                        crate::bridge::Command::FlashFailed { device_id, message: msg },
+                                    );
                                 }
                                 (_, None) => {
-                                    eprintln!("[flash] no IPC registry loaded; cannot flash");
+                                    let msg: String = "no IPC registry loaded; cannot flash".into();
+                                    eprintln!("[flash] {msg}");
+                                    phase = crate::bridge::FlashPhase::Failed {
+                                        at_step: 3,
+                                        message: msg.clone(),
+                                    };
+                                    let _ = self.cmd_tx.send(
+                                        crate::bridge::Command::FlashFailed { device_id, message: msg },
+                                    );
                                 }
                             }
                         } else if firmware_id.is_none() {
@@ -2404,10 +2423,18 @@ async fn run_flash(
     use std::io::{Cursor, Read};
     use zip::ZipArchive;
 
+    let fail = |msg: String| {
+        let _ = cmd_tx.send(crate::bridge::Command::FlashFailed {
+            device_id,
+            message: msg,
+        });
+    };
+
     let mut archive = match ZipArchive::new(Cursor::new(&archive_bytes)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("[flash] archive open FAILED: {e}");
+            fail(format!("archive open: {e}"));
             return;
         }
     };
@@ -2429,9 +2456,11 @@ async fn run_flash(
     };
 
     let Some(places) = read_entry(&mut archive, "places.bin") else {
+        fail("archive missing places.bin".into());
         return;
     };
     let Some(ftab) = read_entry(&mut archive, "ftab.bin") else {
+        fail("archive missing ftab.bin".into());
         return;
     };
     drop(archive);
@@ -2440,13 +2469,16 @@ async fn run_flash(
         flash_partition(device_id, &registry, &cmd_tx, "firmware", &places).await
     {
         eprintln!("[flash] firmware partition FAILED: {e}");
+        fail(format!("firmware partition: {e}"));
         return;
     }
     if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, "boot", &ftab).await {
         eprintln!("[flash] boot partition FAILED: {e}");
+        fail(format!("boot partition: {e}"));
         return;
     }
     eprintln!("[flash] DONE ({} + {} bytes)", places.len(), ftab.len());
+    let _ = cmd_tx.send(crate::bridge::Command::FlashComplete { device_id });
 }
 
 /// Acquire `partition_name`, erase enough to cover `data.len()`, then
@@ -2504,6 +2536,10 @@ async fn flash_partition(
         "[flash]   erase(0, {erase_len}) (covers {} bytes, erase_size={erase_size})",
         data.len()
     );
+    let _ = cmd_tx.send(crate::bridge::Command::FlashPhaseUpdate {
+        device_id,
+        phase: crate::bridge::FlashPhase::Erasing,
+    });
     let erase_args = IpcValue::Struct(indexmap::indexmap! {
         "offset".into() => IpcValue::U32(0),
         "len".into()    => IpcValue::U32(erase_len as u32),
@@ -2518,7 +2554,15 @@ async fn flash_partition(
     // (rcard_usb_proto::LEASE_POOL_SIZE); 4 KiB leaves headroom for the
     // read-lease used by replies on the same pool.
     const CHUNK: usize = 4096;
+    let data_total = data.len() as u32;
     let mut offset = 0usize;
+    let _ = cmd_tx.send(crate::bridge::Command::FlashPhaseUpdate {
+        device_id,
+        phase: crate::bridge::FlashPhase::Programming {
+            bytes_written: 0,
+            bytes_total: data_total,
+        },
+    });
     while offset < data.len() {
         let end = (offset + CHUNK).min(data.len());
         let program_args = IpcValue::Struct(indexmap::indexmap! {
@@ -2533,6 +2577,13 @@ async fn flash_partition(
             Err(e) => return Err(format!("program @ {offset:#x}: {e}")),
         }
         offset = end;
+        let _ = cmd_tx.send(crate::bridge::Command::FlashPhaseUpdate {
+            device_id,
+            phase: crate::bridge::FlashPhase::Programming {
+                bytes_written: offset as u32,
+                bytes_total: data_total,
+            },
+        });
     }
 
     eprintln!(
@@ -2544,6 +2595,14 @@ async fn flash_partition(
     // Read back and compare. Same chunk size — `Partition::read` fills
     // the writable lease the caller provides, returned via writeback.
     let mut offset = 0usize;
+    let verify_start = std::time::Instant::now();
+    let _ = cmd_tx.send(crate::bridge::Command::FlashPhaseUpdate {
+        device_id,
+        phase: crate::bridge::FlashPhase::Verifying {
+            bytes_verified: 0,
+            bytes_total: data_total,
+        },
+    });
     while offset < data.len() {
         let end = (offset + CHUNK).min(data.len());
         let chunk_len = end - offset;
@@ -2551,10 +2610,22 @@ async fn flash_partition(
             "offset".into() => IpcValue::U32(offset as u32),
             "buf".into()    => IpcValue::Bytes(vec![0u8; chunk_len]),
         });
+        let chunk_start = std::time::Instant::now();
         let (reply, writeback) = partition
             .call_with_writeback("read", read_args)
             .await
-            .map_err(|e| format!("verify read @ {offset:#x}: {e}"))?;
+            .map_err(|e| {
+                let elapsed = verify_start.elapsed();
+                format!(
+                    "verify read @ {offset:#x} (chunk took {:.0}ms, total verify {:.0}ms): {e}",
+                    chunk_start.elapsed().as_millis(),
+                    elapsed.as_millis(),
+                )
+            })?;
+        eprintln!(
+            "[flash]   verify {offset:#x}..{end:#x} OK ({:.0}ms)",
+            chunk_start.elapsed().as_millis(),
+        );
         match reply {
             IpcValue::Ok(_) => {}
             other => return Err(format!("verify read @ {offset:#x} unexpected reply: {other:?}")),
@@ -2622,6 +2693,13 @@ async fn flash_partition(
             ));
         }
         offset = end;
+        let _ = cmd_tx.send(crate::bridge::Command::FlashPhaseUpdate {
+            device_id,
+            phase: crate::bridge::FlashPhase::Verifying {
+                bytes_verified: offset as u32,
+                bytes_total: data_total,
+            },
+        });
     }
 
     eprintln!(

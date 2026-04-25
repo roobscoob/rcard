@@ -96,8 +96,24 @@ fn usart_write_hex(mut val: u32) {
     usart_write_bytes(unsafe { buf.get_unchecked(i..) });
 }
 
+/// Emit `T<16 hex digits> ` prefix with the current kernel tick.
+fn usart_write_tick_prefix() {
+    let tick = userlib::sys_get_timer().now;
+    let mut buf = [0u8; 18]; // 'T' + 16 hex + ' '
+    buf[0] = b'T';
+    buf[17] = b' ';
+    let mut i = 16;
+    while i > 0 {
+        i -= 1;
+        let nib = ((tick >> (i * 4)) & 0xF) as u8;
+        buf[16 - i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+    }
+    usart_write_bytes(&buf);
+}
+
 fn handle_drop_report(sender: userlib::TaskId, data: &[u8]) {
     let Some(fields): Option<&[u8; 11]> = data.get(..11).and_then(|s| s.try_into().ok()) else {
+        usart_write_tick_prefix();
         usart_write_bytes(b"supervisor: malformed drop report\r\n");
         userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
         return;
@@ -114,6 +130,7 @@ fn handle_drop_report(sender: userlib::TaskId, data: &[u8]) {
         .unwrap_or("?");
     let dropped_name = TASK_NAMES.get(dropped_for as usize).copied().unwrap_or("?");
 
+    usart_write_tick_prefix();
     usart_write_bytes(b"supervisor: notification dropped for=");
     usart_write_u32(dropped_for as u32);
     usart_write_bytes(b"(");
@@ -145,6 +162,7 @@ fn handle_emit_log(sender: userlib::TaskId, data: &[u8]) {
     // (rules out the ACL branch and the "build picked up stale code"
     // branch in one shot, since this fires before any check or fallible
     // operation).
+    usart_write_tick_prefix();
     usart_write_bytes(b"supervisor: emit_log entry sender=");
     usart_write_u32(sender.task_index() as u32);
     usart_write_bytes(b" len=");
@@ -154,12 +172,14 @@ fn handle_emit_log(sender: userlib::TaskId, data: &[u8]) {
     let is_log = generated::peers::PEERS.sysmodule_log
         .map_or(false, |id| sender.task_index() == id.task_index());
     if !is_log {
+        usart_write_tick_prefix();
         usart_write_bytes(b"supervisor: rejected emit_log from non-log sender\r\n");
         userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
         return;
     }
 
     let n = data.len().min(EMIT_LOG_MAX);
+    usart_write_tick_prefix();
     // SAFETY: n <= data.len() by construction above.
     usart_write_bytes(unsafe { data.get_unchecked(..n) });
     userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
@@ -278,6 +298,7 @@ fn print_task_state(task_index: usize) {
     let name = TASK_NAMES.get(task_index).copied().unwrap_or("?");
     let state = kipc::read_task_status(task_index);
 
+    usart_write_tick_prefix();
     usart_write_u32(task_index as u32);
     usart_write_bytes(b" ");
     usart_write_bytes(name.as_bytes());
@@ -288,6 +309,7 @@ fn print_task_state(task_index: usize) {
 
 #[allow(dead_code)]
 fn print_all_task_states() {
+    usart_write_tick_prefix();
     usart_write_bytes(b"supervisor: task states:\r\n");
     for i in 0..TASK_NAMES.len() {
         print_task_state(i);
@@ -310,6 +332,7 @@ fn handle_faults() {
         };
 
         let name = TASK_NAMES.get(fault_index).copied().unwrap_or("?");
+        usart_write_tick_prefix();
         usart_write_bytes(b"supervisor: task ");
         usart_write_u32(fault_index as u32);
         usart_write_bytes(b" (");
@@ -339,6 +362,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 #[export_name = "main"]
 fn main() -> ! {
     usart_init();
+    usart_write_tick_prefix();
     usart_write_bytes(b"supervisor: Awake\r\n");
 
     // Sized to hold the largest inbound message: `OP_EMIT_LOG`'s payload,
@@ -359,6 +383,7 @@ fn main() -> ! {
                     if let Ok(data) = msg.data {
                         handle_drop_report(msg.sender, data);
                     } else {
+                        usart_write_tick_prefix();
                         usart_write_bytes(b"supervisor: malformed drop report\r\n");
                         userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
                     }
@@ -366,10 +391,12 @@ fn main() -> ! {
                     if let Ok(data) = msg.data {
                         handle_emit_log(msg.sender, data);
                     } else {
+                        usart_write_tick_prefix();
                         usart_write_bytes(b"supervisor: malformed emit_log\r\n");
                         userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
                     }
                 } else {
+                    usart_write_tick_prefix();
                     usart_write_bytes(b"supervisor: Invalid Syscall Opcode\r\n");
                     userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
                 }

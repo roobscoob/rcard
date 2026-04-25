@@ -41,11 +41,20 @@ impl ipc_protocol::FrameSender for UsbSender {
             // Firmware `usb_protocol_host` accumulates packets until the
             // short terminator, validates CRC, and dispatches.
             let wrapped = wrap_frame(&bytes);
+            eprintln!(
+                "[usb-sender] OUT submit: {} frame bytes, {} wire bytes",
+                bytes.len(),
+                wrapped.len(),
+            );
             let mut buf = Buffer::new(wrapped.len());
             buf.extend_from_slice(&wrapped);
             let mut ep = self.out_endpoint.lock().await;
             ep.submit(buf);
             let completion = ep.next_complete().await;
+            match &completion.status {
+                Ok(()) => eprintln!("[usb-sender] OUT complete OK"),
+                Err(e) => eprintln!("[usb-sender] OUT complete ERROR: {e}"),
+            }
             completion.status.map_err(|e| e.to_string())
         })
     }
