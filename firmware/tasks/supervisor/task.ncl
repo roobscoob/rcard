@@ -11,7 +11,7 @@ fun ctx => {
   peers = ["sysmodule_log"],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 8 },
+    stack = { place = ctx.places.fast, size = 256 },
     data  = { place = ctx.places.fast },
   },
 }

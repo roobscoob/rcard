@@ -1502,11 +1502,11 @@ impl AppState {
 
         match (archive_bytes, dev.ipc_registry.clone()) {
             (Some(bytes), Some(registry)) => {
-                if let Some(FlashModalState::Flashing { phase, .. }) =
-                    &mut self.flash_modal
-                {
-                    *phase = crate::bridge::FlashPhase::Erasing;
-                }
+                self.flash_modal = Some(FlashModalState::Flashing {
+                    firmware_id,
+                    device_id,
+                    phase: crate::bridge::FlashPhase::Erasing,
+                });
                 let cmd_tx = self.cmd_tx.clone();
                 self.tokio_handle.spawn(async move {
                     run_flash(device_id, bytes, registry, cmd_tx).await;
@@ -2045,6 +2045,11 @@ impl AppState {
                             });
                         }
                         Some(FlashModalState::Flashing { device_id: d, .. }) if *d == device_id => {
+                            if matches!(phase, crate::bridge::FlashPhase::Resetting) {
+                                if let Some(dev) = self.devices.get_mut(&device_id) {
+                                    dev.ipc_registry = None;
+                                }
+                            }
                             if let Some(FlashModalState::Flashing { phase: p, .. }) =
                                 &mut self.flash_modal
                             {

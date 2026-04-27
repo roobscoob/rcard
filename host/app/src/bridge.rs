@@ -475,6 +475,8 @@ pub async fn run(
     let flash_generation: Arc<std::sync::atomic::AtomicU64> =
         Arc::new(std::sync::atomic::AtomicU64::new(0));
 
+    let (usb_rebind_tx, usb_rebind_rx) = mpsc::unbounded_channel::<UsbRebind>();
+
     // Spawn the native-USB supervisor. Owns attach/detach lifecycle for
     // all rcard fobs enumerated over native USB. Uses polling today
     // (nusb 0.1); swap the discovery function for `nusb::watch_devices`
@@ -486,6 +488,7 @@ pub async fn run(
         persistent_devices.clone(),
         next_device_id.clone(),
         flash_wait_usb.clone(),
+        usb_rebind_rx,
     ));
 
     while let Some(cmd) = cmd_rx.recv().await {
@@ -681,6 +684,7 @@ pub async fn run(
                     usart1_settling.clone(),
                     cmd_tx.clone(),
                     usart2_sender.clone(),
+                    usb_rebind_tx.clone(),
                 ));
 
                 serials.insert(
@@ -1113,6 +1117,7 @@ async fn serial_connect_loop(
     // once `Usart2::connect` succeeds so `ProbeMoshiMoshi` can find the
     // wire even before an Awake identifies the device. Unused by USART1.
     usart2_sender: Arc<Mutex<Option<Arc<serial::SerialSender>>>>,
+    usb_rebind_tx: mpsc::UnboundedSender<UsbRebind>,
 ) {
     match adapter_type {
         SerialAdapterType::Usart1 => {
@@ -1144,6 +1149,7 @@ async fn serial_connect_loop(
                 next_device_id,
                 bridge_devices,
                 usart2_sender,
+                usb_rebind_tx.clone(),
             )
             .await;
         }
@@ -1684,6 +1690,7 @@ async fn usart2_connect_loop(
     // wires. Populated here after a successful `Usart2::connect`; cleared
     // when this loop exits so probes don't fire on a dead sender.
     usart2_sender_slot: Arc<Mutex<Option<Arc<serial::SerialSender>>>>,
+    usb_rebind_tx: mpsc::UnboundedSender<UsbRebind>,
 ) {
     let adapter_id = device::adapter::AdapterId(index as u64 + 500_000);
 
@@ -1778,10 +1785,6 @@ async fn usart2_connect_loop(
                                     {
                                         let chip_uid = ChipUid(*uid);
 
-                                        // Revoke the old handle — the device on
-                                        // the other end rebooted, so existing
-                                        // capabilities are stale. Remove the old
-                                        // BridgeDevice entry (device is temporary).
                                         link.revoke();
                                         if let Some(old_id) = current_device {
                                             bridge_devices.lock().unwrap().remove(&old_id);
@@ -1800,9 +1803,6 @@ async fn usart2_connect_loop(
                                             &ctx,
                                         );
 
-                                        // Insert a BridgeDevice with a fresh
-                                        // adapter handle. The adapter itself
-                                        // stays alive in the connect loop.
                                         if let Some(dev_id) = current_device {
                                             let handle = link.handle();
                                             let dev = device::physical::PhysicalDevice::new();
@@ -1814,6 +1814,10 @@ async fn usart2_connect_loop(
                                                     handles: vec![handle],
                                                 },
                                             );
+                                            let _ = usb_rebind_tx.send(UsbRebind {
+                                                uid: chip_uid,
+                                                new_device_id: dev_id,
+                                            });
                                         }
                                     }
 
@@ -2666,6 +2670,14 @@ fn register_from_discovery(
 
 // ── USB supervisor ──────────────────────────────────────────────────────
 
+/// Sent by USART2 when it detects a device reboot. Tells the USB
+/// supervisor to move its adapter from the old BridgeDevice to the
+/// new one.
+struct UsbRebind {
+    uid: ChipUid,
+    new_device_id: DeviceId,
+}
+
 /// Per-fob state the supervisor tracks.
 struct UsbEntry {
     chip_uid: ChipUid,
@@ -2686,6 +2698,7 @@ async fn usb_supervisor_loop(
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
     flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
+    mut usb_rebind_rx: mpsc::UnboundedReceiver<UsbRebind>,
 ) {
     use futures_util::StreamExt;
 
@@ -2709,26 +2722,71 @@ async fn usb_supervisor_loop(
         }
     };
 
-    while let Some(event) = stream.next().await {
-        match event {
-            usb::FobEvent::Connected(fob) => {
-                let Some(uid) = parse_chip_uid(&fob.serial) else {
-                    eprintln!("[usb:{}] malformed serial descriptor, ignoring", fob.serial);
-                    continue;
-                };
-                if entries_by_uid.contains_key(&uid) {
-                    // Duplicate event (typical when the seed race and
-                    // a real Connected arrive for the same device).
-                    continue;
+    loop {
+        tokio::select! {
+            event = stream.next() => {
+                let Some(event) = event else { break };
+                match event {
+                    usb::FobEvent::Connected(fob) => {
+                        let Some(uid) = parse_chip_uid(&fob.serial) else {
+                            eprintln!("[usb:{}] malformed serial descriptor, ignoring", fob.serial);
+                            continue;
+                        };
+                        if entries_by_uid.contains_key(&uid) {
+                            continue;
+                        }
+
+                        let adapter_id =
+                            device::adapter::AdapterId(USB_ADAPTER_ID_BASE + next_usb_adapter_index);
+                        next_usb_adapter_index += 1;
+
+                        match handle_usb_attach(
+                            &fob.serial,
+                            uid,
+                            adapter_id,
+                            &tx,
+                            &ctx,
+                            &bridge_devices,
+                            &persistent_devices,
+                            &next_device_id,
+                            &flash_wait_usb,
+                        ) {
+                            Ok(entry) => {
+                                entries_by_nusb.insert(fob.id, uid);
+                                entries_by_uid.insert(uid, entry);
+                            }
+                            Err(e) => {
+                                eprintln!("[usb:{}] attach failed: {e}", fob.serial);
+                            }
+                        }
+                    }
+                    usb::FobEvent::Disconnected(nusb_id) => {
+                        let Some(uid) = entries_by_nusb.remove(&nusb_id) else {
+                            continue;
+                        };
+                        if let Some(entry) = entries_by_uid.remove(&uid) {
+                            handle_usb_detach(entry.chip_uid, &entry, &tx, &ctx, &bridge_devices);
+                        }
+                    }
+                }
+            }
+            rebind = usb_rebind_rx.recv() => {
+                let Some(rebind) = rebind else { break };
+                if let Some(old_entry) = entries_by_uid.remove(&rebind.uid) {
+                    let _ = tx.send(Event::AdapterRemoved {
+                        adapter_id: old_entry.adapter_id,
+                    });
+                    eprintln!("[usb:{}] detached (device rebooted)", rebind.uid);
                 }
 
+                let serial = format!("{}", rebind.uid);
                 let adapter_id =
                     device::adapter::AdapterId(USB_ADAPTER_ID_BASE + next_usb_adapter_index);
                 next_usb_adapter_index += 1;
 
                 match handle_usb_attach(
-                    &fob.serial,
-                    uid,
+                    &serial,
+                    rebind.uid,
                     adapter_id,
                     &tx,
                     &ctx,
@@ -2738,20 +2796,12 @@ async fn usb_supervisor_loop(
                     &flash_wait_usb,
                 ) {
                     Ok(entry) => {
-                        entries_by_nusb.insert(fob.id, uid);
-                        entries_by_uid.insert(uid, entry);
+                        entries_by_uid.insert(rebind.uid, entry);
+                        eprintln!("[usb:{}] reattached to {:?}", rebind.uid, rebind.new_device_id);
                     }
                     Err(e) => {
-                        eprintln!("[usb:{}] attach failed: {e}", fob.serial);
+                        eprintln!("[usb:{}] reattach failed: {e}", rebind.uid);
                     }
-                }
-            }
-            usb::FobEvent::Disconnected(nusb_id) => {
-                let Some(uid) = entries_by_nusb.remove(&nusb_id) else {
-                    continue;
-                };
-                if let Some(entry) = entries_by_uid.remove(&uid) {
-                    handle_usb_detach(entry.chip_uid, &entry, &tx, &ctx, &bridge_devices);
                 }
             }
         }

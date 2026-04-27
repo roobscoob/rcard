@@ -35,15 +35,6 @@ pub struct GeneratedConfig {
     /// Filesystem mount mappings.
     pub filesystems: Vec<FilesystemEntry>,
 
-    /// Pin assignments from the board config.
-    pub pin_assignments: BTreeMap<String, BTreeMap<String, String>>,
-
-    /// Per-pin metadata from the chip ncl. The kernel's build.rs reads
-    /// `pins[PIN].default_pull` to emit PE/PS register writes alongside
-    /// each FSEL — without this, every pin lands at the chip-reset
-    /// default of "no pull" regardless of what the chip ncl declares.
-    pub pins: BTreeMap<String, PinEntry>,
-
     /// IPC ACL: server crate name → list of allowed caller task indices.
     pub ipc_acl: BTreeMap<String, Vec<usize>>,
 
@@ -80,11 +71,6 @@ pub struct FilesystemEntry {
     pub filesystem: String,
     pub mount_name: String,
     pub source: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PinEntry {
-    pub default_pull: String,
 }
 
 /// Build the master config from the resolved AppConfig.
@@ -293,19 +279,6 @@ pub fn build_config(config: &AppConfig, build_id: &str) -> GeneratedConfig {
         partitions,
         partition_acl,
         filesystems,
-        pin_assignments: config.pin_assignments.clone(),
-        pins: config
-            .pins
-            .iter()
-            .map(|(name, def)| {
-                (
-                    name.clone(),
-                    PinEntry {
-                        default_pull: def.default_pull.clone(),
-                    },
-                )
-            })
-            .collect(),
         ipc_acl,
         peers,
         task_irqs,

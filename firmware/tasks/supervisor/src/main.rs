@@ -61,7 +61,8 @@ fn usart_write_u32(mut val: u32) {
         usart_write_bytes(b"0");
         return;
     }
-    let mut buf = [0u8; 10];
+    static mut BUF: [u8; 10] = [0; 10];
+    let buf = unsafe { &mut *(&raw mut BUF) };
     let mut i = buf.len();
     while val > 0 && i > 0 {
         i -= 1;
@@ -78,7 +79,8 @@ fn usart_write_hex(mut val: u32) {
         usart_write_bytes(b"0");
         return;
     }
-    let mut buf = [0u8; 8];
+    static mut BUF: [u8; 8] = [0; 8];
+    let buf = unsafe { &mut *(&raw mut BUF) };
     let mut i = buf.len();
     while val > 0 && i > 0 {
         i -= 1;
@@ -99,7 +101,8 @@ fn usart_write_hex(mut val: u32) {
 /// Emit `T<16 hex digits> ` prefix with the current kernel tick.
 fn usart_write_tick_prefix() {
     let tick = userlib::sys_get_timer().now;
-    let mut buf = [0u8; 18]; // 'T' + 16 hex + ' '
+    static mut BUF: [u8; 18] = [0; 18];
+    let buf = unsafe { &mut *(&raw mut BUF) };
     buf[0] = b'T';
     buf[17] = b' ';
     let mut i = 16;
@@ -108,7 +111,7 @@ fn usart_write_tick_prefix() {
         let nib = ((tick >> (i * 4)) & 0xF) as u8;
         buf[16 - i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
     }
-    usart_write_bytes(&buf);
+    usart_write_bytes(buf);
 }
 
 fn handle_drop_report(sender: userlib::TaskId, data: &[u8]) {
@@ -321,14 +324,15 @@ fn handle_faults() {
     while let Some(fault_index) = kipc::find_faulted_task(next_task) {
         let fault_index = usize::from(fault_index);
         let state = {
-            let mut response = [0u8; core::mem::size_of::<TaskState>()];
+            static mut RESPONSE: [u8; core::mem::size_of::<TaskState>()] = [0; core::mem::size_of::<TaskState>()];
+            let response = unsafe { &mut *(&raw mut RESPONSE) };
             userlib::sys_send_to_kernel(
                 hubris_abi::Kipcnum::ReadTaskStatus as u16,
                 &(fault_index as u32).to_le_bytes(),
-                &mut response,
+                response,
                 &mut [],
             );
-            ssmarshal::deserialize::<TaskState>(&response)
+            ssmarshal::deserialize::<TaskState>(response)
         };
 
         let name = TASK_NAMES.get(fault_index).copied().unwrap_or("?");
@@ -365,16 +369,11 @@ fn main() -> ! {
     usart_write_tick_prefix();
     usart_write_bytes(b"supervisor: Awake\r\n");
 
-    // Sized to hold the largest inbound message: `OP_EMIT_LOG`'s payload,
-    // capped at `EMIT_LOG_MAX`. `OP_DROP_REPORT` is only 11 bytes and fits
-    // trivially. Hubris silently truncates messages larger than the
-    // buffer, which manifests as a bogus `len=…` on the supervisor side
-    // and silent data loss on the wire — so the buffer must match the
-    // largest opcode we handle.
-    let mut buf = [MaybeUninit::uninit(); EMIT_LOG_MAX];
+    static mut BUF: [MaybeUninit<u8>; EMIT_LOG_MAX] = [MaybeUninit::uninit(); EMIT_LOG_MAX];
+    let buf = unsafe { &mut *(&raw mut BUF) };
 
     loop {
-        match userlib::sys_recv_open(&mut buf, FAULT_NOTIFICATION) {
+        match userlib::sys_recv_open(buf, FAULT_NOTIFICATION) {
             userlib::MessageOrNotification::Notification(_) => {
                 handle_faults();
             }

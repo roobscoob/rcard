@@ -7,7 +7,6 @@ let miB = fun n => n * 1024 * 1024 in
   target = base.target,
   vector_table_size = base.vector_table_size,
   peripherals = base.peripherals,
-  pins = base.pins,
   memory = std.record.insert "mpi1" {
     size = miB 8,
     mappings = [

@@ -18,8 +18,5 @@ package = "kern"
 path = "../../hubris/kern"
 features = ["stack-watermark"]
 
-[build-dependencies]
-serde_json = "1"
-
 [lints]
 workspace = true

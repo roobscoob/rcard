@@ -17,9 +17,6 @@ fun args =>
     places = args.places,
     memory = args.board.memory,
     peripheral_map = args.board.peripheral_map,
-    pins = args.board.pins,
-    pin_assignments = args.board.pin_assignments,
-
     boot = {
       ftab = args.places.boot,
       image = args.places.firmware,

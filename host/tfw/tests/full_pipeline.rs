@@ -36,7 +36,6 @@ fn full_pipeline_config_to_linker() {
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config_json).unwrap()).unwrap();
     assert!(json["tasks"].as_array().unwrap().len() > 0);
-    assert!(json["pin_assignments"].as_object().unwrap().len() > 0);
     assert!(json["ipc_acl"].as_object().unwrap().len() > 0);
 
     // 5. Verify KCONFIG would be generated (don't actually compile)

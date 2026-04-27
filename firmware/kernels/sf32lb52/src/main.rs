@@ -30,7 +30,104 @@ pub static __INTERRUPTS: VectorTable = VectorTable(
     }; 99],
 );
 
-include!(concat!(env!("OUT_DIR"), "/pin_config.rs"));
+/// Apply all bentoboard pin assignments.
+///
+/// # Safety
+///
+/// Writes to HPSYS_PINMUX PAD registers and HPSYS_CFG PINR registers.
+/// Must be called before peripherals that depend on pin muxing.
+pub unsafe fn apply_pin_config() {
+    /// Read-modify-write: clear `mask` bits then set `val` bits.
+    #[inline(always)]
+    unsafe fn rmw(addr: u32, mask: u32, val: u32) {
+        let p = addr as *mut u32;
+        p.write_volatile((p.read_volatile() & !mask) | val);
+    }
+
+    // PA00 -> lcdc spi rstb (FSEL=1, pull=down)
+    rmw(0x5000_3034, 0x7F, 0x11);
+    // PA01 -> ovp_fault gpio in (FSEL=0, pull=down, IE)
+    rmw(0x5000_3038, 0x7F, 0x50);
+    // PA02 -> display_en gpio out (FSEL=0, pull=down)
+    rmw(0x5000_303C, 0x7F, 0x10);
+    // PA03 -> lcdc spi cs (FSEL=1, pull=up)
+    rmw(0x5000_3040, 0x7F, 0x31);
+    // PA04 -> lcdc spi clk (FSEL=1, pull=down)
+    rmw(0x5000_3044, 0x7F, 0x11);
+    // PA05 -> lcdc spi dio0 (FSEL=1, pull=down)
+    rmw(0x5000_3048, 0x7F, 0x11);
+    // PA06 -> lcdc spi dio1 (FSEL=1, pull=down)
+    rmw(0x5000_304C, 0x7F, 0x11);
+    // PA07 -> atim1 ch1 (FSEL=5, pull=down)
+    rmw(0x5000_3050, 0x7F, 0x15);
+    rmw(0x5000_B078, 0x3F, 0x07); // PINR: atim1 ch1 = PA07
+    // PA08 -> haptic_en gpio out (FSEL=0, pull=down)
+    rmw(0x5000_3054, 0x7F, 0x10);
+    // PA09 -> usart2 tx (FSEL=4, pull=down)
+    rmw(0x5000_3058, 0x7F, 0x14);
+    rmw(0x5000_B05C, 0x3F, 0x09); // PINR: usart2 tx = PA09
+    // PA10 -> usart2 rx (FSEL=4, pull=up, IE)
+    rmw(0x5000_305C, 0x7F, 0x74);
+    rmw(0x5000_B05C, 0x3F00, 0x0A00); // PINR: usart2 rx = PA10
+    // PA12 -> mpi2 cs (FSEL=1, pull=up)
+    rmw(0x5000_3064, 0x7F, 0x31);
+    // PA13 -> mpi2 dio1 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3068, 0x7F, 0x51);
+    // PA14 -> mpi2 dio2 (FSEL=1, pull=up, IE)
+    rmw(0x5000_306C, 0x7F, 0x71);
+    // PA15 -> mpi2 dio0 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3070, 0x7F, 0x51);
+    // PA16 -> mpi2 clk (FSEL=1, pull=down)
+    rmw(0x5000_3074, 0x7F, 0x11);
+    // PA17 -> mpi2 dio3 (FSEL=1, pull=up, IE)
+    rmw(0x5000_3078, 0x7F, 0x71);
+    // PA18 -> usart1 rx (FSEL=4, pull=up, IE)
+    rmw(0x5000_307C, 0x7F, 0x74);
+    rmw(0x5000_B058, 0x3F00, 0x1200); // PINR: usart1 rx = PA18
+    // PA19 -> usart1 tx (FSEL=4, pull=none)
+    rmw(0x5000_3080, 0x7F, 0x04);
+    rmw(0x5000_B058, 0x3F, 0x13); // PINR: usart1 tx = PA19
+    // PA24 -> spi1 dio (FSEL=2, pull=down)
+    rmw(0x5000_3094, 0x7F, 0x12);
+    // PA25 -> i2s1 sdo (FSEL=3, pull=down)
+    rmw(0x5000_3098, 0x7F, 0x13);
+    // PA26 -> rfid_wake gpio in (FSEL=0, pull=up, IE)
+    rmw(0x5000_309C, 0x7F, 0x70);
+    // PA27 -> touch_int gpio in (FSEL=0, pull=up, IE)
+    rmw(0x5000_30A0, 0x7F, 0x70);
+    // PA28 -> ws2812_en gpio out (FSEL=0, pull=down)
+    rmw(0x5000_30A4, 0x7F, 0x10);
+    // PA30 -> i2c3 sda (FSEL=4, pull=down, IE)
+    rmw(0x5000_30AC, 0x7F, 0x54);
+    rmw(0x5000_B050, 0x3F00, 0x1E00); // PINR: i2c3 sda = PA30
+    // PA31 -> i2c3 scl (FSEL=4, pull=down, IE)
+    rmw(0x5000_30B0, 0x7F, 0x54);
+    rmw(0x5000_B050, 0x3F, 0x1F); // PINR: i2c3 scl = PA31
+    // PA32 -> i2c2 sda (FSEL=4, pull=down, IE)
+    rmw(0x5000_30B4, 0x7F, 0x54);
+    rmw(0x5000_B04C, 0x3F00, 0x2000); // PINR: i2c2 sda = PA32
+    // PA33 -> i2c2 scl (FSEL=4, pull=down, IE)
+    rmw(0x5000_30B8, 0x7F, 0x54);
+    rmw(0x5000_B04C, 0x3F, 0x21); // PINR: i2c2 scl = PA33
+    // PA37 -> spi2 dio (FSEL=2, pull=down)
+    rmw(0x5000_30C8, 0x7F, 0x12);
+    // PA38 -> spi2 di (FSEL=2, pull=down, IE)
+    rmw(0x5000_30CC, 0x7F, 0x52);
+    // PA39 -> spi2 clk (FSEL=2, pull=up)
+    rmw(0x5000_30D0, 0x7F, 0x32);
+    // PA40 -> spi2 cs (FSEL=2, pull=up)
+    rmw(0x5000_30D4, 0x7F, 0x32);
+    // PA41 -> i2c1 scl (FSEL=4, pull=up, IE)
+    rmw(0x5000_30D8, 0x7F, 0x74);
+    rmw(0x5000_B048, 0x3F, 0x29); // PINR: i2c1 scl = PA41
+    // PA42 -> i2c1 sda (FSEL=4, pull=up, IE)
+    rmw(0x5000_30DC, 0x7F, 0x74);
+    rmw(0x5000_B048, 0x3F00, 0x2A00); // PINR: i2c1 sda = PA42
+    // PA43 -> accel_int gpio in (FSEL=0, pull=down, IE)
+    rmw(0x5000_30E0, 0x7F, 0x50);
+    // PA44 -> nfc_int gpio in (FSEL=0, pull=down, IE)
+    rmw(0x5000_30E4, 0x7F, 0x50);
+}
 
 /// USART1 is pre-configured at boot: 1M baud, 8N1, TX=PA19.
 /// clk_peri_hpsys is clk_hxt48 (48MHz) independent of system clock.
@@ -229,7 +326,6 @@ fn main() -> ! {
         core::ptr::read_volatile(VECTOR_TABLE_OFFSET_REGISTER)
     });
 
-    // Apply board pin configuration (generated from app.kdl pin assignments)
     unsafe { apply_pin_config() };
 
     let cycles_per_ms = clock_setup();

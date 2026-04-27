@@ -25,9 +25,6 @@ struct Config {
     #[serde(default)]
     filesystems: Vec<FilesystemEntry>,
     #[serde(default)]
-    #[allow(dead_code)]
-    pin_assignments: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-    #[serde(default)]
     peers: std::collections::BTreeMap<String, Option<usize>>,
     #[serde(default)]
     task_irqs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>>,

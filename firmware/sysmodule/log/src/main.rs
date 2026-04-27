@@ -76,6 +76,11 @@ fn main() -> ! {
 
     send_awake(0);
 
+    emit_supervisor_hello(
+        CACHED_UID.get().copied().unwrap_or([0u8; 16]),
+        generated::build_info::BUILD_ID_BYTES,
+    );
+
     ipc::server! {
         Log: server::LogResource,
         HostTransport: transport::LogHostTransport,

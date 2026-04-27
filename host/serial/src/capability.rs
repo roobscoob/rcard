@@ -48,7 +48,9 @@ impl SifliDebug {
     /// Try to enter debug mode. Returns a session guard if the device
     /// responds within 1 second, or `None` on timeout.
     pub async fn try_acquire(&self) -> Option<DebugSession> {
+        eprintln!("[sifli] try_acquire: waiting for lock...");
         let guard = self.lock.clone().lock_owned().await;
+        eprintln!("[sifli] try_acquire: lock acquired, entering debug...");
         match tokio::time::timeout(Duration::from_secs(1), self.handle.enter()).await {
             Ok(Ok(poison_gen)) => Some(DebugSession {
                 handle: self.handle.clone(),
@@ -133,7 +135,13 @@ impl Drop for DebugSession {
         let handle = self.handle.clone();
         let poison_gen = self.poison_gen;
         tokio::spawn(async move {
-            let _ = handle.exit(poison_gen).await;
+            eprintln!("[sifli] drop: sending Exit...");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.exit(poison_gen),
+            )
+            .await;
+            eprintln!("[sifli] drop: Exit returned {result:?}, releasing lock");
             drop(guard);
         });
     }

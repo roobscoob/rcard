@@ -8,6 +8,4 @@ let chip = import "../chips/sf32lb525uc6.ncl" in
   kernel = import "../kernels/sf32lb52/kernel.ncl",
   address_spaces = chip.address_spaces,
   peripheral_map = chip.peripherals,
-  pins = chip.pins,
-  pin_assignments = {},
 }

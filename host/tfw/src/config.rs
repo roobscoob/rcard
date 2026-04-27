@@ -23,10 +23,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub peripheral_map: BTreeMap<String, PeripheralDef>,
     #[serde(default)]
-    pub pins: BTreeMap<String, PinDef>,
-    #[serde(default)]
-    pub pin_assignments: BTreeMap<String, BTreeMap<String, String>>,
-    #[serde(default)]
     pub notifications: BTreeMap<String, NotificationGroup>,
     #[serde(default)]
     pub filesystems: BTreeMap<String, FilesystemConfig>,
@@ -203,25 +199,6 @@ pub struct RenodeModel {
     pub model: String,
     #[serde(default)]
     pub properties: BTreeMap<String, u64>,
-}
-
-// -- Pins --
-
-#[derive(Debug, Deserialize, serde::Serialize)]
-pub struct PinDef {
-    pub default_pull: String,
-    #[serde(default)]
-    pub supports: Vec<PinCapability>,
-}
-
-#[derive(Debug, Deserialize, serde::Serialize)]
-pub struct PinCapability {
-    pub kind: String,
-    #[serde(default)]
-    pub instance: Option<u32>,
-    #[serde(default)]
-    pub mode: Option<String>,
-    pub signals: Vec<String>,
 }
 
 // -- Notifications --

@@ -453,7 +453,6 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "kern",
- "serde_json",
  "sifli-pac",
 ]
 
