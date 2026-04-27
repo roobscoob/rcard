@@ -32,6 +32,7 @@ serialport = { version = "4", features = ["serde", "usbportinfo-interface"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
+font-kit = "0.14"
 uuid = "1"
 ipc-runtime = { path = "../ipc-runtime" }
 indexmap = "2"

@@ -70,21 +70,47 @@ fn ssd1312_cmd_arg(cmd: u8, arg: u8) {
 
 /// Configure the LCDC for 4-wire SPI mode and reset the display.
 fn lcdc_init_spi() {
+    let rcc = sifli_pac::HPSYS_RCC;
+    rcc.rstr1().modify(|w| w.set_lcdc1(true));
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    rcc.rstr1().modify(|w| w.set_lcdc1(false));
+    rcc.enr1().modify(|w| w.set_lcdc1(true));
+
     let l = lcdc();
+
+    rcard_log::trace!("LCDC LCD_CONF before: {}", l.lcd_conf().read().0);
     // LCD_CONF: bits [4:2] LCD_INTF_SEL = 1 (SPI interface)
     l.lcd_conf().write(|w| w.0 = 1 << 2);
-    // SPI_IF_CONF: bit 27 SPI_CS_AUTO_DIS = 1, bits [13:6] CLK_DIV = 4,
-    //              bits [19:17] LINE = 0 (4-wire SPI)
-    l.spi_if_conf().write(|w| w.0 = (1 << 27) | (4 << 6));
+    rcard_log::trace!("LCDC LCD_CONF after: {}", l.lcd_conf().read().0);
+
+    // SPI_IF_CONF: bits [13:6] CLK_DIV = 4, bits [19:17] LINE = 0 (4-wire SPI),
+    //              SPI_CS_AUTO_DIS = 0 (let LCDC manage CS automatically)
+    l.spi_if_conf().write(|w| w.0 = 4 << 6);
+    rcard_log::trace!("LCDC SPI_IF_CONF: {}", l.spi_if_conf().read().0);
+
     // LCD_IF_CONF: LCD_RSTB = 0 (assert reset),
     //              PWH[17:12] = 1, PWL[11:6] = 1, TAH[5:3] = 1, TAS[2:0] = 1
     l.lcd_if_conf()
         .write(|w| w.0 = (1 << 12) | (1 << 6) | (1 << 3) | 1);
+    rcard_log::trace!(
+        "LCDC LCD_IF_CONF (reset asserted): {}",
+        l.lcd_if_conf().read().0
+    );
+
+    // Hold reset low for ~10ms (main.c uses rt_thread_mdelay(10))
+    busy_wait(2_400_000);
+
     // LCD_IF_CONF: bit 23 LCD_RSTB = 1 (release reset), same timing
     l.lcd_if_conf()
         .write(|w| w.0 = (1 << 23) | (1 << 12) | (1 << 6) | (1 << 3) | 1);
-    // Wait for SSD1312 to complete internal reset (~3us minimum)
-    busy_wait(1_000);
+    rcard_log::trace!(
+        "LCDC LCD_IF_CONF (reset released): {}",
+        l.lcd_if_conf().read().0
+    );
+
+    // Wait for SSD1312 to complete internal reset (~10ms, matching main.c)
+    busy_wait(2_400_000);
+    rcard_log::trace!("LCDC init complete");
 }
 
 fn ssd1312_init(config: &DisplayConfiguration) {
@@ -92,9 +118,14 @@ fn ssd1312_init(config: &DisplayConfiguration) {
     let height = config.height;
 
     ssd1312_cmd(0xAE); // Display off
+    rcard_log::trace!(
+        "SPI first cmd sent, LCD_SINGLE={}",
+        lcdc().lcd_single().read().0
+    );
 
     ssd1312_cmd_arg(0xD5, 0x80); // Clock divide / oscillator
     ssd1312_cmd_arg(0xA8, height - 1); // MUX ratio
+    ssd1312_cmd_arg(0xAD, 0x40); // External IREF selection
     ssd1312_cmd_arg(0xD3, 0x00); // Display offset = 0
     ssd1312_cmd(0x40); // Start line = 0
 
@@ -111,8 +142,8 @@ fn ssd1312_init(config: &DisplayConfiguration) {
 
     ssd1312_cmd_arg(0xDA, config.com_pin_config); // COM pins config
     ssd1312_cmd_arg(0x81, config.contrast); // Contrast
-    ssd1312_cmd_arg(0xD9, 0x22); // Pre-charge period
-    ssd1312_cmd_arg(0xDB, 0x20); // VCOMH deselect
+    ssd1312_cmd_arg(0xD9, 0xF1); // Pre-charge period
+    ssd1312_cmd_arg(0xDB, 0x40); // VCOMH deselect
 
     // Normal / inverted
     ssd1312_cmd(if config.invert { 0xA7 } else { 0xA6 });
@@ -143,9 +174,30 @@ impl Display for DisplayResource {
             return Err(DisplayOpenError::AlreadyOpen);
         }
 
+        rcard_log::trace!("display open: {}x{}, contrast={}, seg_remap={}, com_rev={}, com_pin={}, chg_pump={}, invert={}",
+            config.width, config.height, config.contrast,
+            config.segment_remap, config.com_reversed,
+            config.com_pin_config, config.charge_pump, config.invert);
+
+        rcard_log::trace!("setting display_en HIGH");
         set_display_en(true);
+
+        // wait for the display's power supply to stabilize before sending commands; empirically
+        // ~10ms is sufficient
+
+        sifli_pac::PMUC
+            .peri_ldo()
+            .modify(|peri_ldo| peri_ldo.set_en_vdd33_ldo3(true));
+
+        for _ in 0..10_000_000 {
+            core::hint::black_box({});
+        }
+
+        rcard_log::trace!("power stabilized, initializing LCDC");
         lcdc_init_spi();
+        rcard_log::trace!("LCDC ready, initializing SSD1312");
         ssd1312_init(&config);
+        rcard_log::trace!("display open complete");
 
         Ok(DisplayResource { config })
     }
@@ -170,6 +222,10 @@ impl Display for DisplayResource {
                 ssd1312_data(*col);
             }
         }
+    }
+
+    fn set_contrast(&mut self, _meta: ipc::Meta, value: u8) {
+        ssd1312_cmd_arg(0x81, value);
     }
 }
 

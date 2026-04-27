@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::frame::Frame;
 use super::protocol::{Command, Error, Response};
@@ -78,11 +78,13 @@ where
 
     tokio::spawn(read_loop(reader, passthrough_tx, frame_tx, control_rx));
 
+    let (poison_tx, _poison_rx) = watch::channel(0u64);
     let handle = DebugHandle {
         writer: writer.clone(),
         frame_rx: tokio::sync::Mutex::new(frame_rx),
         control_tx,
         byte_counter,
+        poison_tx,
     };
     let tap_reader = TapReader {
         rx: passthrough_rx,
@@ -101,17 +103,21 @@ async fn read_loop(
     frame_tx: mpsc::Sender<Frame>,
     mut control_rx: mpsc::Receiver<TapControl>,
 ) {
+    eprintln!("[tap] read_loop started");
     let mut reader = BufReader::new(reader);
     let mut noise = Vec::new();
     let mut prev_was_7e = false;
 
     loop {
-        let mut byte_buf = [0u8; 1];
         let b = tokio::select! {
             biased;
             ctrl = control_rx.recv() => {
                 match ctrl {
                     Some(TapControl::ResyncOnSentinel { sentinel, done }) => {
+                        eprintln!(
+                            "[tap] resync requested, sentinel={:02x?} ({} bytes), flushing {} noise bytes",
+                            sentinel, sentinel.len(), noise.len()
+                        );
                         // Flush any accumulated noise before entering resync.
                         if !noise.is_empty() {
                             let _ = passthrough_tx.send(std::mem::take(&mut noise)).await;
@@ -121,45 +127,86 @@ async fn read_loop(
                             .await
                             .is_err()
                         {
+                            eprintln!("[tap] resync_on_sentinel failed (read error), exiting");
                             return;
                         }
+                        eprintln!("[tap] resync complete, resuming normal framing");
                         let _ = done.send(());
                         continue;
                     }
-                    None => break,
+                    None => {
+                        eprintln!("[tap] control channel closed, exiting");
+                        break;
+                    }
                 }
             }
-            result = reader.read_exact(&mut byte_buf) => {
+            result = reader.read_u8() => {
                 match result {
-                    Ok(_) => byte_buf[0],
-                    Err(_) => break,
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[tap] read error: {e}, exiting");
+                        break;
+                    }
                 }
             }
         };
 
+        // If the previous byte was 0x7E, check if this byte completes the start
+        // marker 0x7E79. If so, route to frame parser
         if prev_was_7e && b == 0x79 {
             // Start marker found. The 0x7E we held back is part of the
             // marker, not noise — don't include it.
             prev_was_7e = false;
+            eprintln!("[tap] frame start marker 0x[7e79] detected");
 
             // Flush any accumulated noise to passthrough.
             if !noise.is_empty() {
+                if noise.len() <= 16 {
+                    eprintln!(
+                        "[tap] flushing {} noise bytes before frame: {:02x?}",
+                        noise.len(),
+                        noise
+                    );
+                } else {
+                    eprintln!(
+                        "[tap] flushing {} noise bytes before frame: {:02x?}...",
+                        noise.len(),
+                        &noise[..16]
+                    );
+                }
                 let _ = passthrough_tx.send(std::mem::take(&mut noise)).await;
             }
 
             // Read the rest of the frame (length, header, payload).
             match read_frame_body(&mut reader).await {
                 Ok(frame) => {
+                    if frame.payload().len() <= 16 {
+                        eprintln!(
+                            "[tap] frame complete, {} payload bytes: {:02x?}",
+                            frame.payload().len(),
+                            frame.payload()
+                        );
+                    } else {
+                        eprintln!(
+                            "[tap] frame complete, {} payload bytes: {:02x?}...",
+                            frame.payload().len(),
+                            &frame.payload()[..16]
+                        );
+                    }
                     let _ = frame_tx.send(frame).await;
                 }
-                Err(_) => return,
+                Err(e) => {
+                    eprintln!("[tap] frame body read failed: {e}, exiting");
+                }
             }
         } else {
             if prev_was_7e {
                 // The previous 0x7E was not a start marker — it's noise.
+                eprintln!("[tap] false 7e (followed by {:02x}), pushing to noise", b);
                 noise.push(0x7E);
             }
             if b == 0x7E {
+                eprintln!("[tap] holding 7e (possible start marker)");
                 prev_was_7e = true;
             } else {
                 prev_was_7e = false;
@@ -170,15 +217,35 @@ async fn read_loop(
         // Flush noise when the internal buffer is drained (meaning the
         // next read will actually go to the OS), so passthrough stays
         // responsive without flushing on every single byte.
-        if !noise.is_empty() && !prev_was_7e && reader.buffer().is_empty() {
+        if !noise.is_empty() && reader.buffer().is_empty() {
+            if noise.len() <= 16 {
+                eprintln!(
+                    "[tap] flushing {} noise bytes (buffer drained, prev_7e={}): {:02x?}",
+                    noise.len(),
+                    prev_was_7e,
+                    noise,
+                );
+            } else {
+                eprintln!(
+                    "[tap] flushing {} noise bytes (buffer drained, prev_7e={}): {:02x?}...",
+                    noise.len(),
+                    prev_was_7e,
+                    &noise[..16],
+                );
+            }
             let _ = passthrough_tx.send(std::mem::take(&mut noise)).await;
         }
     }
 
     // Flush any remaining noise on exit.
     if !noise.is_empty() {
+        eprintln!(
+            "[tap] flushing {} remaining noise bytes on exit",
+            noise.len()
+        );
         let _ = passthrough_tx.send(noise).await;
     }
+    eprintln!("[tap] read_loop exited");
 }
 
 /// Sentinel-resync sub-loop.
@@ -246,6 +313,7 @@ pub struct DebugHandle {
     frame_rx: tokio::sync::Mutex<mpsc::Receiver<Frame>>,
     control_tx: mpsc::Sender<TapControl>,
     byte_counter: Arc<AtomicU64>,
+    poison_tx: watch::Sender<u64>,
 }
 
 impl DebugHandle {
@@ -256,52 +324,89 @@ impl DebugHandle {
     pub fn byte_counter(&self) -> Arc<AtomicU64> {
         self.byte_counter.clone()
     }
+
+    /// Poison the handle: any in-flight `request()` call (via the watch
+    /// channel) and any future request from the current session (via the
+    /// generation mismatch) will return `Error::Timeout` immediately.
+    ///
+    /// Call when the device has rebooted (SFBL seen) and any existing
+    /// debug session is known to be dead. The generation bump is sticky
+    /// — all requests fail until the next `enter()` snapshots the new
+    /// generation.
+    pub fn poison(&self) {
+        self.poison_tx.send_modify(|g| *g += 1);
+    }
 }
 
 /// Send a command and wait for the response.
 ///
 /// For fire-and-forget commands (`Exit`), returns `Ok(None)`.
 impl DebugHandle {
-    pub async fn request(&self, cmd: &Command<'_>) -> Result<Response, Error> {
+    pub async fn request(&self, poison_gen: u64, cmd: &Command<'_>) -> Result<Response, Error> {
+        if *self.poison_tx.borrow() != poison_gen {
+            eprintln!("[dbg] poisoned — rejecting {cmd} without sending");
+            return Err(Error::Timeout);
+        }
+
+        eprintln!("[dbg] sending command: {}", cmd);
+
         let frame = cmd.to_frame();
         {
             let mut w = self.writer.lock().await;
             frame.send(&mut **w).await?;
         }
 
-        let frame = self
-            .frame_rx
-            .lock()
-            .await
-            .recv()
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "read task exited"))?;
+        eprintln!("[dbg] command sent, awaiting response...");
+
+        let mut poison = self.poison_tx.subscribe();
+        let frame = {
+            let mut rx = self.frame_rx.lock().await;
+            tokio::select! {
+                biased;
+                _ = poison.changed() => {
+                    eprintln!("[dbg] poisoned — device rebooted, aborting request");
+                    return Err(Error::Timeout);
+                }
+                frame = rx.recv() => {
+                    frame.ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "read task exited"))?
+                }
+            }
+        };
+
+        match Response::parse(frame.payload()) {
+            Ok(v) => eprintln!("[dbg] response parsed successfully: {}", v),
+            Err(e) => eprintln!(
+                "[dbg] response parse error: {e}, raw payload: {:02x?}",
+                frame.payload()
+            ),
+        };
 
         Ok(Response::parse(frame.payload())?)
     }
 
-    /// Enter debug mode.
+    /// Enter debug mode. Returns the poison generation snapshot that
+    /// must be passed to subsequent `request()` calls on this session.
     ///
-    /// Drains any stale response frames (e.g. from a previous Exit) before
-    /// sending the Enter command.
-    pub async fn enter(&self) -> Result<(), Error> {
+    /// Drains stale response frames, then sends the Enter command.
+    pub async fn enter(&self) -> Result<u64, Error> {
+        let poison_gen = *self.poison_tx.borrow();
         {
             let mut rx = self.frame_rx.lock().await;
             while rx.try_recv().is_ok() {}
         }
-        self.request(&Command::Enter).await?;
-        Ok(())
+        self.request(poison_gen, &Command::Enter).await?;
+        Ok(poison_gen)
     }
 
     /// Exit debug mode (fire-and-forget).
-    pub async fn exit(&self) -> Result<(), Error> {
-        self.request(&Command::Exit).await?;
+    pub async fn exit(&self, poison_gen: u64) -> Result<(), Error> {
+        self.request(poison_gen, &Command::Exit).await?;
         Ok(())
     }
 
     /// Read `count` 32-bit words starting at `addr`.
-    pub async fn mem_read(&self, addr: u32, count: u16) -> Result<Vec<u32>, Error> {
-        match self.request(&Command::MemRead { addr, count }).await? {
+    pub async fn mem_read(&self, poison_gen: u64, addr: u32, count: u16) -> Result<Vec<u32>, Error> {
+        match self.request(poison_gen, &Command::MemRead { addr, count }).await? {
             Response::MemRead(words) => Ok(words),
             _ => Err(Error::Protocol(
                 super::protocol::ProtocolError::UnexpectedResponse("MemRead"),
@@ -310,8 +415,8 @@ impl DebugHandle {
     }
 
     /// Write 32-bit words to `addr`.
-    pub async fn mem_write(&self, addr: u32, data: &[u32]) -> Result<(), Error> {
-        match self.request(&Command::MemWrite { addr, data }).await? {
+    pub async fn mem_write(&self, poison_gen: u64, addr: u32, data: &[u32]) -> Result<(), Error> {
+        match self.request(poison_gen, &Command::MemWrite { addr, data }).await? {
             Response::MemWrite => Ok(()),
             _ => Err(Error::Protocol(
                 super::protocol::ProtocolError::UnexpectedResponse("MemWrite"),
@@ -372,9 +477,7 @@ impl DebugHandle {
 
         match result {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => {
-                Err(io::Error::new(io::ErrorKind::BrokenPipe, "tap closed").into())
-            }
+            Ok(Err(_)) => Err(io::Error::new(io::ErrorKind::BrokenPipe, "tap closed").into()),
             Err(_) => Err(Error::Timeout),
         }
     }

@@ -18,13 +18,10 @@ pub use ipc_protocol::{Ipc, IpcCallResult};
 /// attached) — the underlying capability registry's `query()` returns
 /// whichever was registered first, which depends on adapter attachment
 /// order rather than caller intent.
-pub fn pick<D>(device: &D) -> Option<Arc<Ipc>>
-where
-    D: device::device::Device + ?Sized,
-{
+pub fn pick(device: &crate::bridge::BridgeDevice) -> Option<Arc<Ipc>> {
     device
         .query_all_capabilities(TypeId::of::<Ipc>())
         .into_iter()
-        .filter_map(|(_, arc)| arc.downcast::<Ipc>().ok())
-        .max_by_key(|i| i.priority())
+        .filter_map(|(_, arc): (_, Arc<dyn std::any::Any + Send + Sync>)| arc.downcast::<Ipc>().ok())
+        .max_by_key(|i: &Arc<Ipc>| i.priority())
 }

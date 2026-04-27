@@ -17,6 +17,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
 using Antmicro.Renode.Backends.Display;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
@@ -84,6 +86,7 @@ namespace Antmicro.Renode.Peripherals.Display
         protected override void Repaint()
         {
             ssd1312.RenderToBuffer(buffer);
+            TransmitGDDRAM();
         }
 
         // ── Register map ───────────────────────────────────────────────
@@ -405,6 +408,11 @@ namespace Antmicro.Renode.Peripherals.Display
                     ssd1312.WriteCommand(b);
                 }
             }
+
+            if(isData && ssd1312.ConsumeFrameReady())
+            {
+                TransmitGDDRAM();
+            }
         }
 
         // ── Image path: bulk DMA transfer ──────────────────────────────
@@ -445,6 +453,7 @@ namespace Antmicro.Renode.Peripherals.Display
             }
 
             eofRawStat = true;
+            TransmitGDDRAM();
             this.Log(LogLevel.Debug, "LCDC: frame complete, EOF set");
         }
 
@@ -463,6 +472,48 @@ namespace Antmicro.Renode.Peripherals.Display
             }
         }
 
+        // ── Display stream — host-side TCP socket ──────────────────────
+
+        public int StreamPort
+        {
+            get => streamPort;
+            set
+            {
+                streamPort = value;
+                if(value > 0)
+                {
+                    streamListener = new TcpListener(IPAddress.Loopback, value);
+                    streamListener.Start();
+                    streamListener.BeginAcceptTcpClient(OnStreamClientConnected, null);
+                    this.Log(LogLevel.Info, "LCDC: display stream listening on port {0}", value);
+                }
+            }
+        }
+
+        private void OnStreamClientConnected(IAsyncResult ar)
+        {
+            try
+            {
+                streamClient = streamListener.EndAcceptTcpClient(ar);
+                this.Log(LogLevel.Info, "LCDC: display stream client connected");
+            }
+            catch(ObjectDisposedException) {}
+        }
+
+        private void TransmitGDDRAM()
+        {
+            if(streamClient == null) return;
+            try
+            {
+                var data = ssd1312.GetGDDRAM();
+                streamClient.GetStream().Write(data, 0, data.Length);
+            }
+            catch
+            {
+                streamClient = null;
+            }
+        }
+
         // ── SSD1312 display inspection (forwarded from inner model) ────
 
         public string DumpGDDRAM() => ssd1312.DumpGDDRAM();
@@ -476,6 +527,10 @@ namespace Antmicro.Renode.Peripherals.Display
         private readonly IBusController sysbus;
         private readonly DoubleWordRegisterCollection registers;
         private readonly SSD1312Model ssd1312;
+
+        private int streamPort;
+        private TcpListener streamListener;
+        private TcpClient streamClient;
 
         private bool lcdBusy;
         private int lcdIntfSel;
@@ -610,6 +665,7 @@ namespace Antmicro.Renode.Peripherals.Display
                 {
                     gddram[pageAddress * Width + columnAddress] = value;
                 }
+                dataWriteCount++;
 
                 switch(addressingMode)
                 {
@@ -843,6 +899,18 @@ namespace Antmicro.Renode.Peripherals.Display
             public bool ChargePumpEnabled => chargePumpEnabled;
             public byte Contrast => contrastLevel;
 
+            public byte[] GetGDDRAM() => (byte[])gddram.Clone();
+
+            public bool ConsumeFrameReady()
+            {
+                if(dataWriteCount >= Pages * Width)
+                {
+                    dataWriteCount = 0;
+                    return true;
+                }
+                return false;
+            }
+
             // ── State ──────────────────────────────────────────────────
 
             private const int Width = 128;
@@ -866,6 +934,8 @@ namespace Antmicro.Renode.Peripherals.Display
             private byte preChargePeriod;
             private byte vcomhDeselect;
             private bool chargePumpEnabled;
+
+            private int dataWriteCount;
 
             private int pageAddress;
             private int columnAddress;

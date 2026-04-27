@@ -96,10 +96,6 @@ static DECODER: GlobalState<cobs::DecoderState> = GlobalState::new(cobs::Decoder
 pub fn handle_usart_rx() {
     let Some(usart) = USART.get() else { return };
 
-    // If host_proxy hasn't consumed the previous request yet, don't drain
-    // further USART bytes into the decoder. The protocol is synchronous so
-    // the host won't send more anyway, and this keeps the staged frame in
-    // FRAME_BUF intact. (Mirrors the USB transport's busy-check.)
     let busy = FRAME_BUF.with(|fb| fb.staged).unwrap_or(false);
     if busy {
         return;

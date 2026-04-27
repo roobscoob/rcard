@@ -12,6 +12,7 @@ generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc" }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
+sysmodule_display_api = { path = "../../sysmodule/display/api" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
 userlib.workspace = true
 

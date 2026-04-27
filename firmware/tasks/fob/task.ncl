@@ -4,6 +4,7 @@ fun ctx => {
   crate_info = import "./Cargo.toml",
   priority = lib.workgroup.app,
   depends_on = [
+    ctx.tasks.sysmodule_display,
     ctx.tasks.sysmodule_log,
   ],
   regions = {

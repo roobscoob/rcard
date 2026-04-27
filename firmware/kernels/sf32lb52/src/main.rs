@@ -213,7 +213,7 @@ const VECTOR_TABLE_OFFSET_REGISTER: *mut u32 = 0xE000_ED08 as *mut u32;
 #[entry]
 fn main() -> ! {
     usart1_write_str(TICK_ZERO);
-    usart1_write_str("kernel: Awake\r\n");
+    usart1_write_str("kernel: Awake - ハロー世界\r\n");
 
     // Point the CPU at our vector table (VTOR = SCB + 0x08)
     unsafe {

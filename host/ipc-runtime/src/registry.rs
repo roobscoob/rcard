@@ -204,6 +204,11 @@ impl Registry {
         })
     }
 
+    /// All registered (resource, method) pairs. For diagnostics.
+    pub fn method_keys(&self) -> Vec<(&str, &str)> {
+        self.methods.keys().map(|(r, m)| (r.as_str(), m.as_str())).collect()
+    }
+
     /// Look up a method's schema by resource + method name.
     pub fn method(&self, resource: &str, method: &str) -> Option<&MethodSchema> {
         self.methods.get(&(resource.to_string(), method.to_string()))

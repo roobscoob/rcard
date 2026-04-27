@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use device::adapter::AdapterId;
 use device::logs::Log;
@@ -49,7 +50,7 @@ pub enum SerialAdapterType {
     Usart2,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SerialPortStatus {
     /// Background loop is trying to open the port.
     Connecting,
@@ -58,7 +59,7 @@ pub enum SerialPortStatus {
     /// Device detected — ephemeral device created.
     DeviceDetected,
     /// Port couldn't be opened (retrying).
-    Error,
+    Error(Arc<str>),
 }
 
 /// A configured serial port in the adapters sidebar.
@@ -135,6 +136,7 @@ impl FirmwareHandle {
 pub enum KnownCapability {
     SifliDebug,
     Ipc,
+    Display,
 }
 
 // ── Device ──────────────────────────────────────────────────────────────
@@ -148,8 +150,6 @@ pub enum DeviceKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevicePhase {
-    /// Power unstable — seeing repeated SFBL resets.
-    Stabilizing,
     /// SiFli bootrom — stable, ready for debug entry.
     Bootrom,
     /// rcard bootloader running — saw "bootloader: Awake\r\n".
@@ -186,6 +186,9 @@ pub struct DeviceHandle {
     /// metadata when `DeviceReportedBuildId` fires. `None` if no tfw
     /// matched or if the tfw had no schema data.
     pub ipc_registry: Option<std::sync::Arc<ipc_runtime::Registry>>,
+    /// Latest display frame (OLED GDDRAM snapshot). Only the most recent
+    /// frame is kept.
+    pub display_frame: Option<device::logs::DisplayFrame>,
 }
 
 impl DeviceHandle {
@@ -206,6 +209,7 @@ impl DeviceHandle {
             firmware_id,
             log_buffer: Vec::new(),
             ipc_registry: None,
+            display_frame: None,
         }
     }
 
@@ -484,23 +488,17 @@ impl CrateProgress {
                         escargot::format::diagnostic::DiagnosticLevel::Warning => {
                             CargoDiagLevel::Warning
                         }
-                        escargot::format::diagnostic::DiagnosticLevel::Help => {
-                            CargoDiagLevel::Help
-                        }
+                        escargot::format::diagnostic::DiagnosticLevel::Help => CargoDiagLevel::Help,
                         _ => CargoDiagLevel::Note,
                     };
                     self.cargo_summary.diagnostics.push(CargoDiagnostic {
                         level,
                         message: d.message.trim().to_string(),
                         code: d.code.as_ref().map(|c| c.code.to_string()),
-                        location: d
-                            .spans
-                            .iter()
-                            .find(|s| s.is_primary)
-                            .map(|s| {
-                                let path = s.file_name.display();
-                                format!("{path}:{}:{}", s.line_start, s.column_start)
-                            }),
+                        location: d.spans.iter().find(|s| s.is_primary).map(|s| {
+                            let path = s.file_name.display();
+                            format!("{path}:{}:{}", s.line_start, s.column_start)
+                        }),
                         rendered: d
                             .rendered
                             .as_deref()
@@ -728,15 +726,11 @@ impl BuildHandle {
         // back by that amount so `BuildHandle::elapsed()` returns the
         // real value. Otherwise collapse to zero and let the panel
         // hide the field.
-        let (started_at, finished_at) = match fw
-            .metadata
-            .build
-            .as_ref()
-            .and_then(|b| b.build_duration_ms)
-        {
-            Some(ms) => (now - std::time::Duration::from_millis(ms), Some(now)),
-            None => (now, Some(now)),
-        };
+        let (started_at, finished_at) =
+            match fw.metadata.build.as_ref().and_then(|b| b.build_duration_ms) {
+                Some(ms) => (now - std::time::Duration::from_millis(ms), Some(now)),
+                None => (now, Some(now)),
+            };
         let mut crates: Vec<CrateProgress> = Vec::new();
         let mut place_capacities: HashMap<String, u64> = HashMap::new();
         let mut memories: Vec<MemoryDevice> = Vec::new();
@@ -800,11 +794,7 @@ impl BuildHandle {
                 } else {
                     CrateKind::Task
                 };
-                let mut c = synthesise_linked_crate(
-                    name,
-                    kind,
-                    Some(task.priority),
-                );
+                let mut c = synthesise_linked_crate(name, kind, Some(task.priority));
                 // `uses` = direct dependencies' names; resource names
                 // get filled in later once we have IpcMetadata.
                 for dep in &task.depends_on {
@@ -838,11 +828,7 @@ impl BuildHandle {
                 memories.push(MemoryDevice {
                     name: name.clone(),
                     size: mem.size,
-                    mappings: mem
-                        .mappings
-                        .iter()
-                        .map(|m| (m.address, m.size))
-                        .collect(),
+                    mappings: mem.mappings.iter().map(|m| (m.address, m.size)).collect(),
                 });
             }
         }
@@ -862,9 +848,10 @@ impl BuildHandle {
                     requested_place: a.requested_place.clone(),
                 };
                 // Dedup by (owner, region) — same as live path.
-                if let Some(existing) = allocations.iter_mut().find(|x| {
-                    x.owner == alloc.owner && x.region == alloc.region
-                }) {
+                if let Some(existing) = allocations
+                    .iter_mut()
+                    .find(|x| x.owner == alloc.owner && x.region == alloc.region)
+                {
                     *existing = alloc;
                 } else {
                     allocations.push(alloc);
@@ -920,11 +907,7 @@ impl BuildHandle {
     }
 }
 
-fn synthesise_linked_crate(
-    name: &str,
-    kind: CrateKind,
-    priority: Option<u32>,
-) -> CrateProgress {
+fn synthesise_linked_crate(name: &str, kind: CrateKind, priority: Option<u32>) -> CrateProgress {
     let mut c = CrateProgress::new(name.to_string(), kind);
     c.state = CrateBuildState::Linked;
     c.priority = priority;
@@ -977,10 +960,7 @@ fn apply_ipc_to_crates(
                 for resource in serves.iter() {
                     c.provides.push(ProvidedResource {
                         resource: resource.clone(),
-                        method_count: method_count
-                            .get(resource.as_str())
-                            .copied()
-                            .unwrap_or(0),
+                        method_count: method_count.get(resource.as_str()).copied().unwrap_or(0),
                     });
                 }
             }
@@ -1276,6 +1256,7 @@ impl AppState {
                 egui_tiles::Tile::Pane(Pane::DeviceLogs(d))
                 | egui_tiles::Tile::Pane(Pane::DeviceProtocol(d))
                 | egui_tiles::Tile::Pane(Pane::DeviceRenode(d))
+                | egui_tiles::Tile::Pane(Pane::DeviceDisplay(d))
                     if *d == device_id =>
                 {
                     Some(*tile_id)
@@ -1376,9 +1357,11 @@ impl AppState {
 
         // Dedup on build_id.
         if let Some(build_id) = metadata.build.as_ref().map(|b| b.build_id.as_str()) {
-            if let Some((existing_id, _)) = self.firmware.iter().find(|(_, fw)| {
-                fw.build_id() == Some(build_id)
-            }) {
+            if let Some((existing_id, _)) = self
+                .firmware
+                .iter()
+                .find(|(_, fw)| fw.build_id() == Some(build_id))
+            {
                 return Ok(*existing_id);
             }
         }
@@ -1433,7 +1416,9 @@ impl AppState {
                 if let Ok(metadata) = tfw::archive::load_metadata(&path) {
                     // Skip if already loaded (dedup on build_id).
                     let dominated = metadata.build.as_ref().is_some_and(|b| {
-                        self.firmware.values().any(|fw| fw.build_id() == Some(&b.build_id))
+                        self.firmware
+                            .values()
+                            .any(|fw| fw.build_id() == Some(&b.build_id))
                     });
                     if dominated {
                         continue;
@@ -1442,10 +1427,99 @@ impl AppState {
                     let id = self.next_firmware_id();
                     self.firmware.insert(
                         id,
-                        FirmwareHandle { id, path: Some(path), metadata },
+                        FirmwareHandle {
+                            id,
+                            path: Some(path),
+                            metadata,
+                        },
                     );
                 }
             }
+        }
+    }
+
+    /// If a flash is pending for this device and both preconditions are met
+    /// (IPC registry built + USB/IPC transport attached), launch `run_flash`.
+    /// Called from `AdapterBound` and `DeviceReportedBuildId` — whichever
+    /// arrives second triggers the flash.
+    fn try_start_flash(&mut self, device_id: DeviceId) {
+        let firmware_id = match &self.flash_modal {
+            Some(FlashModalState::Flashing {
+                device_id: d,
+                firmware_id,
+                phase,
+            }) if *d == device_id => {
+                if !matches!(
+                    phase,
+                    crate::bridge::FlashPhase::BootingStub
+                        | crate::bridge::FlashPhase::StubBooted
+                ) {
+                    return;
+                }
+                *firmware_id
+            }
+            Some(FlashModalState::Picker {
+                firmware_id,
+                selected_device,
+            }) if *selected_device == Some(device_id) => *firmware_id,
+            _ => return,
+        };
+
+        let dev = match self.devices.get(&device_id) {
+            Some(d) => d,
+            None => return,
+        };
+
+        let has_registry = dev.ipc_registry.is_some();
+        let has_usb = dev.adapter_ids.iter().any(|id| {
+            self.adapters
+                .get(id)
+                .and_then(|a| a.ipc_transport.as_ref())
+                .is_some_and(|(name, _)| *name == "usb")
+        });
+        if !has_registry || !has_usb {
+            eprintln!(
+                "[flash] try_start_flash({device_id:?}): not ready \
+                 (registry={has_registry}, usb={has_usb})"
+            );
+            return;
+        }
+        eprintln!("[flash] try_start_flash({device_id:?}): preconditions met, launching");
+
+        let archive_bytes = self.firmware.get(&firmware_id).and_then(|fw| match &fw.path {
+            Some(p) => match std::fs::read(p) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    eprintln!("[flash] read archive {}: {e}", p.display());
+                    None
+                }
+            },
+            None => {
+                eprintln!("[flash] refusing to flash builtin firmware as target");
+                None
+            }
+        });
+
+        match (archive_bytes, dev.ipc_registry.clone()) {
+            (Some(bytes), Some(registry)) => {
+                if let Some(FlashModalState::Flashing { phase, .. }) =
+                    &mut self.flash_modal
+                {
+                    *phase = crate::bridge::FlashPhase::Erasing;
+                }
+                let cmd_tx = self.cmd_tx.clone();
+                self.tokio_handle.spawn(async move {
+                    run_flash(device_id, bytes, registry, cmd_tx).await;
+                });
+            }
+            (None, _) => {
+                let msg: String = "could not read firmware archive".into();
+                let _ = self.cmd_tx.send(crate::bridge::Command::FlashFailed {
+                    device_id,
+                    message: msg,
+                });
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -1454,7 +1528,8 @@ impl AppState {
         let already_open = self.tree.tiles.iter().any(|(_, tile)| match tile {
             egui_tiles::Tile::Pane(Pane::DeviceLogs(d))
             | egui_tiles::Tile::Pane(Pane::DeviceProtocol(d))
-            | egui_tiles::Tile::Pane(Pane::DeviceRenode(d)) => *d == id,
+            | egui_tiles::Tile::Pane(Pane::DeviceRenode(d))
+            | egui_tiles::Tile::Pane(Pane::DeviceDisplay(d)) => *d == id,
             _ => false,
         });
 
@@ -1467,9 +1542,18 @@ impl AppState {
 
             let logs = self.tree.tiles.insert_pane(Pane::DeviceLogs(id));
             let proto = self.tree.tiles.insert_pane(Pane::DeviceProtocol(id));
+            let has_display = self
+                .devices
+                .get(&id)
+                .map(|d| d.has_capability(KnownCapability::Display))
+                .unwrap_or(false);
+
             let mut tabs = vec![logs, proto];
             if is_emulator {
                 tabs.push(self.tree.tiles.insert_pane(Pane::DeviceRenode(id)));
+            }
+            if has_display {
+                tabs.push(self.tree.tiles.insert_pane(Pane::DeviceDisplay(id)));
             }
             let tab_group = self.tree.tiles.insert_tab_tile(tabs);
 
@@ -1491,23 +1575,21 @@ impl AppState {
 
     /// Open a single device pane in the tile tree.
     pub fn open_device_pane(&mut self, pane: Pane) {
-        let already_open = self.tree.tiles.iter().any(|(_, tile)| {
-            matches!(tile, egui_tiles::Tile::Pane(p) if *p == pane)
-        });
+        let already_open = self
+            .tree
+            .tiles
+            .iter()
+            .any(|(_, tile)| matches!(tile, egui_tiles::Tile::Pane(p) if *p == pane));
 
         if !already_open {
             let tile = self.tree.tiles.insert_pane(pane.clone());
 
             if let Some(root) = self.tree.root() {
-                if let Some(egui_tiles::Tile::Container(container)) =
-                    self.tree.tiles.get_mut(root)
+                if let Some(egui_tiles::Tile::Container(container)) = self.tree.tiles.get_mut(root)
                 {
                     container.add_child(tile);
                 } else {
-                    let new_root = self
-                        .tree
-                        .tiles
-                        .insert_horizontal_tile(vec![root, tile]);
+                    let new_root = self.tree.tiles.insert_horizontal_tile(vec![root, tile]);
                     self.tree.root = Some(new_root);
                 }
             } else {
@@ -1592,21 +1674,21 @@ impl AppState {
         };
         let target = Pane::Firmware(build_id);
 
-        let already_open = self.tree.tiles.iter().any(|(_, tile)| {
-            matches!(tile, egui_tiles::Tile::Pane(p) if *p == target)
-        });
+        let already_open = self
+            .tree
+            .tiles
+            .iter()
+            .any(|(_, tile)| matches!(tile, egui_tiles::Tile::Pane(p) if *p == target));
 
         if !already_open {
             let tile = self.tree.tiles.insert_pane(target.clone());
 
             if let Some(root) = self.tree.root() {
-                if let Some(egui_tiles::Tile::Container(container)) = self.tree.tiles.get_mut(root) {
+                if let Some(egui_tiles::Tile::Container(container)) = self.tree.tiles.get_mut(root)
+                {
                     container.add_child(tile);
                 } else {
-                    let new_root = self
-                        .tree
-                        .tiles
-                        .insert_horizontal_tile(vec![root, tile]);
+                    let new_root = self.tree.tiles.insert_horizontal_tile(vec![root, tile]);
                     self.tree.root = Some(new_root);
                 }
             } else {
@@ -1653,12 +1735,7 @@ impl AppState {
                     // second adapter resolved the same chip UID), this is
                     // a no-op. Adapter bindings arrive via AdapterBound.
                     if !self.devices.contains_key(&device_id) {
-                        let dev = DeviceHandle::new(
-                            device_id,
-                            name,
-                            kind,
-                            firmware_id,
-                        );
+                        let dev = DeviceHandle::new(device_id, name, kind, firmware_id);
                         let is_emulator = dev.kind == DeviceKind::Emulator;
                         self.devices.insert(device_id, dev);
                         // Auto-open emulator devices on creation.
@@ -1679,8 +1756,7 @@ impl AppState {
                         if !dev.adapter_ids.contains(&adapter_id) {
                             dev.adapter_ids.push(adapter_id);
                         }
-                        let cap_set: HashSet<KnownCapability> =
-                            capabilities.into_iter().collect();
+                        let cap_set: HashSet<KnownCapability> = capabilities.into_iter().collect();
                         dev.capabilities
                             .entry(adapter_id)
                             .or_default()
@@ -1688,13 +1764,13 @@ impl AppState {
                     }
                     // Link serial config to the device if applicable.
                     for cfg in &mut self.serial_ports {
-                        if cfg.device_id.is_none()
-                            && cfg.status == SerialPortStatus::DeviceDetected
+                        if cfg.device_id.is_none() && cfg.status == SerialPortStatus::DeviceDetected
                         {
                             cfg.device_id = Some(device_id);
                             break;
                         }
                     }
+                    self.try_start_flash(device_id);
                 }
                 crate::bridge::Event::AdapterUnbound {
                     adapter_id,
@@ -1826,9 +1902,11 @@ impl AppState {
                     if let Some(build) = self.builds.get_mut(&build_id) {
                         // Dedup by (owner, region) — later allocations
                         // (from deferred resolution) replace earlier ones.
-                        if let Some(existing) = build.allocations.iter_mut().find(|a| {
-                            a.owner == allocation.owner && a.region == allocation.region
-                        }) {
+                        if let Some(existing) = build
+                            .allocations
+                            .iter_mut()
+                            .find(|a| a.owner == allocation.owner && a.region == allocation.region)
+                        {
                             *existing = allocation;
                         } else {
                             build.allocations.push(allocation);
@@ -1877,6 +1955,9 @@ impl AppState {
                 }
                 crate::bridge::Event::DevicePhaseChanged { device_id, phase } => {
                     if let Some(dev) = self.devices.get_mut(&device_id) {
+                        if matches!(phase, DevicePhase::Bootrom) {
+                            dev.log_buffer.clear();
+                        }
                         dev.phase = phase;
                     }
                 }
@@ -1895,7 +1976,9 @@ impl AppState {
                     }
 
                     // Migrate any open tiles from old → new.
-                    let tile_updates: Vec<(egui_tiles::TileId, Pane)> = self.tree.tiles
+                    let tile_updates: Vec<(egui_tiles::TileId, Pane)> = self
+                        .tree
+                        .tiles
                         .iter()
                         .filter_map(|(tile_id, tile)| match tile {
                             egui_tiles::Tile::Pane(Pane::DeviceLogs(d)) if *d == old_id => {
@@ -1903,6 +1986,12 @@ impl AppState {
                             }
                             egui_tiles::Tile::Pane(Pane::DeviceProtocol(d)) if *d == old_id => {
                                 Some((*tile_id, Pane::DeviceProtocol(new_id)))
+                            }
+                            egui_tiles::Tile::Pane(Pane::DeviceRenode(d)) if *d == old_id => {
+                                Some((*tile_id, Pane::DeviceRenode(new_id)))
+                            }
+                            egui_tiles::Tile::Pane(Pane::DeviceDisplay(d)) if *d == old_id => {
+                                Some((*tile_id, Pane::DeviceDisplay(new_id)))
                             }
                             _ => None,
                         })
@@ -1922,9 +2011,9 @@ impl AppState {
 
                     // Update flash modal if tracking the old device.
                     match &mut self.flash_modal {
-                        Some(FlashModalState::Picker { selected_device, .. })
-                            if *selected_device == Some(old_id) =>
-                        {
+                        Some(FlashModalState::Picker {
+                            selected_device, ..
+                        }) if *selected_device == Some(old_id) => {
                             *selected_device = Some(new_id);
                         }
                         Some(FlashModalState::Flashing { device_id, .. })
@@ -1935,90 +2024,19 @@ impl AppState {
                         _ => {}
                     }
                 }
-                crate::bridge::Event::FlashProgress { device_id, mut phase } => {
-                    // When the stub is up (Done), use its IPC to write the
-                    // target firmware: places.bin → `firmware` partition,
-                    // then ftab.bin → `boot` partition.
-                    if matches!(&phase, crate::bridge::FlashPhase::StubBooted) {
-                        let firmware_id = match &self.flash_modal {
-                            Some(FlashModalState::Flashing {
-                                device_id: d,
-                                firmware_id,
-                                ..
-                            }) if *d == device_id => Some(*firmware_id),
-                            Some(FlashModalState::Picker {
-                                firmware_id,
-                                selected_device,
-                            }) if *selected_device == Some(device_id) => Some(*firmware_id),
-                            _ => None,
-                        };
-
-                        if let (Some(fw_id), Some(dev)) =
-                            (firmware_id, self.devices.get(&device_id))
-                        {
-                            let archive_bytes = self.firmware.get(&fw_id).and_then(|fw| {
-                                match &fw.path {
-                                    Some(p) => match std::fs::read(p) {
-                                        Ok(b) => Some(b),
-                                        Err(e) => {
-                                            eprintln!(
-                                                "[flash] read archive {}: {e}",
-                                                p.display()
-                                            );
-                                            None
-                                        }
-                                    },
-                                    // Builtin = embedded stub; we'd never
-                                    // flash it as a target.
-                                    None => {
-                                        eprintln!(
-                                            "[flash] refusing to flash builtin firmware as target"
-                                        );
-                                        None
-                                    }
-                                }
-                            });
-
-                            match (archive_bytes, dev.ipc_registry.clone()) {
-                                (Some(bytes), Some(registry)) => {
-                                    let cmd_tx = self.cmd_tx.clone();
-                                    self.tokio_handle.spawn(async move {
-                                        run_flash(device_id, bytes, registry, cmd_tx).await;
-                                    });
-                                }
-                                (None, _) => {
-                                    let msg: String = "could not read firmware archive".into();
-                                    phase = crate::bridge::FlashPhase::Failed {
-                                        at_step: 3,
-                                        message: msg.clone(),
-                                    };
-                                    let _ = self.cmd_tx.send(
-                                        crate::bridge::Command::FlashFailed { device_id, message: msg },
-                                    );
-                                }
-                                (_, None) => {
-                                    let msg: String = "no IPC registry loaded; cannot flash".into();
-                                    eprintln!("[flash] {msg}");
-                                    phase = crate::bridge::FlashPhase::Failed {
-                                        at_step: 3,
-                                        message: msg.clone(),
-                                    };
-                                    let _ = self.cmd_tx.send(
-                                        crate::bridge::Command::FlashFailed { device_id, message: msg },
-                                    );
-                                }
-                            }
-                        } else if firmware_id.is_none() {
-                            eprintln!(
-                                "[flash] no firmware_id in flash_modal for device {device_id:?}; skipping"
-                            );
-                        }
-                    }
+                crate::bridge::Event::FlashProgress {
+                    device_id,
+                    mut phase,
+                } => {
+                    // StubBooted is now UI-only; the actual flash launch
+                    // happens in try_start_flash, called from AdapterBound
+                    // and DeviceReportedBuildId once both preconditions are met.
 
                     match &self.flash_modal {
-                        Some(FlashModalState::Picker { firmware_id, selected_device })
-                            if *selected_device == Some(device_id) =>
-                        {
+                        Some(FlashModalState::Picker {
+                            firmware_id,
+                            selected_device,
+                        }) if *selected_device == Some(device_id) => {
                             let firmware_id = *firmware_id;
                             self.flash_modal = Some(FlashModalState::Flashing {
                                 firmware_id,
@@ -2026,9 +2044,7 @@ impl AppState {
                                 phase,
                             });
                         }
-                        Some(FlashModalState::Flashing { device_id: d, .. })
-                            if *d == device_id =>
-                        {
+                        Some(FlashModalState::Flashing { device_id: d, .. }) if *d == device_id => {
                             if let Some(FlashModalState::Flashing { phase: p, .. }) =
                                 &mut self.flash_modal
                             {
@@ -2058,15 +2074,21 @@ impl AppState {
                         cfg.control_events.push(event);
                     }
                 }
+                crate::bridge::Event::DisplayFrame { device_id, frame } => {
+                    if let Some(dev) = self.devices.get_mut(&device_id) {
+                        dev.display_frame = Some(frame);
+                    }
+                }
+
                 crate::bridge::Event::DeviceReportedBuildId {
                     device_id,
                     build_id_bytes,
                 } => {
-                    // Find the loaded .tfw archive whose build_id
-                    // (UUID string) parses to the same 16 bytes the
-                    // device just reported. On a match, bind it to the
-                    // device so the log viewer can resolve species and
-                    // type metadata.
+                    eprintln!(
+                        "[ipc] DeviceReportedBuildId: device={device_id:?}, \
+                         build_id={:02x?}",
+                        &build_id_bytes,
+                    );
                     let matched_fw_id = self.firmware.iter().find_map(|(fw_id, fw)| {
                         let build_id_str = fw.build_id()?;
                         let parsed = uuid::Uuid::parse_str(build_id_str).ok()?;
@@ -2082,6 +2104,33 @@ impl AppState {
 
                             // Build IPC registry from the firmware's schema metadata.
                             if let Some(fw) = self.firmware.get(&fw_id) {
+                                eprintln!(
+                                    "[ipc] firmware matched: fw_id={fw_id:?}, \
+                                     builtin={}, has_ipc={}, has_schemas={}",
+                                    fw.is_builtin(),
+                                    fw.metadata.ipc.is_some(),
+                                    fw.metadata.ipc.as_ref()
+                                        .and_then(|i| i.schemas.as_ref())
+                                        .is_some(),
+                                );
+                                if let Some(ref ipc) = fw.metadata.ipc {
+                                    eprintln!(
+                                        "[ipc] resources in metadata: {:?}",
+                                        ipc.resources.keys().collect::<Vec<_>>()
+                                    );
+                                    eprintln!(
+                                        "[ipc] servers in metadata: {:?}",
+                                        ipc.servers.keys().collect::<Vec<_>>()
+                                    );
+                                    if let Some(ref schemas) = ipc.schemas {
+                                        if let Some(arr) = schemas.as_array() {
+                                            let names: Vec<_> = arr.iter()
+                                                .filter_map(|r| r["name"].as_str())
+                                                .collect();
+                                            eprintln!("[ipc] resources in schemas JSON: {names:?}");
+                                        }
+                                    }
+                                }
                                 if fw.metadata.ipc.is_none() {
                                     eprintln!("[ipc] firmware matched but tfw has no ipc metadata");
                                 } else if fw.metadata.ipc.as_ref().unwrap().schemas.is_none() {
@@ -2094,13 +2143,16 @@ impl AppState {
                                     if let Some(ref schemas) = ipc.schemas {
                                         // Serialize server metadata to JSON for the registry
                                         // to resolve task_ids.
-                                        let servers_json =
-                                            serde_json::to_value(&ipc.servers).ok();
+                                        let servers_json = serde_json::to_value(&ipc.servers).ok();
                                         match ipc_runtime::Registry::from_schemas_json(
                                             schemas,
                                             servers_json.as_ref(),
                                         ) {
                                             Ok(registry) => {
+                                                eprintln!(
+                                                    "[ipc] registry built, methods: {:?}",
+                                                    registry.method_keys(),
+                                                );
                                                 dev.ipc_registry =
                                                     Some(std::sync::Arc::new(registry));
                                             }
@@ -2114,6 +2166,9 @@ impl AppState {
                                 }
                             }
                         }
+                    }
+                    if matched_fw_id.is_some() {
+                        self.try_start_flash(device_id);
                     }
                 }
             }
@@ -2150,14 +2205,9 @@ impl AppState {
         resource: &str,
         method: &str,
         args: ipc_runtime::IpcValue,
-    ) -> Result<
-        tokio::sync::oneshot::Receiver<Result<crate::ipc::IpcCallResult, String>>,
-        String,
-    > {
-        let dev = self
-            .devices
-            .get(&device_id)
-            .ok_or("device not found")?;
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<crate::ipc::IpcCallResult, String>>, String>
+    {
+        let dev = self.devices.get(&device_id).ok_or("device not found")?;
         let registry = dev
             .ipc_registry
             .as_ref()
@@ -2191,7 +2241,9 @@ impl AppState {
             return;
         }
 
-        let _ = self.cmd_tx.send(crate::bridge::Command::UnregisterSerial { index });
+        let _ = self
+            .cmd_tx
+            .send(crate::bridge::Command::UnregisterSerial { index });
 
         // Remove any associated device.
         if let Some(device_id) = self.serial_ports[index].device_id {
@@ -2231,8 +2283,7 @@ impl AppState {
         let board_name = self.build_boards.get(self.selected_board).cloned();
         let layout_name = self.build_layouts.get(self.selected_layout).cloned();
 
-        let (Some(config), Some(board), Some(layout)) =
-            (config_name, board_name, layout_name)
+        let (Some(config), Some(board), Some(layout)) = (config_name, board_name, layout_name)
         else {
             return;
         };
@@ -2259,7 +2310,9 @@ impl AppState {
                 memories: Vec::new(),
                 resources: Vec::new(),
                 image: ImageProgress::None,
-                log: vec![format!("Building {config} (board={board}, layout={layout})")],
+                log: vec![format!(
+                    "Building {config} (board={board}, layout={layout})"
+                )],
                 started_at: std::time::Instant::now(),
                 finished_at: None,
             },
@@ -2270,15 +2323,10 @@ impl AppState {
         let target = pane.clone();
         let tile = self.tree.tiles.insert_pane(pane);
         if let Some(root) = self.tree.root() {
-            if let Some(egui_tiles::Tile::Container(container)) =
-                self.tree.tiles.get_mut(root)
-            {
+            if let Some(egui_tiles::Tile::Container(container)) = self.tree.tiles.get_mut(root) {
                 container.add_child(tile);
             } else {
-                let new_root = self
-                    .tree
-                    .tiles
-                    .insert_horizontal_tile(vec![root, tile]);
+                let new_root = self.tree.tiles.insert_horizontal_tile(vec![root, tile]);
                 self.tree.root = Some(new_root);
             }
         } else {
@@ -2288,7 +2336,11 @@ impl AppState {
         self.tree
             .make_active(|_, t| matches!(t, egui_tiles::Tile::Pane(p) if *p == target));
 
-        let out_dir = self.firmware_dir.parent().unwrap_or(&self.firmware_dir).join("build");
+        let out_dir = self
+            .firmware_dir
+            .parent()
+            .unwrap_or(&self.firmware_dir)
+            .join("build");
         let _ = std::fs::create_dir_all(&out_dir);
         let out_path = out_dir.join(format!("{config}.tfw"));
 
@@ -2465,9 +2517,7 @@ async fn run_flash(
     };
     drop(archive);
 
-    if let Err(e) =
-        flash_partition(device_id, &registry, &cmd_tx, "firmware", &places).await
-    {
+    if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, "firmware", &places).await {
         eprintln!("[flash] firmware partition FAILED: {e}");
         fail(format!("firmware partition: {e}"));
         return;
@@ -2525,8 +2575,7 @@ async fn flash_partition(
         .await
         .map_err(|e| format!("geometry: {e}"))?;
     let erase_size = geometry_field(&geometry, "erase_size")
-        .ok_or_else(|| "missing erase_size in geometry".to_string())?
-        as usize;
+        .ok_or_else(|| "missing erase_size in geometry".to_string())? as usize;
     if erase_size == 0 {
         return Err("erase_size=0 in geometry".into());
     }
@@ -2628,7 +2677,11 @@ async fn flash_partition(
         );
         match reply {
             IpcValue::Ok(_) => {}
-            other => return Err(format!("verify read @ {offset:#x} unexpected reply: {other:?}")),
+            other => {
+                return Err(format!(
+                    "verify read @ {offset:#x} unexpected reply: {other:?}"
+                ));
+            }
         }
         if writeback.len() != chunk_len {
             return Err(format!(
@@ -2656,11 +2709,9 @@ async fn flash_partition(
                 let w: Vec<String> = want[base..hi].iter().map(|b| format!("{b:02x}")).collect();
                 let g: Vec<String> = writeback[base..hi]
                     .iter()
-                    .map(|b| format!("{b:02x}")).collect();
-                eprintln!(
-                    "[flash]   {partition_name} {label} @{:#06x}",
-                    offset + base
-                );
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                eprintln!("[flash]   {partition_name} {label} @{:#06x}", offset + base);
                 eprintln!("[flash]     want: {}", w.join(" "));
                 eprintln!("[flash]      got: {}", g.join(" "));
             };

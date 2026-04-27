@@ -97,6 +97,24 @@ fn parse_peripheral_name(
         return ("gpio".to_string(), Some(dir.to_string()));
     }
 
+    // Peripherals whose mode is determined by signals rather than by a
+    // trailing digit.  The board NCL writes `lcdc = { cs, clk, ... }`
+    // without an explicit mode; the FSEL lookup needs the mode string
+    // ("spi", "8080", "jdi") as the instance.  Infer it from the signal
+    // names present.
+    if name == "lcdc" {
+        let mode = if signals.contains_key("dio0") || signals.contains_key("clk") {
+            "spi"
+        } else if signals.contains_key("wr") || signals.contains_key("rd") {
+            "8080"
+        } else if signals.contains_key("hst") || signals.contains_key("vst") {
+            "jdi"
+        } else {
+            "spi"
+        };
+        return ("lcdc".to_string(), Some(mode.to_string()));
+    }
+
     // Split trailing digits as instance: "usart1" -> ("usart", "1")
     let i = name.len()
         - name

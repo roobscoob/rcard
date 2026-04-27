@@ -76,7 +76,7 @@ let miB = fun n => n * 1024 * 1024 in
     PA07 = pin "down" [cap_mode "lcdc" "spi" ["dio2"], cap_inst "pdm" 1 ["clk"], cap_mode "lcdc" "jdi" ["enb"], cap_mode "lcdc" "8080" ["dio0"]],
     PA08 = pin "down" [cap_mode "lcdc" "spi" ["dio3"], cap_inst "pdm" 1 ["data"], cap_mode "lcdc" "jdi" ["vst"], cap_mode "lcdc" "8080" ["dio1"]],
     PA09 = pin "down" [],
-    PA10 = pin "down" [],
+    PA10 = pin "up" [],
     PA11 = pin "up"   [],
     PA12 = pin "up"   [cap_inst "mpi" 2 ["cs"], cap_inst "sd" 1 ["dio2"]],
     PA13 = pin "down" [cap_inst "mpi" 2 ["dio1"], cap_inst "sd" 1 ["dio3"]],

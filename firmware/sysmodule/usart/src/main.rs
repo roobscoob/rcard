@@ -140,9 +140,11 @@ impl Usart for UsartResource {
         while offset < total {
             let want = (total - offset).min(chunk.len());
             let Some(got) = data.read_range(offset, &mut chunk[..want]) else {
+
                 return;
             };
             if got == 0 {
+
                 return;
             }
             for &b in &chunk[..got] {
@@ -151,6 +153,7 @@ impl Usart for UsartResource {
             }
             offset += got;
         }
+
     }
 
     fn read(

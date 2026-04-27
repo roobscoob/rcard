@@ -12,9 +12,9 @@ use tokio::sync::mpsc;
 
 use crate::state::{
     BuildId, ChipUid, CrateBuildState, CrateKind, DeviceId, DeviceKind, DevicePhase,
-    HostCrateBuildState, ImageProgress, KnownCapability, MemoryAllocation,
-    MemoryDevice, PipelinePhase, ProvidedResource, ResourceSummary, SerialAdapterType,
-    SerialPortIndex, SerialPortStatus, UsedResource,
+    HostCrateBuildState, ImageProgress, KnownCapability, MemoryAllocation, MemoryDevice,
+    PipelinePhase, ProvidedResource, ResourceSummary, SerialAdapterType, SerialPortIndex,
+    SerialPortStatus, UsedResource,
 };
 
 // ── Commands (GUI → bridge) ────────────────────────────────────────────
@@ -77,9 +77,15 @@ pub enum Command {
     FlashComplete { device_id: DeviceId },
     /// IPC partition writes (or pre-IPC setup) failed — remove from pending_flash
     /// and surface the error in the UI.
-    FlashFailed { device_id: DeviceId, message: String },
+    FlashFailed {
+        device_id: DeviceId,
+        message: String,
+    },
     /// IPC flash phase progress — forwarded as Event::FlashProgress.
-    FlashPhaseUpdate { device_id: DeviceId, phase: FlashPhase },
+    FlashPhaseUpdate {
+        device_id: DeviceId,
+        phase: FlashPhase,
+    },
 }
 
 // ── Events (bridge → GUI) ──────────────────────────────────────────────
@@ -252,6 +258,11 @@ pub enum Event {
         device_id: DeviceId,
         build_id_bytes: [u8; 16],
     },
+    /// A display frame from an emulated or physical device.
+    DisplayFrame {
+        device_id: DeviceId,
+        frame: device::logs::DisplayFrame,
+    },
 }
 
 /// Phase of a flash operation, driven by the bridge.
@@ -303,6 +314,24 @@ struct PendingFlash {
     attempts: u32,
 }
 
+/// Result from a background SFBL debug task. Sent back to the main
+/// select! loop so it can update `current_device` without blocking.
+struct SfblDebugResult {
+    ephemeral_id: DeviceId,
+    outcome: SfblDebugOutcome,
+}
+
+enum SfblDebugOutcome {
+    /// UID read succeeded; device bound to persistent identity.
+    Identified { persistent_id: DeviceId },
+    /// Could not enter SifliDebug (timeout).
+    DebugTimeout,
+    /// Entered debug but UID read failed.
+    UidFailed(String),
+    /// Task was cancelled because a new SFBL arrived.
+    Cancelled,
+}
+
 // ── Persistent device registry helper ──────────────────────────────────
 
 /// Look up or mint a persistent `DeviceId` for `uid`. Emits
@@ -341,9 +370,50 @@ fn get_or_create_persistent_device(
 /// A device owned by the bridge. The device is a trait object —
 /// could be an EmulatedDevice, a PhysicalDevice behind a serial
 /// connection, etc.
-struct BridgeDevice {
+pub(crate) struct BridgeDevice {
     device: Box<dyn Device>,
     cancel: tokio_util::sync::CancellationToken,
+    /// Adapter handles — capabilities provided by adapters whose lifetime
+    /// is managed externally (e.g. serial connect loops). Handles can be
+    /// revoked by the adapter without dropping the BridgeDevice.
+    handles: Vec<device::handle::AdapterHandle>,
+}
+
+impl BridgeDevice {
+    /// Query a capability by type, checking adapter handles first (skipping
+    /// revoked ones), then falling back to the inner device.
+    fn query_capability(
+        &self,
+        type_id: std::any::TypeId,
+    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        for h in &self.handles {
+            if let Some(cap) = h.query(type_id) {
+                return Some(cap);
+            }
+        }
+        self.device.query_capability(type_id)
+    }
+
+    /// Query all instances of a capability type across handles and the
+    /// inner device.
+    pub(crate) fn query_all_capabilities(
+        &self,
+        type_id: std::any::TypeId,
+    ) -> Vec<(device::adapter::AdapterId, Arc<dyn std::any::Any + Send + Sync>)> {
+        let mut out: Vec<_> = self
+            .handles
+            .iter()
+            .filter(|h| !h.is_revoked())
+            .flat_map(|h| {
+                h.capabilities()
+                    .iter()
+                    .filter(|(tid, _)| *tid == type_id)
+                    .map(|(_, v)| (h.adapter_id(), Arc::clone(v)))
+            })
+            .collect();
+        out.extend(self.device.query_all_capabilities(type_id));
+        out
+    }
 }
 
 struct BridgeSerial {
@@ -444,11 +514,13 @@ pub async fn run(
                                     AdapterId(0), // usart1
                                     AdapterId(1), // usart2
                                     AdapterId(2), // renode
+                                    AdapterId(3), // display
                                 ];
                                 for &(id, name) in &[
                                     (AdapterId(0), "usart1"),
                                     (AdapterId(1), "usart2"),
                                     (AdapterId(2), "renode"),
+                                    (AdapterId(3), "display"),
                                 ] {
                                     let _ = tx.send(Event::AdapterCreated {
                                         adapter_id: id,
@@ -467,10 +539,15 @@ pub async fn run(
                                     firmware_id: Some(firmware_id),
                                 });
                                 for &id in &adapter_ids {
+                                    let caps = if id == AdapterId(3) {
+                                        vec![KnownCapability::Display]
+                                    } else {
+                                        vec![]
+                                    };
                                     let _ = tx.send(Event::AdapterBound {
                                         adapter_id: id,
                                         device_id,
-                                        capabilities: vec![],
+                                        capabilities: caps,
                                     });
                                 }
                                 repaint.request_repaint();
@@ -483,6 +560,7 @@ pub async fn run(
                                     BridgeDevice {
                                         device: Box::new(dev),
                                         cancel: task_cancel.clone(),
+                                        handles: vec![],
                                     },
                                 );
 
@@ -499,8 +577,13 @@ pub async fn run(
                                             });
                                             repaint.request_repaint();
                                         }
+                                        Ok(device::device::DeviceEvent::DisplayFrame(frame)) => {
+                                            let _ =
+                                                tx.send(Event::DisplayFrame { device_id, frame });
+                                            repaint.request_repaint();
+                                        }
                                         Ok(device::device::DeviceEvent::Error(e)) => {
-                                            eprintln!("emulator {device_id:?}: {e:?}");
+                                            eprintln!("device {device_id:?}: {e:?}");
                                         }
                                         Ok(_) => {}
                                         Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
@@ -520,7 +603,7 @@ pub async fn run(
                                 // Remove device from bridge map — the Device
                                 // (and its Renode _run_thread) drops here.
                                 bridge_devices.lock().unwrap().remove(&device_id);
-                                for id in [AdapterId(0), AdapterId(1), AdapterId(2)] {
+                                for id in [AdapterId(0), AdapterId(1), AdapterId(2), AdapterId(3)] {
                                     let _ = tx.send(Event::AdapterRemoved { adapter_id: id });
                                 }
                                 repaint.request_repaint();
@@ -545,7 +628,13 @@ pub async fn run(
                 firmware_id: _,
                 tfw_path,
             } => {
-                pending_flash.lock().unwrap().insert(device_id, PendingFlash { tfw_path, attempts: 0 });
+                pending_flash.lock().unwrap().insert(
+                    device_id,
+                    PendingFlash {
+                        tfw_path,
+                        attempts: 0,
+                    },
+                );
                 flash_notify.notify_waiters();
                 let _ = event_tx.send(Event::FlashProgress {
                     device_id,
@@ -862,7 +951,7 @@ pub async fn run(
                     continue;
                 };
 
-                let Some(ipc) = crate::ipc::pick(&*bridge_dev.device) else {
+                let Some(ipc) = crate::ipc::pick(bridge_dev) else {
                     let _ = reply.send(Err(
                         "device has no IPC capability (no USART2 or USB transport)".into(),
                     ));
@@ -914,8 +1003,10 @@ pub async fn run(
                     continue;
                 };
 
-                use device::device::DeviceExt;
-                let Some(sender) = bridge_dev.device.get::<serial::SerialSender>() else {
+                let Some(sender) = bridge_dev
+                    .query_capability(std::any::TypeId::of::<serial::SerialSender>())
+                    .and_then(|arc| arc.downcast::<serial::SerialSender>().ok())
+                else {
                     eprintln!(
                         "[probe] SendMoshiMoshi: device {device_id:?} has no USART2 SerialSender capability"
                     );
@@ -944,16 +1035,16 @@ pub async fn run(
                 pending_flash.lock().unwrap().remove(&device_id);
                 let _ = event_tx.send(Event::FlashProgress {
                     device_id,
-                    phase: FlashPhase::Failed { at_step: 4, message },
+                    phase: FlashPhase::Failed {
+                        at_step: 4,
+                        message,
+                    },
                 });
                 ctx.request_repaint();
             }
 
             Command::FlashPhaseUpdate { device_id, phase } => {
-                let _ = event_tx.send(Event::FlashProgress {
-                    device_id,
-                    phase,
-                });
+                let _ = event_tx.send(Event::FlashProgress { device_id, phase });
                 ctx.request_repaint();
             }
 
@@ -1118,10 +1209,10 @@ async fn usart1_connect_loop(
 
         let conn = match serial::Usart1Connection::open(&port) {
             Ok(c) => c,
-            Err(_) => {
+            Err(e) => {
                 let _ = tx.send(Event::SerialStatus {
                     index,
-                    status: SerialPortStatus::Error,
+                    status: SerialPortStatus::Error(Arc::from(format!("Failed to open port: {e}"))),
                 });
                 ctx.request_repaint();
                 tokio::select! {
@@ -1161,7 +1252,7 @@ async fn usart1_connect_loop(
             tokio::sync::mpsc::unbounded_channel::<(std::time::Instant, String)>();
         let reader_task = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
-            let mut line = String::new();
+            let mut line_buf: Vec<u8> = Vec::new();
             let mut line_start: Option<std::time::Instant> = None;
             let mut buf = [0u8; 256];
             loop {
@@ -1170,7 +1261,10 @@ async fn usart1_connect_loop(
                     Ok(n) => {
                         for &byte in &buf[..n] {
                             if byte == b'\n' {
-                                let text = std::mem::take(&mut line);
+                                let text = String::from_utf8(std::mem::take(&mut line_buf))
+                                    .unwrap_or_else(|e| {
+                                        String::from_utf8_lossy(e.as_bytes()).into_owned()
+                                    });
                                 let start =
                                     line_start.take().unwrap_or_else(std::time::Instant::now);
                                 if line_tx.send((start, text)).is_err() {
@@ -1180,11 +1274,14 @@ async fn usart1_connect_loop(
                                 if line_start.is_none() {
                                     line_start = Some(std::time::Instant::now());
                                 }
-                                line.push(byte as char);
+                                line_buf.push(byte);
                             }
                         }
                     }
-                    Err(_) => return,
+                    Err(e) => {
+                        eprintln!("Error reading from USART1: {e}");
+                        return;
+                    }
                 }
             }
         });
@@ -1217,6 +1314,15 @@ async fn usart1_connect_loop(
         // `hello` line we're now ready to receive.
         settle_guard.take();
 
+        // Background debug task state. When SFBL is received, the slow
+        // debug handshake (try_acquire + efuse_read_uid + flash) is
+        // spawned so the select! loop keeps draining lines. Results
+        // arrive on `debug_result_rx`; a CancellationToken lets us
+        // abandon stale attempts when the device reboots again.
+        let (debug_result_tx, mut debug_result_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SfblDebugResult>();
+        let mut debug_cancel: Option<tokio_util::sync::CancellationToken> = None;
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -1234,12 +1340,11 @@ async fn usart1_connect_loop(
                     match sifli_debug.try_acquire().await {
                         Some(session) => {
                             // AIRCR: VECTKEY (0x05FA) | SYSRESETREQ (bit 2)
-                            let _ = session
-                                .mem_write_no_response(0xE000_ED0C, &[0x05FA_0004])
-                                .await;
-                            // Chip is rebooting — skip the Drop-spawned Exit
-                            // since it would just time out against a dead link.
-                            session.forget();
+                            session
+                                .mem_write_and_forget(0xE000_ED0C, &[0x05FA_0004])
+                                .await
+                                .unwrap();
+
                             eprintln!("[usart1:{port}] auto-reset issued, resyncing tap on SFBL");
                             // The AIRCR write's ACK may have been cut off
                             // mid-frame by the reset, leaving the tap parser
@@ -1293,19 +1398,47 @@ async fn usart1_connect_loop(
                     }
                     continue;
                 }
+                Some(result) = debug_result_rx.recv() => {
+                    // A background SFBL debug task completed. Apply
+                    // the result only if the ephemeral device it was
+                    // spawned for is still the current one — otherwise
+                    // a newer SFBL has already taken over.
+                    if current_device != Some(result.ephemeral_id) {
+                        eprintln!(
+                            "[usart1:{port}] stale debug result for {:?}, discarding",
+                            result.ephemeral_id,
+                        );
+                        continue;
+                    }
+                    match result.outcome {
+                        SfblDebugOutcome::Identified { persistent_id } => {
+                            current_device = Some(persistent_id);
+                        }
+                        SfblDebugOutcome::DebugTimeout => {
+                            eprintln!("[usart1:{port}] failed to enter SifliDebug (timeout)");
+                        }
+                        SfblDebugOutcome::UidFailed(e) => {
+                            eprintln!("[usart1:{port}] UID read failed: {e}");
+                        }
+                        SfblDebugOutcome::Cancelled => {}
+                    }
+                }
                 item = line_rx.recv() => {
+                    eprintln!("[usart1:{port}] line_rx.recv() ready: {item:?}");
+
                     let Some((line_received_at, raw_line)) = item else {
                         // Reader task ended → port closed / error.
+                        eprintln!("[usart1:{port}] serial line reader ended, closing connection");
                         break;
                     };
 
                     let trimmed = raw_line.trim_end_matches('\r');
-                    let (device_tick, line) = parse_tick_prefix(trimmed);
+                    let (device_tick, line) = device::logs::parse_tick_prefix(trimmed);
 
-                    // Forward the stripped line to the serial adapter terminal.
+                    // eprintln!("[usart1:{port}] line received at {line_received_at:?} (device tick {device_tick:?}): {line}");
                     let _ = tx.send(Event::SerialRawLine {
                         index,
-                        line: line.clone(),
+                        line: trimmed.to_string(),
                     });
 
                     // ── Sentinel: SFBL — bootrom entered ───────────
@@ -1313,8 +1446,27 @@ async fn usart1_connect_loop(
                     // the first line may have a garbled prefix from the
                     // truncated ACK tail, e.g. "\x06SFBL".
                     if line.ends_with("SFBL") {
-                        // Device just (re)booted. Unbind adapter from
-                        // current device — persistent devices survive;
+                        // Cancel any in-flight debug task. The task checks
+                        // this token between steps and calls session.forget()
+                        // so no Exit command is sent to a device that has
+                        // already rebooted.
+                        if let Some(old_token) = debug_cancel.take() {
+                            old_token.cancel();
+                        }
+                        // Unblock any pending request() (e.g. an Exit from
+                        // a dropped session waiting for a frame response
+                        // that will never come). This releases the lock so
+                        // the next debug task can acquire it.
+                        sifli_debug.poison();
+
+                        // No tap resync here: we received this SFBL through
+                        // the passthrough path, so the tap is already in
+                        // normal framing mode. Resyncing would put it into
+                        // sentinel-wait mode, which blocks frame parsing and
+                        // prevents the spawned debug task's Enter from ever
+                        // getting a response.
+
+                        // Unbind old device. Persistent devices survive;
                         // ephemeral ones auto-clean via 0-adapter rule.
                         if let Some(old_id) = current_device.take() {
                             let _ = tx.send(Event::AdapterUnbound {
@@ -1337,211 +1489,58 @@ async fn usart1_connect_loop(
                             device_id: ephemeral_id,
                             capabilities: vec![KnownCapability::SifliDebug],
                         });
-                        let _ = tx.send(Event::DevicePhaseChanged {
-                            device_id: ephemeral_id,
-                            phase: DevicePhase::Stabilizing,
-                        });
                         let _ = tx.send(Event::SerialStatus {
                             index,
                             status: SerialPortStatus::DeviceDetected,
                         });
                         current_device = Some(ephemeral_id);
                         ctx.request_repaint();
-
-                        // Wait for power stability — if we see another SFBL
-                        // within 1s, the device is brown-out resetting. Reset
-                        // the timer each time and only proceed once stable.
-                        let stability_delay = std::time::Duration::from_secs(1);
-                        loop {
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    reader_task.abort();
-                                    let _ = tx.send(Event::AdapterRemoved { adapter_id });
-                                    ctx.request_repaint();
-                                    return;
-                                }
-                                _ = tokio::time::sleep(stability_delay) => {
-                                    // 1s with no SFBL — power is stable.
-                                    break;
-                                }
-                                item = line_rx.recv() => {
-                                    let Some((_, sfbl_buf)) = item else {
-                                        break; // port closed
-                                    };
-                                    let l = sfbl_buf.trim_end_matches('\r');
-                                    if l.ends_with("SFBL") {
-                                        eprintln!("[usart1:{port}] SFBL again (power unstable), resetting timer");
-                                        // Timer resets by looping back to select!
-                                    } else {
-                                        // Non-SFBL line during stability wait — device
-                                        // booted past bootrom already. Break and proceed.
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Power stable — now in bootrom.
                         let _ = tx.send(Event::DevicePhaseChanged {
                             device_id: ephemeral_id,
                             phase: DevicePhase::Bootrom,
                         });
                         ctx.request_repaint();
 
-                        // Enter SifliDebug and read the chip UID from eFuse bank 0.
-                        let t0 = std::time::Instant::now();
-                        if let Some(session) = sifli_debug.try_acquire().await {
-                            eprintln!("[usart1:{port}] entered debug in {:?}", t0.elapsed());
-                            match efuse_read_uid(&session).await {
-                                Ok(uid) => {
-                                    eprintln!("[usart1:{port}] identified device: {uid}");
+                        // Spawn the slow debug work (try_acquire + UID read
+                        // + flash) into a background task so the select!
+                        // loop keeps draining lines.
+                        let token = tokio_util::sync::CancellationToken::new();
+                        debug_cancel = Some(token.clone());
 
-                                    // GetOrCreate persistent device for this UID.
-                                    let persistent_id = get_or_create_persistent_device(
-                                        uid,
-                                        format!("Device {uid}"),
-                                        None,
-                                        &persistent_devices,
-                                        &next_device_id,
-                                        &tx,
-                                    );
-                                    let _ = tx.send(Event::AdapterBound {
-                                        adapter_id,
-                                        device_id: persistent_id,
-                                        capabilities: vec![KnownCapability::SifliDebug],
-                                    });
-                                    let _ = tx.send(Event::DeviceUpgraded {
-                                        old_id: ephemeral_id,
-                                        new_id: persistent_id,
-                                    });
-                                    let _ = tx.send(Event::DevicePhaseChanged {
-                                        device_id: persistent_id,
-                                        phase: DevicePhase::Bootrom,
-                                    });
-                                    current_device = Some(persistent_id);
-                                    ctx.request_repaint();
-
-                                    // Check for pending flash on this device.
-                                    let flash_tfw = {
-                                        let mut map = pending_flash.lock().unwrap();
-                                        if let Some(pf) = map.get_mut(&persistent_id) {
-                                            pf.attempts += 1;
-                                            if pf.attempts > MAX_FLASH_ATTEMPTS {
-                                                let pf = map.remove(&persistent_id).unwrap();
-                                                eprintln!(
-                                                    "[usart1:{port}] flash retry limit ({MAX_FLASH_ATTEMPTS}) exceeded"
-                                                );
-                                                let _ = tx.send(Event::FlashProgress {
-                                                    device_id: persistent_id,
-                                                    phase: FlashPhase::Failed {
-                                                        at_step: 0,
-                                                        message: format!(
-                                                            "device reset {} times, giving up",
-                                                            pf.attempts - 1,
-                                                        ),
-                                                    },
-                                                });
-                                                ctx.request_repaint();
-                                                None
-                                            } else {
-                                                Some(pf.tfw_path.clone())
-                                            }
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                    if let Some(_tfw_path) = flash_tfw {
-                                        let attempt = pending_flash.lock().unwrap()
-                                            .get(&persistent_id).map(|pf| pf.attempts).unwrap_or(1);
-                                        eprintln!("[usart1:{port}] pending flash — writing stub (attempt {attempt}/{MAX_FLASH_ATTEMPTS})");
-                                        let _ = tx.send(Event::FlashProgress {
-                                            device_id: persistent_id,
-                                            phase: FlashPhase::Resetting,
-                                        });
-                                        ctx.request_repaint();
-
-                                        match flash_stub_via_debug(&session, &tx, persistent_id, &ctx).await {
-                                            Ok(()) => {
-                                                eprintln!("[usart1:{port}] stub written, waiting for USB");
-                                                // Register a oneshot with the USB supervisor;
-                                                // it fires when a fob with this chip UID enumerates
-                                                // over native USB. No descriptor polling here —
-                                                // the supervisor is the single source of truth for
-                                                // USB presence, and its attach event means the
-                                                // adapter is fully claimed and IPC is live, not
-                                                // just that the OS saw the descriptor.
-                                                let generation = flash_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                                let (wait_tx, wait_rx) = tokio::sync::oneshot::channel::<()>();
-                                                flash_wait_usb.lock().unwrap().insert(uid, (generation, wait_tx));
-                                                let flash_tx = tx.clone();
-                                                let flash_ctx = ctx.clone();
-                                                let flash_port = port.clone();
-                                                let flash_wait_usb_cleanup = flash_wait_usb.clone();
-                                                tokio::spawn(async move {
-                                                    let result = tokio::time::timeout(
-                                                        std::time::Duration::from_secs(30),
-                                                        wait_rx,
-                                                    )
-                                                    .await;
-                                                    match result {
-                                                        Ok(Ok(())) => {
-                                                            eprintln!("[usart1:{flash_port}] stub USB up");
-                                                            let _ = flash_tx.send(Event::FlashProgress {
-                                                                device_id: persistent_id,
-                                                                phase: FlashPhase::StubBooted,
-                                                            });
-                                                        }
-                                                        _ => {
-                                                            let mut map = flash_wait_usb_cleanup.lock().unwrap();
-                                                            let superseded = !matches!(map.get(&uid), Some((g, _)) if *g == generation);
-                                                            if !superseded {
-                                                                map.remove(&uid);
-                                                            }
-                                                            drop(map);
-                                                            if superseded {
-                                                                eprintln!("[usart1:{flash_port}] superseded by newer flash, ignoring");
-                                                            } else {
-                                                                eprintln!("[usart1:{flash_port}] stub USB never appeared");
-                                                                let _ = flash_tx.send(Event::FlashProgress {
-                                                                    device_id: persistent_id,
-                                                                    phase: FlashPhase::Failed {
-                                                                        at_step: 3,
-                                                                        message: "stub USB device did not appear within 30s".into(),
-                                                                    },
-                                                                });
-                                                            }
-                                                        }
-                                                    }
-                                                    flash_ctx.request_repaint();
-                                                });
-                                            }
-                                            Err(e) => {
-                                                eprintln!("[usart1:{port}] stub flash failed: {e}");
-                                                let _ = tx.send(Event::FlashProgress {
-                                                    device_id: persistent_id,
-                                                    phase: FlashPhase::Failed {
-                                                        at_step: 1,
-                                                        message: e,
-                                                    },
-                                                });
-                                                ctx.request_repaint();
-                                            }
-                                        }
-                                    }
-                                    // If no pending flash, session drops → exits debug → device boots.
-                                }
-                                Err(e) => {
-                                    eprintln!("[usart1:{port}] UID read failed: {e}");
-                                }
-                            }
-                            // Session drops here → exits debug mode if still held.
-                        } else {
-                            eprintln!("[usart1:{port}] failed to enter SifliDebug (timeout)");
-                        }
+                        let task_sifli = sifli_debug.clone();
+                        let task_tx = tx.clone();
+                        let task_ctx = ctx.clone();
+                        let task_port = port.clone();
+                        let task_persistent = persistent_devices.clone();
+                        let task_next_id = next_device_id.clone();
+                        let task_pending_flash = pending_flash.clone();
+                        let task_flash_gen = flash_generation.clone();
+                        let task_flash_wait = flash_wait_usb.clone();
+                        let task_result_tx = debug_result_tx.clone();
+                        tokio::spawn(async move {
+                            let outcome = sfbl_debug_task(
+                                &task_sifli,
+                                &token,
+                                &task_tx,
+                                &task_ctx,
+                                &task_port,
+                                adapter_id,
+                                ephemeral_id,
+                                &task_persistent,
+                                &task_next_id,
+                                &task_pending_flash,
+                                &task_flash_gen,
+                                task_flash_wait,
+                            ).await;
+                            let _ = task_result_tx.send(SfblDebugResult {
+                                ephemeral_id,
+                                outcome,
+                            });
+                        });
                     }
 
                     // ── Sentinel: bootloader awake ─────────────────
-                    if line == "bootloader: Awake" {
+                    if line.starts_with("bootloader") {
                         if let Some(dev_id) = current_device {
                             let _ = tx.send(Event::DevicePhaseChanged {
                                 device_id: dev_id,
@@ -1552,7 +1551,7 @@ async fn usart1_connect_loop(
                     }
 
                     // ── Sentinel: kernel awake ─────────────────────
-                    if line == "kernel: Awake" {
+                    if line.starts_with("kernel") {
                         if let Some(dev_id) = current_device {
                             let _ = tx.send(Event::DevicePhaseChanged {
                                 device_id: dev_id,
@@ -1612,13 +1611,6 @@ async fn usart1_connect_loop(
                                 device_id: persistent_id,
                                 capabilities: vec![KnownCapability::SifliDebug],
                             });
-                            // Build id arrives via the dedicated event so
-                            // state.rs can resolve it against loaded .tfw
-                            // archives — same pattern as USART2 awake.
-                            let _ = tx.send(Event::DeviceReportedBuildId {
-                                device_id: persistent_id,
-                                build_id_bytes,
-                            });
                             // Hello only fires from a running Hubris kernel
                             // (sysmodule_log triggers it), so the phase is
                             // unambiguously Kernel.
@@ -1633,6 +1625,14 @@ async fn usart1_connect_loop(
                             current_device = Some(persistent_id);
                             ctx.request_repaint();
                         }
+
+                        // Always forward the build ID — even when the
+                        // device was already bound (same chip rebooted
+                        // into different firmware, e.g. stub for flashing).
+                        let _ = tx.send(Event::DeviceReportedBuildId {
+                            device_id: persistent_id,
+                            build_id_bytes,
+                        });
                     }
 
                     if let Some(dev_id) = current_device {
@@ -1712,8 +1712,17 @@ async fn usart2_connect_loop(
                 // branch (see the `*slot = None` sites further down).
                 *usart2_sender_slot.lock().unwrap() = Some(adapter.sender());
 
-                // Hold the adapter until Awake identifies a device.
-                let mut adapter = Some(adapter);
+                // Build an AdapterLink from the adapter's capabilities.
+                // The adapter itself stays alive in this scope for the
+                // lifetime of the serial connection. Handles are minted
+                // on each Awake and attached to the BridgeDevice.
+                let mut link = {
+                    use device::adapter::Adapter;
+                    device::handle::AdapterLink::new(
+                        adapter_id,
+                        adapter.capabilities(),
+                    )
+                };
 
                 let _ = tx.send(Event::AdapterCreated {
                     adapter_id,
@@ -1769,7 +1778,11 @@ async fn usart2_connect_loop(
                                     {
                                         let chip_uid = ChipUid(*uid);
 
-                                        // On reboot, remove the old device entry.
+                                        // Revoke the old handle — the device on
+                                        // the other end rebooted, so existing
+                                        // capabilities are stale. Remove the old
+                                        // BridgeDevice entry (device is temporary).
+                                        link.revoke();
                                         if let Some(old_id) = current_device {
                                             bridge_devices.lock().unwrap().remove(&old_id);
                                         }
@@ -1787,23 +1800,20 @@ async fn usart2_connect_loop(
                                             &ctx,
                                         );
 
-                                        // Create the PhysicalDevice now that we
-                                        // know what's on the other end. Attach
-                                        // the adapter so its SerialIpc capability
-                                        // is registered, then insert into the
-                                        // bridge map so IPC dispatch can find it.
+                                        // Insert a BridgeDevice with a fresh
+                                        // adapter handle. The adapter itself
+                                        // stays alive in the connect loop.
                                         if let Some(dev_id) = current_device {
-                                            if let Some(usart2) = adapter.take() {
-                                                let mut dev = device::physical::PhysicalDevice::new();
-                                                dev.attach(usart2);
-                                                bridge_devices.lock().unwrap().insert(
-                                                    dev_id,
-                                                    BridgeDevice {
-                                                        device: Box::new(dev),
-                                                        cancel: cancel.clone(),
-                                                    },
-                                                );
-                                            }
+                                            let handle = link.handle();
+                                            let dev = device::physical::PhysicalDevice::new();
+                                            bridge_devices.lock().unwrap().insert(
+                                                dev_id,
+                                                BridgeDevice {
+                                                    device: Box::new(dev),
+                                                    cancel: cancel.clone(),
+                                                    handles: vec![handle],
+                                                },
+                                            );
                                         }
                                     }
 
@@ -1818,7 +1828,8 @@ async fn usart2_connect_loop(
                     }
                 }
 
-                // Port loop ended — remove device from bridge map.
+                // Port loop ended — revoke handle and remove device.
+                link.revoke();
                 if let Some(dev_id) = current_device.take() {
                     bridge_devices.lock().unwrap().remove(&dev_id);
                 }
@@ -1829,10 +1840,11 @@ async fn usart2_connect_loop(
                 ctx.request_repaint();
                 return;
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("[usart2:{port}] failed to connect: {e}");
                 let _ = tx.send(Event::SerialStatus {
                     index,
-                    status: SerialPortStatus::Error,
+                    status: SerialPortStatus::Error(Arc::from(format!("Failed to open port: {e}"))),
                 });
                 ctx.request_repaint();
             }
@@ -2264,31 +2276,6 @@ async fn flash_stub_via_debug(
 
 // ── eFuse reader ───────────────────────────────────────────────────────
 
-/// Parse a single ASCII hex digit — returns `None` for any non-hex byte.
-/// Parse the `T<16 hex digits> ` tick prefix emitted by the supervisor.
-/// Returns `(Some(tick), stripped_text)` on success, or `(None, original)` if
-/// the line doesn't carry a tick prefix (e.g. early boot before the kernel
-/// timer starts).
-fn parse_tick_prefix(line: &str) -> (Option<u64>, String) {
-    let bytes = line.as_bytes();
-    // 'T' + 16 hex + ' ' = 18 bytes minimum
-    if bytes.len() >= 18 && bytes[0] == b'T' && bytes[17] == b' ' {
-        let mut tick: u64 = 0;
-        for &b in &bytes[1..17] {
-            let nib = match b {
-                b'0'..=b'9' => b - b'0',
-                b'a'..=b'f' => b - b'a' + 10,
-                b'A'..=b'F' => b - b'A' + 10,
-                _ => return (None, line.to_string()),
-            };
-            tick = (tick << 4) | nib as u64;
-        }
-        (Some(tick), line[18..].to_string())
-    } else {
-        (None, line.to_string())
-    }
-}
-
 fn hex_nibble(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
@@ -2327,6 +2314,204 @@ fn parse_hello_line(line: &str) -> Option<([u8; 16], [u8; 16])> {
     let uid = parse_hex16(uid_hex)?;
     let build = parse_hex16(build_hex.as_bytes())?;
     Some((uid, build))
+}
+
+/// Background task spawned when an SFBL sentinel is received.
+///
+/// Performs the slow debug handshake (try_acquire → UID read → flash)
+/// without blocking the main select! loop. Checks `cancel` between
+/// each step so a new SFBL can abandon a stale attempt.
+async fn sfbl_debug_task(
+    sifli_debug: &serial::SifliDebug,
+    cancel: &tokio_util::sync::CancellationToken,
+    tx: &crossbeam_channel::Sender<Event>,
+    ctx: &egui::Context,
+    port: &str,
+    adapter_id: device::adapter::AdapterId,
+    ephemeral_id: DeviceId,
+    persistent_devices: &Mutex<HashMap<ChipUid, DeviceId>>,
+    next_device_id: &AtomicU64,
+    pending_flash: &Mutex<HashMap<DeviceId, PendingFlash>>,
+    flash_generation: &std::sync::atomic::AtomicU64,
+    flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
+) -> SfblDebugOutcome {
+    // ── Step 1: enter debug mode ──────────────────────────────────
+    let session = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return SfblDebugOutcome::Cancelled,
+        result = sifli_debug.try_acquire() => match result {
+            Some(s) => s,
+            None => return SfblDebugOutcome::DebugTimeout,
+        },
+    };
+    let t0 = std::time::Instant::now();
+    eprintln!("[usart1:{port}] entered debug in {:?}", t0.elapsed());
+
+    // ── Step 2: read chip UID from eFuse ──────────────────────────
+    let uid = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            session.forget();
+            return SfblDebugOutcome::Cancelled;
+        }
+        result = efuse_read_uid(&session) => match result {
+            Ok(uid) => uid,
+            Err(e) => return SfblDebugOutcome::UidFailed(e),
+        },
+    };
+    eprintln!("[usart1:{port}] identified device: {uid}");
+
+    if cancel.is_cancelled() {
+        session.forget();
+        return SfblDebugOutcome::Cancelled;
+    }
+
+    // ── Step 3: resolve persistent identity ───────────────────────
+    let persistent_id = get_or_create_persistent_device(
+        uid,
+        format!("Device {uid}"),
+        None,
+        persistent_devices,
+        next_device_id,
+        tx,
+    );
+    let _ = tx.send(Event::AdapterBound {
+        adapter_id,
+        device_id: persistent_id,
+        capabilities: vec![KnownCapability::SifliDebug],
+    });
+    let _ = tx.send(Event::DeviceUpgraded {
+        old_id: ephemeral_id,
+        new_id: persistent_id,
+    });
+    let _ = tx.send(Event::DevicePhaseChanged {
+        device_id: persistent_id,
+        phase: DevicePhase::Bootrom,
+    });
+    ctx.request_repaint();
+
+    // ── Step 4: check for pending flash ───────────────────────────
+    let flash_tfw = {
+        let mut map = pending_flash.lock().unwrap();
+        if let Some(pf) = map.get_mut(&persistent_id) {
+            pf.attempts += 1;
+            if pf.attempts > MAX_FLASH_ATTEMPTS {
+                let pf = map.remove(&persistent_id).unwrap();
+                eprintln!("[usart1:{port}] flash retry limit ({MAX_FLASH_ATTEMPTS}) exceeded");
+                let _ = tx.send(Event::FlashProgress {
+                    device_id: persistent_id,
+                    phase: FlashPhase::Failed {
+                        at_step: 0,
+                        message: format!("device reset {} times, giving up", pf.attempts - 1,),
+                    },
+                });
+                ctx.request_repaint();
+                None
+            } else {
+                Some(pf.tfw_path.clone())
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(_tfw_path) = flash_tfw {
+        if cancel.is_cancelled() {
+            session.forget();
+            return SfblDebugOutcome::Cancelled;
+        }
+
+        let attempt = pending_flash
+            .lock()
+            .unwrap()
+            .get(&persistent_id)
+            .map(|pf| pf.attempts)
+            .unwrap_or(1);
+        eprintln!(
+            "[usart1:{port}] pending flash — writing stub (attempt {attempt}/{MAX_FLASH_ATTEMPTS})"
+        );
+        let _ = tx.send(Event::FlashProgress {
+            device_id: persistent_id,
+            phase: FlashPhase::Resetting,
+        });
+        ctx.request_repaint();
+
+        let flash_result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                session.forget();
+                return SfblDebugOutcome::Cancelled;
+            }
+            r = flash_stub_via_debug(&session, tx, persistent_id, ctx) => r,
+        };
+
+        match flash_result {
+            Ok(()) => {
+                eprintln!("[usart1:{port}] stub written, waiting for USB");
+                let generation =
+                    flash_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (wait_tx, wait_rx) = tokio::sync::oneshot::channel::<()>();
+                flash_wait_usb
+                    .lock()
+                    .unwrap()
+                    .insert(uid, (generation, wait_tx));
+                let flash_tx = tx.clone();
+                let flash_ctx = ctx.clone();
+                let flash_port = port.to_owned();
+                let flash_wait_usb_cleanup = flash_wait_usb.clone();
+                tokio::spawn(async move {
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_secs(30), wait_rx).await;
+                    match result {
+                        Ok(Ok(())) => {
+                            eprintln!("[usart1:{flash_port}] stub USB up");
+                            let _ = flash_tx.send(Event::FlashProgress {
+                                device_id: persistent_id,
+                                phase: FlashPhase::StubBooted,
+                            });
+                        }
+                        _ => {
+                            let mut map = flash_wait_usb_cleanup.lock().unwrap();
+                            let superseded =
+                                !matches!(map.get(&uid), Some((g, _)) if *g == generation);
+                            if !superseded {
+                                map.remove(&uid);
+                            }
+                            drop(map);
+                            if superseded {
+                                eprintln!(
+                                    "[usart1:{flash_port}] superseded by newer flash, ignoring"
+                                );
+                            } else {
+                                eprintln!("[usart1:{flash_port}] stub USB never appeared");
+                                let _ = flash_tx.send(Event::FlashProgress {
+                                    device_id: persistent_id,
+                                    phase: FlashPhase::Failed {
+                                        at_step: 3,
+                                        message: "stub USB device did not appear within 30s".into(),
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    flash_ctx.request_repaint();
+                });
+            }
+            Err(e) => {
+                eprintln!("[usart1:{port}] stub flash failed: {e}");
+                let _ = tx.send(Event::FlashProgress {
+                    device_id: persistent_id,
+                    phase: FlashPhase::Failed {
+                        at_step: 1,
+                        message: e,
+                    },
+                });
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    SfblDebugOutcome::Identified { persistent_id }
 }
 
 /// Read the 128-bit chip UID from eFuse bank 0 via the EFUSEC controller.
@@ -2617,6 +2802,7 @@ fn handle_usb_attach(
             BridgeDevice {
                 device: Box::new(dev),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                handles: vec![],
             }
         });
         bridge_dev
@@ -2777,6 +2963,7 @@ fn map_crate_state(state: &tfw::build::CrateState) -> CrateBuildState {
 fn map_host_crate_state(state: &tfw::build::HostCrateState) -> HostCrateBuildState {
     use tfw::build::HostCrateState::*;
     match state {
+        Queued => HostCrateBuildState::Queued,
         Building => HostCrateBuildState::Building,
         Running => HostCrateBuildState::Running,
         Done => HostCrateBuildState::Done,

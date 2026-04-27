@@ -72,14 +72,8 @@ fn main() -> ! {
     let usart = Usart::open(2).unwrap().unwrap();
     USART.set(usart).ok();
 
-    // Read the chip UID once at startup and cache it. `send_awake` will
-    // consult this cache for both the boot-time sentinel and any later
-    // `MoshiMoshi` replies from the control-request handler.
     CACHED_UID.set(read_chip_uid()).ok();
 
-    // Announce ourselves on the control channel. The host uses this as
-    // the authoritative "device is up" signal for USART2, independent of
-    // whatever log traffic does or doesn't happen to be flowing.
     send_awake(0);
 
     ipc::server! {

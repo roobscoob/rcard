@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId};
 use std::io::{Cursor, Read as _};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use device::adapter::{Adapter, AdapterId};
@@ -19,6 +20,7 @@ use crate::{DeviceBuilder, EmulatorError};
 pub struct EmulatedDevice {
     events_tx: broadcast::Sender<DeviceEvent>,
     capabilities: CapabilitySet,
+    shutdown: Arc<AtomicBool>,
     _run_thread: std::thread::JoinHandle<()>,
 }
 
@@ -39,18 +41,21 @@ impl EmulatedDevice {
             })?;
 
         let (events_tx, _) = broadcast::channel(256);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
 
         // Create LogSinks for virtual adapters.
         let usart1_sink = LogSink::new(AdapterId(0), events_tx.clone());
         let usart2_sink = LogSink::new(AdapterId(1), events_tx.clone());
         let renode_sink = LogSink::new(AdapterId(2), events_tx.clone());
+        let display_sink = LogSink::new(AdapterId(3), events_tx.clone());
         let error_sink = LogSink::new(AdapterId(0), events_tx.clone());
 
         let run_thread = std::thread::spawn(move || {
             let (log_tx, log_rx) = mpsc::channel();
 
             std::thread::spawn(move || {
-                bridge_logs(log_rx, usart1_sink, usart2_sink, renode_sink);
+                bridge_logs(log_rx, usart1_sink, usart2_sink, renode_sink, display_sink);
             });
 
             let mut device = match DeviceBuilder::new()
@@ -66,14 +71,17 @@ impl EmulatedDevice {
                 }
             };
 
-            if let Err(e) = device.run() {
-                error_sink.error(e);
+            if let Err(e) = device.run(&thread_shutdown) {
+                if !thread_shutdown.load(Ordering::Relaxed) {
+                    error_sink.error(e);
+                }
             }
         });
 
         Ok(EmulatedDevice {
             events_tx,
             capabilities: CapabilitySet::new(),
+            shutdown,
             _run_thread: run_thread,
         })
     }
@@ -119,6 +127,12 @@ impl Device for EmulatedDevice {
     }
 }
 
+impl Drop for EmulatedDevice {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Drain the emulator's mpsc channel and forward to device via LogSinks.
 ///
 /// Streams (USART2) are handled on separate threads so they don't block
@@ -128,11 +142,12 @@ fn bridge_logs(
     usart1_sink: LogSink,
     usart2_sink: LogSink,
     renode_sink: LogSink,
+    display_sink: LogSink,
 ) {
     while let Ok(log) = rx.recv() {
         match log.kind {
             UsartLogKind::Line(text) => {
-                usart1_sink.text(text);
+                usart1_sink.usart1_raw(&text);
             }
             UsartLogKind::Renode(text) => {
                 parse_renode_log(&renode_sink, text);
@@ -146,6 +161,13 @@ fn bridge_logs(
                     log_species: stream.metadata.log_species,
                     values: stream.values,
                     truncated: stream.truncated,
+                });
+            }
+            UsartLogKind::Display(data) => {
+                display_sink.display_frame(device::logs::DisplayFrame {
+                    width: 128,
+                    height: 64,
+                    data,
                 });
             }
         }

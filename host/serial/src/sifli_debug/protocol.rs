@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Display};
 
 use super::frame::Frame;
 
@@ -24,6 +24,34 @@ pub enum Command<'a> {
     Exit,
     MemRead { addr: u32, count: u16 },
     MemWrite { addr: u32, data: &'a [u32] },
+}
+
+impl Display for Command<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Command::Enter => write!(f, "Enter"),
+            Command::Exit => write!(f, "Exit"),
+            Command::MemRead { addr, count } => {
+                write!(f, "MemRead(addr: 0x{addr:08X}, count: {count})")
+            }
+            Command::MemWrite { addr, data } => {
+                if data.len() <= 4 {
+                    write!(
+                        f,
+                        "MemWrite(addr: 0x{addr:08X}, data: {:08X?})",
+                        data
+                    )
+                } else {
+                    write!(
+                        f,
+                        "MemWrite(addr: 0x{addr:08X}, data: {:08X?}... [{} words])",
+                        &data[..4],
+                        data.len()
+                    )
+                }
+            }
+        }
+    }
 }
 
 impl Command<'_> {
@@ -78,6 +106,17 @@ pub enum Response {
     MemRead(Vec<u32>),
     /// Memory write acknowledged (0xD3).
     MemWrite,
+}
+
+impl Display for Response {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Response::Exit => write!(f, "Exit"),
+            Response::Enter => write!(f, "Enter"),
+            Response::MemRead(words) => write!(f, "MemRead(count: {})", words.len()),
+            Response::MemWrite => write!(f, "MemWrite"),
+        }
+    }
 }
 
 impl Response {

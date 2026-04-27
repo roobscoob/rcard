@@ -3,7 +3,7 @@ use crate::state::{SerialAdapterType, SerialPortConfig, SerialPortStatus};
 use crate::theme;
 use egui_phosphor::regular as icon;
 use egui_taffy::taffy::prelude::*;
-use egui_taffy::{tui, TuiBuilderLogic};
+use egui_taffy::{TuiBuilderLogic, tui};
 
 pub enum SerialAdapterAction {
     None,
@@ -44,11 +44,11 @@ fn render(
         SerialAdapterType::Usart2 => "USART2",
     };
 
-    let (status_color, status_text, status_icon) = match cfg.status {
+    let (status_color, status_text, status_icon) = match &cfg.status {
         SerialPortStatus::Connecting => (theme::TEXT_DIM, "connecting...", icon::CIRCLE_NOTCH),
         SerialPortStatus::PortOpen => (theme::WARN, "port open", icon::CIRCLE_HALF),
         SerialPortStatus::DeviceDetected => (theme::INFO, "connected", icon::CHECK_CIRCLE),
-        SerialPortStatus::Error => (theme::ERROR, "error", icon::WARNING_CIRCLE),
+        SerialPortStatus::Error(e) => (theme::ERROR, e.as_ref(), icon::WARNING_CIRCLE),
     };
 
     tui(ui, egui::Id::new((id_salt, cfg.port.as_str())))
@@ -57,7 +57,10 @@ fn render(
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             align_items: Some(AlignItems::Stretch),
-            size: Size { width: percent(1.0), height: percent(1.0) },
+            size: Size {
+                width: percent(1.0),
+                height: percent(1.0),
+            },
             gap: length(4.0),
             ..Default::default()
         })
@@ -75,9 +78,7 @@ fn render(
             .add(|tui| {
                 tui.heading(format!("{} {}", icon::PLUG, &cfg.port));
                 tui.separator();
-                tui.label(
-                    egui::RichText::new(type_label).color(theme::TEXT_SECONDARY),
-                );
+                tui.label(egui::RichText::new(type_label).color(theme::TEXT_SECONDARY));
                 tui.separator();
                 tui.label(egui::RichText::new(status_icon).color(status_color));
                 tui.label(egui::RichText::new(status_text).color(status_color));
@@ -103,7 +104,10 @@ fn render(
             tui.style(Style {
                 flex_grow: 1.0,
                 padding: length(6.0),
-                min_size: Size { width: auto(), height: length(0.0) },
+                min_size: Size {
+                    width: auto(),
+                    height: length(0.0),
+                },
                 ..Default::default()
             })
             .ui(body);

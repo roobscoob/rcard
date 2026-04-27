@@ -8,13 +8,18 @@ use crate::sifli_debug::{DebugHandle, Error};
 ///
 /// Provided by the Usart1 adapter. Use `try_acquire()` to enter debug mode
 /// and get a `DebugSession` guard with mem_read/mem_write access.
+#[derive(Clone)]
 pub struct SifliDebug {
     handle: Arc<DebugHandle>,
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SifliDebug {
     pub(crate) fn new(handle: Arc<DebugHandle>) -> Self {
-        SifliDebug { handle }
+        SifliDebug {
+            handle,
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// Put the underlying tap into sentinel-resync mode.
@@ -33,13 +38,23 @@ impl SifliDebug {
         self.handle.resync_on_sentinel(sentinel, timeout).await
     }
 
+    /// Poison the debug handle: any in-flight request (including a
+    /// pending Exit from a dropped session) returns immediately.
+    /// Call when the device has rebooted and existing sessions are dead.
+    pub fn poison(&self) {
+        self.handle.poison();
+    }
+
     /// Try to enter debug mode. Returns a session guard if the device
     /// responds within 1 second, or `None` on timeout.
     pub async fn try_acquire(&self) -> Option<DebugSession> {
+        let guard = self.lock.clone().lock_owned().await;
         match tokio::time::timeout(Duration::from_secs(1), self.handle.enter()).await {
-            Ok(Ok(())) => Some(DebugSession {
+            Ok(Ok(poison_gen)) => Some(DebugSession {
                 handle: self.handle.clone(),
+                guard: Some(guard),
                 exit_on_drop: true,
+                poison_gen,
             }),
             _ => None,
         }
@@ -52,15 +67,23 @@ impl SifliDebug {
 /// first (e.g. after a soft reset that already killed the connection).
 pub struct DebugSession {
     handle: Arc<DebugHandle>,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     exit_on_drop: bool,
+    /// Poison generation at the time `enter()` succeeded. If the handle's
+    /// generation has moved past this value, the device rebooted and all
+    /// requests (including the Drop-spawned Exit) fail immediately.
+    poison_gen: u64,
 }
 
 impl DebugSession {
     /// Read `count` 32-bit words starting at `addr`.
     pub async fn mem_read(&self, addr: u32, count: u16) -> Result<Vec<u32>, Error> {
-        tokio::time::timeout(Duration::from_secs(1), self.handle.mem_read(addr, count))
-            .await
-            .map_err(|_| Error::Timeout)?
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            self.handle.mem_read(self.poison_gen, addr, count),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
     }
 
     /// Write 32-bit words to `addr`.
@@ -72,14 +95,15 @@ impl DebugSession {
     pub async fn mem_write(&self, addr: u32, data: &[u32]) -> Result<(), Error> {
         let payload_bytes = (data.len() * 4) as u64;
         let timeout = Duration::from_secs(2) + Duration::from_millis(payload_bytes / 50);
-        tokio::time::timeout(timeout, self.handle.mem_write(addr, data))
+        tokio::time::timeout(timeout, self.handle.mem_write(self.poison_gen, addr, data))
             .await
             .map_err(|_| Error::Timeout)?
     }
 
     /// Write 32-bit words without waiting for a response.
     /// Use for operations that kill the connection (e.g. soft reset).
-    pub async fn mem_write_no_response(&self, addr: u32, data: &[u32]) -> Result<(), Error> {
+    pub async fn mem_write_and_forget(mut self, addr: u32, data: &[u32]) -> Result<(), Error> {
+        self.exit_on_drop = false;
         self.handle.mem_write_no_response(addr, data).await
     }
 
@@ -91,10 +115,10 @@ impl DebugSession {
         self.handle.byte_counter()
     }
 
-    /// Consume the session without sending `Exit`.
+    /// Abandon this session without sending an Exit command.
     ///
-    /// For use after a reset write: the chip is already rebooting and cannot
-    /// answer an Exit, so skip the `Drop`-spawned exit entirely.
+    /// Use when the device has rebooted or the connection is known to be
+    /// dead — sending Exit would just timeout against noise.
     pub fn forget(mut self) {
         self.exit_on_drop = false;
     }
@@ -102,12 +126,15 @@ impl DebugSession {
 
 impl Drop for DebugSession {
     fn drop(&mut self) {
+        let guard = self.guard.take();
         if !self.exit_on_drop {
             return;
         }
         let handle = self.handle.clone();
+        let poison_gen = self.poison_gen;
         tokio::spawn(async move {
-            let _ = handle.exit().await;
+            let _ = handle.exit(poison_gen).await;
+            drop(guard);
         });
     }
 }

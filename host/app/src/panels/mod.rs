@@ -1,4 +1,5 @@
 pub mod build_output;
+pub mod device_display;
 pub mod device_renode;
 pub mod log_viewer;
 pub mod placeholder;
@@ -20,6 +21,8 @@ pub enum Pane {
     DeviceProtocol(DeviceId),
     /// Renode emulator management view (emulator devices only).
     DeviceRenode(DeviceId),
+    /// Display output (OLED framebuffer viewer).
+    DeviceDisplay(DeviceId),
     /// Unified build / firmware panel. The `BuildId` addresses a
     /// `BuildHandle` in `AppState::builds`, which can be either a
     /// live build or a snapshot synthesised from a loaded `.tfw`
@@ -60,6 +63,14 @@ impl Pane {
                     .map(|d| d.name.as_str())
                     .unwrap_or("?");
                 format!("{} {name} — Renode", icon::DESKTOP)
+            }
+            Pane::DeviceDisplay(id) => {
+                let name = state
+                    .devices
+                    .get(id)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("?");
+                format!("{} {name} — Display", icon::MONITOR)
             }
             Pane::Firmware(id) => {
                 if let Some(b) = state.builds.get(id) {
@@ -127,6 +138,13 @@ impl<'a> egui_tiles::Behavior<Pane> for PaneBehavior<'a> {
                         }
                         device_renode::RenodeAction::None => {}
                     }
+                } else {
+                    ui.label("Device not found");
+                }
+            }
+            Pane::DeviceDisplay(id) => {
+                if let Some(dev) = self.state.devices.get(id) {
+                    device_display::show(ui, dev);
                 } else {
                     ui.label("Device not found");
                 }

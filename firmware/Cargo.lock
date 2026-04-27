@@ -284,6 +284,7 @@ dependencies = [
  "ipc",
  "rcard-log",
  "rcard-log-macros",
+ "sysmodule_display_api",
  "sysmodule_log_api",
  "userlib",
 ]
@@ -984,8 +985,10 @@ name = "sysmodule_display_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
  "rcard-log-macros",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -1230,6 +1233,8 @@ name = "sysmodule_time_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
+ "serde",
  "userlib",
  "zerocopy",
 ]

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::monitor::Monitor;
 use crate::peripherals::usart::log::{UsartLog, UsartLogKind};
+use crate::peripherals::display_sink::DisplaySink;
 use crate::peripherals::usart::{NullSink, StringLogger, StructuredSink};
 use crate::{Device, EmulatorError, find_free_port, spawn_usart_reader};
 
@@ -64,6 +65,7 @@ impl DeviceBuilder {
         let usart1_port = find_free_port();
         let usart2_port = find_free_port();
         let usart3_port = find_free_port();
+        let display_port = find_free_port();
 
         let repl = self.renode_platform.ok_or_else(|| {
             EmulatorError::InvalidPlaces(
@@ -176,6 +178,7 @@ impl DeviceBuilder {
             "emulation CreateServerSocketTerminal {usart3_port} \"usart3_term\" false",
         ))?;
         monitor.send("connector Connect usart3 usart3_term")?;
+        monitor.send(&format!("lcdc StreamPort {display_port}"))?;
         monitor.send("logLevel 3 nvic")?;
         monitor.send("logLevel 3 usart1")?;
         monitor.send("logLevel 3 usart2")?;
@@ -196,6 +199,11 @@ impl DeviceBuilder {
                     usart2_port,
                     "usart2",
                     StructuredSink::new(2, tx.clone()),
+                ));
+                usart_threads.push(spawn_usart_reader(
+                    display_port,
+                    "display",
+                    DisplaySink::new(3, tx.clone()),
                 ));
             }
             None => {

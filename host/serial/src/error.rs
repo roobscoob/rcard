@@ -1,5 +1,7 @@
 use std::fmt;
 
+use cobs::DecodeError;
+
 /// Errors from the serial adapter's reader tasks.
 #[derive(Debug)]
 pub enum SerialError {
@@ -8,7 +10,9 @@ pub enum SerialError {
     /// Port closed (read returned 0 bytes, fatal — reader exits).
     PortClosed,
     /// COBS frame decode failed — frame skipped.
-    CobsDecode,
+    CobsDecode { error: DecodeError, data: Vec<u8> },
+    /// COBS frame overflowed the maximum allowed size — frame skipped.
+    CobsOverflow { data: Vec<u8> },
     /// Log metadata deserialization failed — entry skipped.
     LogMetadata,
     /// A structured log stream went idle without ever receiving a
@@ -28,9 +32,19 @@ impl fmt::Display for SerialError {
         match self {
             Self::Io(e) => write!(f, "serial I/O error: {e}"),
             Self::PortClosed => write!(f, "serial port closed"),
-            Self::CobsDecode => write!(f, "COBS frame decode failed"),
+            Self::CobsDecode { error, data: _ } => {
+                write!(f, "COBS frame decode failed: {error}")
+            }
+            Self::CobsOverflow { data: _ } => {
+                write!(f, "COBS frame overflowed maximum size")
+            }
             Self::LogMetadata => write!(f, "log metadata deserialization failed"),
-            Self::StreamTimeout { stream_id, log_id, bytes_decoded, age_ms } => write!(
+            Self::StreamTimeout {
+                stream_id,
+                log_id,
+                bytes_decoded,
+                age_ms,
+            } => write!(
                 f,
                 "structured log stream {stream_id} (log_id={log_id}) timed out after \
                  {age_ms}ms with {bytes_decoded} bytes decoded — no EoS received"

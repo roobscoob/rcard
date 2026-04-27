@@ -6,5 +6,5 @@ pub mod usart2;
 
 pub use capability::{DebugSession, SifliDebug};
 pub use sifli_debug::DebugHandle;
-pub use usart1::{Usart1, Usart1Connection};
+pub use usart1::Usart1Connection;
 pub use usart2::{SerialSender, USART2_IPC_PRIORITY, Usart2};

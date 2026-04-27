@@ -146,6 +146,8 @@ impl Resource for HostCrate {
 /// Durable states for a host-target crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCrateState {
+    /// Waiting to start — visible in the crate list but greyed out.
+    Queued,
     /// Being compiled for the host target.
     Building,
     /// Compiled, now executing.
@@ -604,21 +606,13 @@ pub fn build(
     if !api_crates.is_empty() {
         emit(BuildEvent::HostCrate {
             name: "ipc-schema-dumper".into(),
-            update: ResourceUpdate::State(HostCrateState::Building),
+            update: ResourceUpdate::State(HostCrateState::Queued),
         });
-        match crate::schema_dump::run(&api_crates, &work_dir) {
+        match crate::schema_dump::run(&api_crates, &work_dir, emit) {
             Ok(schema_json) => {
-                emit(BuildEvent::HostCrate {
-                    name: "ipc-schema-dumper".into(),
-                    update: ResourceUpdate::State(HostCrateState::Running),
-                });
                 if let Ok(schemas) = serde_json::from_str::<serde_json::Value>(&schema_json) {
                     ipc_bundle.schemas = Some(schemas);
                 }
-                emit(BuildEvent::HostCrate {
-                    name: "ipc-schema-dumper".into(),
-                    update: ResourceUpdate::State(HostCrateState::Done),
-                });
             }
             Err(e) => {
                 return Err(BuildError::SchemaDump(e));

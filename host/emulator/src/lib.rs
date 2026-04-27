@@ -1,6 +1,8 @@
 use std::io::Read;
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -54,7 +56,7 @@ pub struct Device {
 impl Device {
     /// Load firmware segments from the places binary into the emulated
     /// machine's memory, set VTOR, and run until the CPU halts.
-    pub fn run(&mut self) -> Result<(), EmulatorError> {
+    pub fn run(&mut self, shutdown: &Arc<AtomicBool>) -> Result<(), EmulatorError> {
         let data = self.places_data.as_ref()
             .ok_or_else(|| EmulatorError::InvalidPlaces("no places binary loaded".into()))?;
 
@@ -79,6 +81,9 @@ impl Device {
         self.monitor.send("start")?;
 
         loop {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(500));
             let resp = self.monitor.query("cpu IsHalted")?;
             match resp.as_str() {

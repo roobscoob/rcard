@@ -305,7 +305,13 @@ impl eframe::App for RcardApp {
             // each frame. Within this cap the user can still resize freely
             // and the log viewer will fill the extra space.
             let max_h = (ctx.screen_rect().height() * 0.8).max(300.0);
+            let window_id = if is_flashing {
+                egui::Id::new("flash_modal_flashing_window")
+            } else {
+                egui::Id::new("flash_modal_picker_window")
+            };
             egui::Window::new(format!("{} Flash Firmware", icon::LIGHTNING))
+                .id(window_id)
                 .collapsible(false)
                 .resizable(is_flashing)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -554,12 +560,10 @@ impl eframe::App for RcardApp {
                             use egui_taffy::{tui as taffy_tui, TuiBuilderLogic};
 
                             taffy_tui(ui, egui::Id::new("flash_modal_flashing"))
-                                .reserve_available_space()
                                 .style(Style {
                                     display: Display::Flex,
                                     flex_direction: FlexDirection::Column,
                                     align_items: Some(AlignItems::Stretch),
-                                    size: Size { width: percent(1.0), height: percent(1.0) },
                                     gap: length(6.0),
                                     ..Default::default()
                                 })
@@ -588,14 +592,15 @@ impl eframe::App for RcardApp {
                                         flash_modal_steps(ui, phase);
                                     });
 
-                                    // Body: log viewer fills remaining space when shown.
+                                    // Body: log viewer — starts at 300px, grows into
+                                    // any extra space the user gives by resizing.
                                     if show_logs {
                                         tui.separator();
                                         tui.style(Style {
                                             flex_grow: 1.0,
                                             min_size: Size {
                                                 width: auto(),
-                                                height: length(0.0),
+                                                height: length(300.0),
                                             },
                                             ..Default::default()
                                         })
@@ -606,12 +611,6 @@ impl eframe::App for RcardApp {
                                                 panels::log_viewer::show(ui, dev, &self.state);
                                             }
                                         });
-                                    } else {
-                                        tui.style(Style {
-                                            flex_grow: 1.0,
-                                            ..Default::default()
-                                        })
-                                        .add_empty();
                                     }
 
                                     // Footer: cancel / close button, right-aligned.

@@ -5,7 +5,7 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 use crate::adapter::{Adapter, AdapterId};
-use crate::logs::{ControlEvent, Log, LogContents, LogEntry};
+use crate::logs::{ControlEvent, DisplayFrame, Log, LogContents, LogEntry};
 
 /// Events emitted by a device — adapter lifecycle changes, logs, and errors.
 #[derive(Clone, Debug)]
@@ -19,6 +19,8 @@ pub enum DeviceEvent {
         adapter: AdapterId,
         event: ControlEvent,
     },
+    /// A display frame snapshot from an emulated or physical device.
+    DisplayFrame(DisplayFrame),
     Error(AdapterError),
 }
 
@@ -61,6 +63,23 @@ impl LogSink {
         let _ = self.tx.send(DeviceEvent::Log(Log {
             adapter: self.adapter,
             contents: LogContents::Structured(entry),
+            received_at,
+            device_tick,
+        }));
+    }
+
+    /// Send a raw USART1 text line. Strips the `T<hex>` tick prefix (if
+    /// present) and populates `device_tick` from it.
+    pub fn usart1_raw(&self, raw_line: &str) {
+        self.usart1_raw_at(raw_line, Instant::now());
+    }
+
+    /// Send a raw USART1 text line with an explicit `received_at` stamp.
+    pub fn usart1_raw_at(&self, raw_line: &str, received_at: Instant) {
+        let (device_tick, text) = crate::logs::parse_tick_prefix(raw_line);
+        let _ = self.tx.send(DeviceEvent::Log(Log {
+            adapter: self.adapter,
+            contents: LogContents::Text(text),
             received_at,
             device_tick,
         }));
@@ -117,6 +136,11 @@ impl LogSink {
             adapter: self.adapter,
             event,
         });
+    }
+
+    /// Send a display frame snapshot.
+    pub fn display_frame(&self, frame: DisplayFrame) {
+        let _ = self.tx.send(DeviceEvent::DisplayFrame(frame));
     }
 
     /// Report an adapter error.

@@ -1,7 +1,3 @@
-use crate::DisplayOpenError;
-
-use ipc::errors::ConstructorError;
-
 #[derive(
     Clone,
     Copy,
@@ -9,6 +5,9 @@ use ipc::errors::ConstructorError;
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(C, packed)]
 pub struct DisplayConfiguration {
@@ -69,10 +68,13 @@ impl DisplayConfiguration {
         }
     }
 
+    #[cfg(target_os = "none")]
     pub fn open<S: super::display_client::DisplayServer>(
         self,
-    ) -> Result<Result<super::display_client::DisplayHandle<S>, DisplayOpenError>, ConstructorError>
-    {
+    ) -> Result<
+        Result<super::display_client::DisplayHandle<S>, crate::DisplayOpenError>,
+        ipc::errors::ConstructorError,
+    > {
         super::display_client::DisplayHandle::<S>::open(self)
     }
 }

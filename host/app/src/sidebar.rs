@@ -1,10 +1,10 @@
 use crate::panels::Pane;
 use crate::state::*;
 use crate::theme;
-use egui_phosphor::regular as icon;
 use egui_ltreeview::{Action, TreeView};
+use egui_phosphor::regular as icon;
 use egui_taffy::taffy::prelude::*;
-use egui_taffy::{tui as taffy_tui, TuiBuilderLogic};
+use egui_taffy::{TuiBuilderLogic, tui as taffy_tui};
 
 /// Render the sidebar content based on the active section.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
@@ -52,7 +52,11 @@ impl<'a> egui_tiles::Behavior<SidebarPane> for FirmwareSidebarBehavior<'a> {
         }
     }
 
-    fn is_tab_closable(&self, _tiles: &egui_tiles::Tiles<SidebarPane>, _tile_id: egui_tiles::TileId) -> bool {
+    fn is_tab_closable(
+        &self,
+        _tiles: &egui_tiles::Tiles<SidebarPane>,
+        _tile_id: egui_tiles::TileId,
+    ) -> bool {
         false
     }
 
@@ -66,7 +70,10 @@ impl<'a> egui_tiles::Behavior<SidebarPane> for FirmwareSidebarBehavior<'a> {
 
 fn build_section(ui: &mut egui::Ui, state: &mut AppState) {
     // Firmware directory — path display + browse button.
-    ui.colored_label(theme::TEXT_SECONDARY, format!("{} Source Directory", icon::FOLDER));
+    ui.colored_label(
+        theme::TEXT_SECONDARY,
+        format!("{} Source Directory", icon::FOLDER),
+    );
     ui.add_space(2.0);
 
     if state.firmware_dir_input.is_empty() {
@@ -75,7 +82,10 @@ fn build_section(ui: &mut egui::Ui, state: &mut AppState) {
         ui.colored_label(theme::TEXT_SECONDARY, &state.firmware_dir_input);
     }
 
-    if ui.button(format!("{} Browse...", icon::FOLDER_OPEN)).clicked() {
+    if ui
+        .button(format!("{} Browse...", icon::FOLDER_OPEN))
+        .clicked()
+    {
         if let Some(path) = rfd::FileDialog::new()
             .set_title("Select firmware directory")
             .pick_folder()
@@ -145,9 +155,10 @@ fn build_section(ui: &mut egui::Ui, state: &mut AppState) {
 
     ui.add_space(6.0);
 
-    let any_running = state.builds.values().any(|b| {
-        matches!(b.status, BuildStatus::Running)
-    });
+    let any_running = state
+        .builds
+        .values()
+        .any(|b| matches!(b.status, BuildStatus::Running));
 
     let label = if any_running {
         format!("{} Building...", icon::CIRCLE_NOTCH)
@@ -165,10 +176,7 @@ fn firmware_list_section(ui: &mut egui::Ui, state: &mut AppState) {
         ui.vertical_centered(|ui| {
             ui.add_space(12.0);
             ui.colored_label(theme::TEXT_DIM, format!("{}", icon::DOWNLOAD_SIMPLE));
-            ui.colored_label(
-                theme::TEXT_DIM,
-                "Drop a .tfw file or\nbuild one above",
-            );
+            ui.colored_label(theme::TEXT_DIM, "Drop a .tfw file or\nbuild one above");
         });
         return;
     }
@@ -225,7 +233,10 @@ fn adapters_panel(ui: &mut egui::Ui, state: &mut AppState) {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             align_items: Some(AlignItems::Stretch),
-            size: Size { width: percent(1.0), height: percent(1.0) },
+            size: Size {
+                width: percent(1.0),
+                height: percent(1.0),
+            },
             gap: length(4.0),
             ..Default::default()
         })
@@ -247,7 +258,10 @@ fn adapters_panel(ui: &mut egui::Ui, state: &mut AppState) {
             // Port list fills remaining space.
             tui.style(Style {
                 flex_grow: 1.0,
-                min_size: Size { width: auto(), height: length(0.0) },
+                min_size: Size {
+                    width: auto(),
+                    height: length(0.0),
+                },
                 ..Default::default()
             })
             .ui(|ui| {
@@ -284,11 +298,7 @@ fn adapter_add_form(
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
                 for (i, port) in unconfigured.iter().enumerate() {
-                    ui.selectable_value(
-                        &mut state.new_port_selection,
-                        Some(i),
-                        port.label.clone(),
-                    );
+                    ui.selectable_value(&mut state.new_port_selection, Some(i), port.label.clone());
                 }
             });
 
@@ -365,7 +375,7 @@ fn adapter_list(ui: &mut egui::Ui, state: &mut AppState) {
         .serial_ports
         .iter()
         .enumerate()
-        .map(|(i, cfg)| (i, cfg.port.clone(), cfg.adapter_type, cfg.status))
+        .map(|(i, cfg)| (i, cfg.port.clone(), cfg.adapter_type, cfg.status.clone()))
         .collect();
 
     let tree_id = ui.make_persistent_id("adapter_tree");
@@ -382,7 +392,7 @@ fn adapter_list(ui: &mut egui::Ui, state: &mut AppState) {
                     SerialPortStatus::Connecting => (theme::TEXT_DIM, icon::CIRCLE_NOTCH),
                     SerialPortStatus::PortOpen => (theme::WARN, icon::CIRCLE_HALF),
                     SerialPortStatus::DeviceDetected => (theme::INFO, icon::CHECK_CIRCLE),
-                    SerialPortStatus::Error => (theme::ERROR, icon::WARNING_CIRCLE),
+                    SerialPortStatus::Error(_) => (theme::ERROR, icon::WARNING_CIRCLE),
                 };
                 let label_text = format!("{status_icon} {port} [{type_label}]");
                 let label = egui::RichText::new(label_text).color(color);
@@ -393,10 +403,7 @@ fn adapter_list(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                     SerialAdapterType::Usart2 => {
                         builder.dir(AdapterNodeId::port(*i), label);
-                        builder.leaf(
-                            AdapterNodeId::logs(*i),
-                            format!("{} Logs", icon::SCROLL),
-                        );
+                        builder.leaf(AdapterNodeId::logs(*i), format!("{} Logs", icon::SCROLL));
                         builder.leaf(
                             AdapterNodeId::control(*i),
                             format!("{} Control", icon::TREE_STRUCTURE),
@@ -455,6 +462,9 @@ impl TreeNodeId {
     fn renode(id: DeviceId) -> Self {
         Self::pane(id, 2)
     }
+    fn display(id: DeviceId) -> Self {
+        Self::pane(id, 3)
+    }
 }
 
 fn devices_panel(ui: &mut egui::Ui, state: &mut AppState) {
@@ -464,7 +474,10 @@ fn devices_panel(ui: &mut egui::Ui, state: &mut AppState) {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             align_items: Some(AlignItems::Stretch),
-            size: Size { width: percent(1.0), height: percent(1.0) },
+            size: Size {
+                width: percent(1.0),
+                height: percent(1.0),
+            },
             gap: length(4.0),
             ..Default::default()
         })
@@ -480,7 +493,10 @@ fn devices_panel(ui: &mut egui::Ui, state: &mut AppState) {
 
             tui.style(Style {
                 flex_grow: 1.0,
-                min_size: Size { width: auto(), height: length(0.0) },
+                min_size: Size {
+                    width: auto(),
+                    height: length(0.0),
+                },
                 ..Default::default()
             })
             .ui(|ui| {
@@ -520,13 +536,21 @@ fn devices_panel_body(ui: &mut egui::Ui, state: &mut AppState) {
                 DeviceKind::Emulator => icon::DESKTOP,
             };
             let phase_label = match dev.phase {
-                DevicePhase::Stabilizing => Some(("STAB", theme::ERROR)),
                 DevicePhase::Bootrom => Some(("ROM", theme::WARN)),
                 DevicePhase::Bootloader => Some(("BL", theme::DEBUG)),
                 DevicePhase::Kernel => Some(("OK", theme::INFO)),
                 DevicePhase::Unknown => None,
             };
-            (*id, dev.name.clone(), dev.is_connected(), dev.kind, kind_icon, phase_label)
+            let has_display = dev.has_capability(KnownCapability::Display);
+            (
+                *id,
+                dev.name.clone(),
+                dev.is_connected(),
+                dev.kind,
+                kind_icon,
+                phase_label,
+                has_display,
+            )
         })
         .collect();
 
@@ -535,7 +559,9 @@ fn devices_panel_body(ui: &mut egui::Ui, state: &mut AppState) {
         .allow_multi_selection(false)
         .fill_space_horizontal(true)
         .show(ui, |builder| {
-            for &(id, ref name, connected, kind, kind_icon, ref phase_label) in &entries {
+            for &(id, ref name, connected, kind, kind_icon, ref phase_label, has_display) in
+                &entries
+            {
                 let color = if connected {
                     theme::INFO
                 } else {
@@ -549,9 +575,18 @@ fn devices_panel_body(ui: &mut egui::Ui, state: &mut AppState) {
                 let label = egui::RichText::new(label_text).color(color);
                 builder.dir(TreeNodeId::device(id), label);
                 builder.leaf(TreeNodeId::logs(id), format!("{} Logs", icon::SCROLL));
-                builder.leaf(TreeNodeId::protocol(id), format!("{} Protocol", icon::TREE_STRUCTURE));
+                builder.leaf(
+                    TreeNodeId::protocol(id),
+                    format!("{} Protocol", icon::TREE_STRUCTURE),
+                );
                 if kind == DeviceKind::Emulator {
                     builder.leaf(TreeNodeId::renode(id), format!("{} Renode", icon::DESKTOP));
+                }
+                if has_display {
+                    builder.leaf(
+                        TreeNodeId::display(id),
+                        format!("{} Display", icon::MONITOR),
+                    );
                 }
                 builder.close_dir();
             }
@@ -561,19 +596,22 @@ fn devices_panel_body(ui: &mut egui::Ui, state: &mut AppState) {
         if let egui_ltreeview::Action::SetSelected(selected) = action {
             for node in selected {
                 // Device dir clicked → open all panes as tab group.
-                if let Some(&(id, _, _, _, _, _)) = entries.iter().find(|(id, _, _, _, _, _)| {
-                    TreeNodeId::device(*id) == node
-                }) {
+                if let Some(&(id, _, _, _, _, _, _)) = entries
+                    .iter()
+                    .find(|(id, ..)| TreeNodeId::device(*id) == node)
+                {
                     state.open_device(id);
                 }
                 // Leaf clicked → open individual pane.
-                for &(id, _, _, _, _, _) in &entries {
+                for &(id, _, _, _, _, _, _) in &entries {
                     if node == TreeNodeId::logs(id) {
                         state.open_device_pane(Pane::DeviceLogs(id));
                     } else if node == TreeNodeId::protocol(id) {
                         state.open_device_pane(Pane::DeviceProtocol(id));
                     } else if node == TreeNodeId::renode(id) {
                         state.open_device_pane(Pane::DeviceRenode(id));
+                    } else if node == TreeNodeId::display(id) {
+                        state.open_device_pane(Pane::DeviceDisplay(id));
                     }
                 }
             }

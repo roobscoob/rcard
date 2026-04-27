@@ -69,6 +69,36 @@ pub enum ControlEvent {
     FrameError(String),
 }
 
+/// A display frame snapshot (raw GDDRAM data in page-column layout).
+#[derive(Clone, Debug)]
+pub struct DisplayFrame {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
+/// Parse the `T<16 hex digits> ` tick prefix emitted by the supervisor on
+/// USART1. Returns `(Some(tick), stripped_text)` on success, or
+/// `(None, original)` if the line doesn't carry a tick prefix.
+pub fn parse_tick_prefix(line: &str) -> (Option<u64>, String) {
+    let bytes = line.as_bytes();
+    if bytes.len() >= 18 && bytes[0] == b'T' && bytes[17] == b' ' {
+        let mut tick: u64 = 0;
+        for &b in &bytes[1..17] {
+            let nib = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => return (None, line.to_string()),
+            };
+            tick = (tick << 4) | nib as u64;
+        }
+        (Some(tick), line[18..].to_string())
+    } else {
+        (None, line.to_string())
+    }
+}
+
 /// A decoded structured log entry from a binary stream.
 #[derive(Clone, Debug)]
 pub struct LogEntry {

@@ -93,8 +93,7 @@ impl ipc_protocol::FrameSender for SerialSender {
     fn send_frame<'a>(
         &'a self,
         bytes: Vec<u8>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
             self.write_typed(rcard_log::wire::TYPE_IPC_REQUEST, &bytes)
                 .await
@@ -108,11 +107,7 @@ impl Usart2 {
     /// Log events are pushed into the provided `sink`. The returned adapter
     /// exposes the unified `ipc_protocol::Ipc` capability for making IPC
     /// calls over USART2.
-    pub fn connect(
-        port: &str,
-        id: AdapterId,
-        sink: LogSink,
-    ) -> Result<Self, serialport::Error> {
+    pub fn connect(port: &str, id: AdapterId, sink: LogSink) -> Result<Self, serialport::Error> {
         let stream = tokio_serial::SerialStream::open(&tokio_serial::new(port, 921_600))?;
         let (reader, writer) = tokio::io::split(stream);
 
@@ -142,9 +137,7 @@ impl Usart2 {
         let probe_port = port.to_string();
         tokio::spawn(async move {
             if let Err(e) = probe_sender.send_moshi_moshi().await {
-                eprintln!(
-                    "[usart2:{probe_port}] discovery: MoshiMoshi send failed: {e}"
-                );
+                eprintln!("[usart2:{probe_port}] discovery: MoshiMoshi send failed: {e}");
             }
         });
 
@@ -210,13 +203,18 @@ async fn read_structured(
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        eprintln!("[usart2-wire] waiting for data...");
+
         let n = tokio::select! {
             read_result = port.read(&mut buf) => match read_result {
                 Ok(0) => {
                     sink.error(crate::error::SerialError::PortClosed);
                     return;
                 }
-                Ok(n) => n,
+                Ok(n) => {
+                    eprintln!("[usart2-wire] {} bytes: {:02x?}", n, &buf[..n.min(64)]);
+                    n
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
                 Err(e) => {
                     sink.error(crate::error::SerialError::Io(e));
@@ -235,15 +233,26 @@ async fn read_structured(
                     let started = chunk_start.take().unwrap_or_else(Instant::now);
                     let mut decoded = vec![0u8; cobs_buf.len()];
                     match cobs::decode(&cobs_buf, &mut decoded) {
-                        Ok(len) => process_chunk(
-                            &decoded[..len],
-                            started,
-                            &mut streams,
-                            &mut frame_reader,
-                            &sink,
-                            &protocol,
-                        ).await,
-                        Err(_) => sink.error(crate::error::SerialError::CobsDecode),
+                        Ok(len) => {
+                            let chunk = &decoded[..len];
+                            eprintln!("[usart2] chunk ({} bytes): {:02x?}", chunk.len(), chunk);
+                            process_chunk(
+                                chunk,
+                                started,
+                                &mut streams,
+                                &mut frame_reader,
+                                &sink,
+                                &protocol,
+                            )
+                            .await;
+                            eprintln!("[usart2] chunk processing complete");
+                        }
+                        Err(error) => {
+                            sink.error(crate::error::SerialError::CobsDecode {
+                                error,
+                                data: cobs_buf.clone(),
+                            });
+                        }
                     }
                     cobs_buf.clear();
                 }
@@ -254,6 +263,10 @@ async fn read_structured(
                 }
                 cobs_buf.push(byte);
                 if cobs_buf.len() > 300 {
+                    sink.error(crate::error::SerialError::CobsOverflow {
+                        data: cobs_buf.clone(),
+                    });
+
                     cobs_buf.clear();
                     chunk_start = None;
                 }
@@ -399,10 +412,7 @@ async fn process_chunk(
 /// values are also emitted as a `LogEntry` with `truncated: true` so the UI
 /// can surface them with a visual indicator instead of dropping them on the
 /// floor.
-fn sweep_stale_streams(
-    streams: &mut HashMap<u64, StreamState>,
-    sink: &LogSink,
-) {
+fn sweep_stale_streams(streams: &mut HashMap<u64, StreamState>, sink: &LogSink) {
     let now = Instant::now();
     let stale: Vec<u64> = streams
         .iter()

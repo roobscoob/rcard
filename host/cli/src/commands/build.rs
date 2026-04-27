@@ -143,8 +143,8 @@ pub async fn run(
                         eprint!("{color}{name}{RESET}");
                         task_count += 1;
                     }
-                    CrateState::Linked => {
-                        // Linked is implicit in the flow — don't print.
+                    CrateState::Compiled | CrateState::Linked => {
+                        // Implicit in the flow — don't print.
                     }
                 }
             }
@@ -182,6 +182,7 @@ pub async fn run(
             // ── HostCrate state transitions ────────────────────────
             BuildEvent::HostCrate { name, update: ResourceUpdate::State(state) } => {
                 match state {
+                    HostCrateState::Queued => {}
                     HostCrateState::Building => {
                         eprint!("   {DIM}{name}{RESET}");
                     }
@@ -250,6 +251,8 @@ pub async fn run(
                     }
                 }
             }
+
+            BuildEvent::ConfigResolved(_) | BuildEvent::IpcMetadata(_) => {}
         }
     }
 

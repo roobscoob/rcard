@@ -10,6 +10,8 @@ use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::build::{BuildEvent, HostCrateEvent, HostCrateState, ResourceUpdate};
+
 /// An api crate to include in the schema dump.
 pub struct ApiCrate {
     /// Cargo package name (e.g. `sysmodule_log_api`).
@@ -21,10 +23,12 @@ pub struct ApiCrate {
     pub resource_names: Vec<String>,
 }
 
-/// Run the schema dump and return the JSON output as a string.
+/// Build and run the schema dump, streaming cargo messages via `emit`.
+/// Returns the JSON output from the binary's stdout.
 pub fn run(
     api_crates: &[ApiCrate],
     work_dir: &Path,
+    emit: &dyn Fn(BuildEvent),
 ) -> Result<String, SchemaDumpError> {
     let project_dir = work_dir.join("ipc-schema-dumper");
     let src_dir = project_dir.join("src");
@@ -34,18 +38,75 @@ pub fn run(
     write_main_rs(&src_dir, api_crates)?;
 
     let target_dir = project_dir.join("target");
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--quiet"])
-        .arg("--manifest-path")
-        .arg(project_dir.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", &target_dir)
+
+    emit(BuildEvent::HostCrate {
+        name: "ipc-schema-dumper".into(),
+        update: ResourceUpdate::State(HostCrateState::Building),
+    });
+
+    let build = escargot::CargoBuild::new()
+        .manifest_path(project_dir.join("Cargo.toml"))
+        .release()
+        .env("CARGO_TARGET_DIR", target_dir.display().to_string());
+
+    let messages = build
+        .exec()
+        .map_err(|e| SchemaDumpError::Other(format!("failed to run cargo: {e:#}")))?;
+
+    let mut failed = false;
+    let mut bin_path: Option<PathBuf> = None;
+
+    for msg in messages {
+        match msg {
+            Ok(msg) => {
+                if let Ok(val) = msg.decode_custom::<serde_json::Value>() {
+                    if let Some(exe) = val.get("executable").and_then(|v| v.as_str()) {
+                        bin_path = Some(PathBuf::from(exe));
+                    }
+                }
+                emit(BuildEvent::HostCrate {
+                    name: "ipc-schema-dumper".into(),
+                    update: ResourceUpdate::Event(HostCrateEvent::CargoMessage(msg)),
+                });
+            }
+            Err(e) => {
+                emit(BuildEvent::HostCrate {
+                    name: "ipc-schema-dumper".into(),
+                    update: ResourceUpdate::Event(HostCrateEvent::CargoError(e)),
+                });
+                failed = true;
+            }
+        }
+    }
+
+    if failed {
+        return Err(SchemaDumpError::CargoFailed(
+            "cargo build failed (see diagnostics above)".into(),
+        ));
+    }
+
+    let bin = bin_path.ok_or_else(|| {
+        SchemaDumpError::Other("cargo build produced no binary artifact".into())
+    })?;
+
+    emit(BuildEvent::HostCrate {
+        name: "ipc-schema-dumper".into(),
+        update: ResourceUpdate::State(HostCrateState::Running),
+    });
+
+    let output = Command::new(&bin)
         .output()
         .map_err(SchemaDumpError::Io)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(SchemaDumpError::CargoFailed(stderr));
+        return Err(SchemaDumpError::RunFailed(stderr));
     }
+
+    emit(BuildEvent::HostCrate {
+        name: "ipc-schema-dumper".into(),
+        update: ResourceUpdate::State(HostCrateState::Done),
+    });
 
     String::from_utf8(output.stdout)
         .map_err(|e| SchemaDumpError::Other(format!("non-UTF8 output: {e}")))
@@ -118,6 +179,7 @@ fn write_main_rs(src_dir: &Path, api_crates: &[ApiCrate]) -> Result<(), SchemaDu
 pub enum SchemaDumpError {
     Io(std::io::Error),
     CargoFailed(String),
+    RunFailed(String),
     Other(String),
 }
 
@@ -126,6 +188,7 @@ impl std::fmt::Display for SchemaDumpError {
         match self {
             Self::Io(e) => write!(f, "schema dump IO error: {e}"),
             Self::CargoFailed(stderr) => write!(f, "schema dump cargo failed:\n{stderr}"),
+            Self::RunFailed(stderr) => write!(f, "schema dump binary failed:\n{stderr}"),
             Self::Other(msg) => write!(f, "schema dump error: {msg}"),
         }
     }

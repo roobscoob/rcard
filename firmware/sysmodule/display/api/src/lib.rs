@@ -13,6 +13,9 @@ pub use config::{DisplayConfiguration, DisplayConfigurationBuilder};
     zerocopy::IntoBytes,
     zerocopy::KnownLayout,
     zerocopy::Immutable,
+    serde::Serialize,
+    serde::Deserialize,
+    postcard_schema::Schema,
 )]
 #[repr(u8)]
 pub enum DisplayOpenError {
@@ -30,4 +33,7 @@ pub trait Display {
     /// For a 128x64 display this is 1024 bytes.
     #[message]
     fn draw(&self, #[lease] framebuffer: &[u8]);
+
+    #[message]
+    fn set_contrast(&self, value: u8);
 }

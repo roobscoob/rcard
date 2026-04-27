@@ -29,9 +29,18 @@ fn main() -> eframe::Result<()> {
             let ctx = cc.egui_ctx.clone();
             theme::apply(&ctx);
 
-            // Load Phosphor icon font into egui's proportional family.
             let mut fonts = egui::FontDefinitions::default();
             egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+
+            if let Some(cjk) = load_cjk_fallback() {
+                fonts.font_data.insert("cjk_fallback".into(), cjk.into());
+                for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+                    if let Some(list) = fonts.families.get_mut(&family) {
+                        list.push("cjk_fallback".into());
+                    }
+                }
+            }
+
             ctx.set_fonts(fonts);
 
             // egui_taffy prerequisites (see its README):
@@ -61,4 +70,26 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app::RcardApp::new(cmd_tx, event_rx, ctx, runtime)))
         }),
     )
+}
+
+fn load_cjk_fallback() -> Option<egui::FontData> {
+    use font_kit::family_name::FamilyName;
+    use font_kit::properties::Properties;
+    use font_kit::source::SystemSource;
+
+    let source = SystemSource::new();
+    let handle = source
+        .select_best_match(
+            &[
+                FamilyName::Title("Noto Sans CJK SC".into()),
+                FamilyName::Title("Microsoft YaHei".into()),
+                FamilyName::Title("Hiragino Sans".into()),
+                FamilyName::SansSerif,
+            ],
+            &Properties::new(),
+        )
+        .ok()?;
+    let font = handle.load().ok()?;
+    let data = font.copy_font_data()?.to_vec();
+    Some(egui::FontData::from_owned(data))
 }
