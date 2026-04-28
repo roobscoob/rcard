@@ -30,7 +30,8 @@ pub fn emit(tag: &str, value: &serde_json::Value) -> TokenStream {
 
     quote! {
         const _: () = {
-            #[unsafe(link_section = ".ipc_meta")]
+            #[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,ipc_meta"))]
+            #[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".ipc_meta"))]
             #[used]
             #[allow(non_upper_case_globals)]
             static #static_name: [u8; #len] = [#(#bytes),*];
