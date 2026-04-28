@@ -94,7 +94,7 @@ pub use ipc_macros::{
     __check_uses, allocation, interface, notification_handler, resource, server,
 };
 #[cfg(target_os = "none")]
-pub use call::call_send;
+pub use call::{call_send, call_send_unified, ipc_buf, parse_reply_envelope};
 #[cfg(target_os = "none")]
 pub use server::{ResourceDispatch, Server};
 
@@ -326,8 +326,8 @@ macro_rules! notify_dead {
                 let _ = $crate::kern::sys_send(
                     <$Server>::server_task_id(),
                     ipc::opcode(0, ipc::NOTIFY_DEAD_METHOD),
-                    &[],
-                    &mut [0u8; 0],
+                    unsafe { &mut *ipc::ipc_buf() },
+                    0,
                     &mut [],
                 );
             )+

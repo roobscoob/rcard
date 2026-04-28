@@ -39,6 +39,7 @@ members = [
     "modules/ipc/macros",
     "modules/once_cell",
     "modules/generated",
+    "modules/memfns",
     "hubris/abi",
     "hubris/userlib",
     "tasks/fob",

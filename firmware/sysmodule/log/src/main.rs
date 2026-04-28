@@ -153,8 +153,9 @@ pub(crate) fn emit_supervisor_hello(uid: [u8; 16], firmware_id: [u8; 16]) {
 
     // Address the supervisor at the well-known TaskId(0) — same convention
     // the reactor uses for OP_DROP_REPORT (see reactor::main.rs:57).
+    let n = buf.len();
     let sup = userlib::TaskId::gen0(0);
-    let _ = userlib::sys_send(sup, OP_EMIT_LOG, &buf, &mut [], &mut []);
+    let _ = userlib::sys_send(sup, OP_EMIT_LOG, &mut buf, n, &mut []);
 }
 
 /// Hex-encode `bytes` (16 bytes) into `out` (32 bytes), lowercase.

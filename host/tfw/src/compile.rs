@@ -275,6 +275,7 @@ pub fn compile_all(
     layout
         .resolve_kernel_deferred(&kernel_measured, reservations)
         .map_err(|e| CompileError::Other(format!("resolve kernel layout: {e}")))?;
+    crate::build::emit_memory_allocations(&layout.placed, config, emit);
 
     // Linking
     emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Linking);
@@ -365,6 +366,7 @@ pub fn compile_all(
         layout
             .resolve_bootloader_deferred(&bl_measured, reservations)
             .map_err(|e| CompileError::Other(format!("resolve bootloader layout: {e}")))?;
+        crate::build::emit_memory_allocations(&layout.placed, config, emit);
 
         // Linking
         emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Linking);
@@ -614,10 +616,16 @@ fn cargo_build_partial(
 
     let dir = work_dir.display().to_string().replace('\\', "/");
     let script = linker_script.display().to_string().replace('\\', "/");
+    let repo_root = manifest
+        .ancestors()
+        .find(|p| p.join("firmware").is_dir() && p.join("shared").is_dir())
+        .unwrap_or_else(|| manifest.parent().unwrap());
+    let remap_from = repo_root.display().to_string();
     let flags = [
         format!("-Clink-arg=-L{dir}"),
         format!("-Clink-arg=-T{script}"),
         "-Clink-arg=-r".to_string(),
+        format!("--remap-path-prefix={remap_from}="),
     ];
     let mut build = escargot::CargoBuild::new()
         .manifest_path(manifest)
@@ -860,6 +868,50 @@ fn generate_kconfig(
         );
     }
 
+    // Register shared memory groups alongside peripherals. Each group
+    // is allocated once in the layout; every participating task gets
+    // MPU access via the kernel's shared_regions mechanism.
+    let mut shared_group_tasks: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (&task_name, &task) in all_tasks {
+        for (_region_name, req) in &task.regions {
+            if let Some(ref group) = req.shared {
+                shared_group_tasks
+                    .entry(group.clone())
+                    .or_default()
+                    .push(task_name.to_string());
+            }
+        }
+    }
+    for (group_name, members) in &shared_group_tasks {
+        // Find the allocation for any member — they all share the same address.
+        let alloc = members.iter().find_map(|task_name| {
+            all_tasks[task_name.as_str()]
+                .regions
+                .iter()
+                .find(|(_, req)| req.shared.as_deref() == Some(group_name))
+                .and_then(|(region_name, _)| {
+                    layout.placed.get(&(task_name.clone(), region_name.clone()))
+                })
+        });
+        if let Some(alloc) = alloc {
+            if alloc.size > 0 {
+                kconfig.shared_regions.insert(
+                    group_name.clone(),
+                    build_kconfig::RegionConfig {
+                        base: alloc.base as u32,
+                        size: alloc.size as u32,
+                        attributes: build_kconfig::RegionAttributes {
+                            read: true,
+                            write: true,
+                            execute: false,
+                            special_role: None,
+                        },
+                    },
+                );
+            }
+        }
+    }
+
     for (task_index, &task_name) in task_names.iter().enumerate() {
         let task = all_tasks[task_name];
         let mut owned_regions = BTreeMap::new();
@@ -868,11 +920,16 @@ fn generate_kconfig(
         // Skip zero-size allocations: they exist only for linker script
         // ORIGIN and have no content to protect. On ARMv8-M, a zero-size
         // MPU region would cause an RLAR wraparound covering all memory.
+        // Shared regions are granted via shared_regions, not owned.
         for ((owner, region_name), alloc) in &layout.placed {
             if owner != task_name {
                 continue;
             }
             if alloc.size == 0 {
+                continue;
+            }
+            let req = task.regions.get(region_name);
+            if req.map_or(false, |r| r.shared.is_some()) {
                 continue;
             }
             let (read, write, execute) = match region_name.as_str() {
@@ -894,8 +951,13 @@ fn generate_kconfig(
             );
         }
 
-        // Grant access to peripherals declared in the task config.
+        // Grant access to peripherals and shared memory groups.
         let mut task_shared = BTreeSet::new();
+        for (_, req) in &task.regions {
+            if let Some(ref group) = req.shared {
+                task_shared.insert(group.clone());
+            }
+        }
         for periph_name in &task.uses_peripherals {
             task_shared.insert(periph_name.clone());
 

@@ -20,8 +20,9 @@ fun ctx => {
   ],
   uses_notifications = ["host_request"],
   regions = {
-    code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 16 },
-    data  = { place = ctx.places.fast },
+    code    = { place = ctx.places.bulk },
+    stack   = { place = ctx.places.fast, size = 768 },
+    data    = { place = ctx.places.fast },
+    tunnel  = { place = ctx.places.psram, size = 8480, align = 4, shared = "tunnel" },
   },
 }

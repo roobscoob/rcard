@@ -9,6 +9,7 @@ cfg-if = "1.0.0"
 
 [target."thumbv8m.main-none-eabihf".dependencies]
 cortex-m = {version = "0.7", features = ["inline-asm"]}
+memfns = { path = "../../modules/memfns" }
 
 [target.thumbv7em-none-eabihf.dependencies]
 cortex-m = {version = "0.7", features = ["inline-asm"]}

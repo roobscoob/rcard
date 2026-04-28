@@ -54,8 +54,9 @@ fn drop_notification_for(notif: &Notification, dropped_for: u16) {
     msg[8] = notif.priority;
     msg[9..11].copy_from_slice(&dropped_for.to_le_bytes());
 
+    let n = msg.len();
     let sup = userlib::TaskId::gen0(0);
-    let _ = userlib::sys_send(sup, OP_DROP_REPORT, &msg, &mut [], &mut []);
+    let _ = userlib::sys_send(sup, OP_DROP_REPORT, &mut msg, n, &mut []);
 }
 
 fn validate(sender_index: u16, group_id: u16, priority: u8) -> Result<(), ReactorError> {

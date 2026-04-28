@@ -11,71 +11,25 @@ use crate::wire_format;
 /// The Ok payload may itself be `Option<T>` or `Result<T, E>`, handled by
 /// `wire_format::gen_decode_return_value`.
 pub fn gen_parse_reply(return_type: Option<&syn::Type>, server_expr: TokenStream2) -> TokenStream2 {
-    let _p = panic_path();
-    // rc is already checked by `ipc::call_send` (panics on ACCESS_VIOLATION
-    // and any non-SUCCESS), so by the time we get here we only need to parse
-    // the reply body.
-
     if let Some(rt) = return_type {
         let decode = wire_format::gen_decode_return_value(rt, &server_expr);
         quote! {
-            if len == 0 {
-                #_p!("ipc: server {} sent empty reply", #server_expr);
-            }
-            let mut __off = 0usize;
-            match retbuffer[0] {
-                0u8 => {
-                    __off += 1;
+            match ipc::parse_reply_envelope(retbuffer, len, #server_expr) {
+                Ok(mut __off) => {
                     let __decoded = #decode;
                     Ok(__decoded)
                 }
-                1u8 => {
-                    let Ok((err, _)) =
-                        ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
-                    else {
-                        #_p!(
-                            "ipc: server {} sent malformed error reply ({} bytes received)",
-                            #server_expr, len,
-                        );
-                    };
-                    Err(err)
-                }
-                tag => #_p!(
-                    "ipc: server {} sent invalid result tag {}",
-                    #server_expr, tag,
-                ),
+                Err(e) => Err(e),
             }
         }
     } else {
         quote! {
-            if len == 0 {
-                #_p!("ipc: server {} sent empty reply", #server_expr);
-            }
-            match retbuffer[0] {
-                0u8 => Ok(()),
-                1u8 => {
-                    let Ok((err, _)) =
-                        ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
-                    else {
-                        #_p!(
-                            "ipc: server {} sent malformed error reply ({} bytes received)",
-                            #server_expr, len,
-                        );
-                    };
-                    Err(err)
-                }
-                tag => #_p!(
-                    "ipc: server {} sent invalid result tag {}",
-                    #server_expr, tag,
-                ),
+            match ipc::parse_reply_envelope(retbuffer, len, #server_expr) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
             }
         }
     }
-}
-
-/// Retbuffer size for a constructor call.
-pub fn ctor_retbuffer_size(_ctor_return: &ConstructorReturn) -> TokenStream2 {
-    quote! { ipc::HUBRIS_MESSAGE_SIZE_LIMIT }
 }
 
 /// Generate inline tag+payload decoding for constructor replies.
@@ -91,100 +45,83 @@ pub fn gen_ctor_reply(
 ) -> (TokenStream2, TokenStream2) {
     let _p = panic_path();
 
+    // All constructor variants share the same outer envelope via
+    // parse_reply_envelope. Only the inner payload parsing differs.
+    let parse_handle = quote! {
+        let Some(__payload) = retbuffer.get(__off..len) else {
+            #_p!("ipc: ctor reply truncated");
+        };
+        let Ok((handle, _)) =
+            ipc::__postcard::take_from_bytes::<ipc::RawHandle>(__payload)
+        else {
+            #_p!("ipc: ctor reply decode failed");
+        };
+    };
+
     match ctor_return {
         ConstructorReturn::Bare => (
             quote! { core::result::Result<Self, #err_type> },
             quote! {
-                if len == 0 { #_p!("ipc: server {} sent empty ctor reply", server.get()); }
-                match retbuffer[0] {
-                    0u8 => {
-                        let Ok((handle, _)) =
-                            ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[1..len])
-                        else {
-                            #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
-                        };
+                match ipc::parse_reply_envelope(retbuffer, len, server.get()) {
+                    Ok(__off) => {
+                        #parse_handle
                         Ok(#make_self)
                     }
-                    1u8 => {
-                        let Ok((err, _)) =
-                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
-                        else {
-                            #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
-                        };
-                        Err(#err_type::from_wire(err))
-                    }
-                    tag => #_p!("ipc: server {} sent invalid ctor tag {}", server.get(), tag),
+                    Err(e) => Err(#err_type::from_wire(e)),
                 }
             },
         ),
         ConstructorReturn::Result(error_type) => (
             quote! { core::result::Result<core::result::Result<Self, #error_type>, #err_type> },
             quote! {
-                if len == 0 { #_p!("ipc: server {} sent empty ctor reply", server.get()); }
-                match retbuffer[0] {
-                    0u8 => {
-                        if len < 2 { #_p!("ipc: server {} sent truncated ctor reply", server.get()); }
-                        match retbuffer[1] {
+                match ipc::parse_reply_envelope(retbuffer, len, server.get()) {
+                    Ok(__off) => {
+                        let Some(&__tag) = retbuffer.get(__off) else {
+                            #_p!("ipc: ctor reply truncated");
+                        };
+                        match __tag {
                             0u8 => {
-                                let Ok((handle, _)) =
-                                    ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[2..len])
-                                else {
-                                    #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
-                                };
+                                let __off = __off + 1;
+                                #parse_handle
                                 Ok(Ok(#make_self))
                             }
                             1u8 => {
+                                let Some(__err_slice) = retbuffer.get(__off + 1..len) else {
+                                    #_p!("ipc: ctor domain error truncated");
+                                };
                                 let Ok((e, _)) =
-                                    ipc::__postcard::take_from_bytes::<#error_type>(&retbuffer[2..len])
+                                    ipc::__postcard::take_from_bytes::<#error_type>(__err_slice)
                                 else {
-                                    #_p!("ipc: server {} sent malformed ctor domain error ({} bytes)", server.get(), len);
+                                    #_p!("ipc: ctor domain error decode failed");
                                 };
                                 Ok(Err(e))
                             }
-                            tag => #_p!("ipc: server {} sent invalid inner ctor tag {}", server.get(), tag),
+                            _ => #_p!("ipc: ctor invalid inner tag"),
                         }
                     }
-                    1u8 => {
-                        let Ok((err, _)) =
-                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
-                        else {
-                            #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
-                        };
-                        Err(#err_type::from_wire(err))
-                    }
-                    tag => #_p!("ipc: server {} sent invalid ctor tag {}", server.get(), tag),
+                    Err(e) => Err(#err_type::from_wire(e)),
                 }
             },
         ),
         ConstructorReturn::OptionSelf => (
             quote! { core::result::Result<core::option::Option<Self>, #err_type> },
             quote! {
-                if len == 0 { #_p!("ipc: server {} sent empty ctor reply", server.get()); }
-                match retbuffer[0] {
-                    0u8 => {
-                        if len < 2 { #_p!("ipc: server {} sent truncated ctor reply", server.get()); }
-                        match retbuffer[1] {
+                match ipc::parse_reply_envelope(retbuffer, len, server.get()) {
+                    Ok(__off) => {
+                        let Some(&__tag) = retbuffer.get(__off) else {
+                            #_p!("ipc: ctor reply truncated");
+                        };
+                        match __tag {
                             0u8 => {
-                                let Ok((handle, _)) =
-                                    ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[2..len])
-                                else {
-                                    #_p!("ipc: server {} sent malformed ctor reply ({} bytes)", server.get(), len);
-                                };
+                                let __off = __off + 1;
+                                #parse_handle
                                 Ok(Some(#make_self))
                             }
                             1u8 => Ok(None),
-                            tag => #_p!("ipc: server {} sent invalid option tag {}", server.get(), tag),
+                            _ => #_p!("ipc: ctor invalid option tag"),
                         }
                     }
-                    1u8 => {
-                        let Ok((err, _)) =
-                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
-                        else {
-                            #_p!("ipc: server {} sent malformed ctor error ({} bytes)", server.get(), len);
-                        };
-                        Err(#err_type::from_wire(err))
-                    }
-                    tag => #_p!("ipc: server {} sent invalid ctor tag {}", server.get(), tag),
+                    Err(e) => Err(#err_type::from_wire(e)),
                 }
             },
         ),

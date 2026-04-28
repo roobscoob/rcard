@@ -11,7 +11,7 @@ fun ctx => {
   pushes_notifications = ["usb_event"],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 8 },
+    stack = { place = ctx.places.fast, size = 2560 },
     data  = { place = ctx.places.fast },
   },
 }

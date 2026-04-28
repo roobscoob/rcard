@@ -85,10 +85,11 @@ fn build_memory_x(
             .unwrap();
         } else if let Some(req) = layout.deferred.get(&key) {
             // Deferred — use the remaining space after all placed regions in the same place.
-            let offset = req.place.offset.unwrap_or(0);
-            if let Some(mapping) = req.place.mappings.first() {
+            let place = req.place.as_ref().expect("deferred region must have a place");
+            let offset = place.offset.unwrap_or(0);
+            if let Some(mapping) = place.mappings.first() {
                 let place_base = mapping.address + offset;
-                let place_end = place_base + req.place.size;
+                let place_end = place_base + place.size;
 
                 // Find the highest end address of any placed region in this same place
                 let highest_used = layout.placed.values()

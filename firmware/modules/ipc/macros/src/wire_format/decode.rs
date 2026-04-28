@@ -11,7 +11,9 @@ use crate::util::panic_path;
 pub fn gen_decode_return_value(rt: &syn::Type, server_expr: &TokenStream2) -> TokenStream2 {
     let _p = panic_path();
     quote! {{
-        let __in = &retbuffer[__off..len];
+        let Some(__in) = retbuffer.get(__off..len) else {
+            #_p!("ipc: server {} reply truncated ({} bytes)", #server_expr, len);
+        };
         match ipc::__postcard::take_from_bytes::<#rt>(__in) {
             Ok((__val, __rest)) => {
                 __off += __in.len() - __rest.len();

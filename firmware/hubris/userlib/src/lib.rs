@@ -39,7 +39,6 @@
 //! - [`sys_reply_fault`]
 //! - [`sys_send`]
 //!   - Variant: [`sys_send_to_kernel`]
-//!   - Wrapper: [`send_with_retry_on_death`]
 //!
 //! # Panic support
 //!
@@ -77,7 +76,9 @@
 
 #![no_std]
 
-use core::cell::Cell;
+#[cfg(target_os = "none")]
+extern crate memfns;
+
 use core::marker::PhantomData;
 
 /// Syscall numbers, defined in the Hubris kernel ABI.
@@ -517,49 +518,6 @@ pub use self::arch::sys_refresh_task_id;
 pub fn sys_recv_stub() {
     let _ = sys_recv_open(&mut [], 0);
 }
-
-///////////////////////////////////////////////////////////////////////////////
-// Convenience wrappers around raw syscalls.
-
-/// Utility function for sending an IPC with automatic retry if the server has
-/// restarted.
-///
-/// This is intended for the common case where a server has either _not_
-/// restarted, or is restarting infrequently. In that case, the appropriate
-/// response is to use the dead code returned from `sys_send` to update our
-/// record of the `TaskId`, and send the message again.
-///
-/// This function has no sleep, exponential backoff, or other such techniques
-/// for avoiding using 100% of the CPU if a server is crashlooping rapidly. This
-/// is because there's no single choice that's right for every application. If
-/// you need something fancier, you'll have to implement it using your knowledge
-/// of your application environment.
-pub fn send_with_retry_on_death(
-    tid_holder: &Cell<TaskId>,
-    operation: u16,
-    outgoing: &[u8],
-    incoming: &mut [u8],
-    leases: &mut [Lease<'_>],
-) -> (ResponseCode, usize) {
-    loop {
-        let r = sys_send(
-            tid_holder.get(),
-            operation,
-            outgoing,
-            incoming,
-            leases,
-        );
-        match r {
-            Ok(rc_and_len) => break rc_and_len,
-            Err(dead) => {
-                tid_holder.set(
-                    tid_holder.get().with_generation(dead.new_generation())
-                );
-            }
-        }
-    }
-}
-
 
 // No panic handler — each task provides its own.
 

@@ -21,17 +21,11 @@ pub fn gen_serialize_wire(
 
     let has_handle = handle_expr.is_some();
     if !has_handle && wire_names.is_empty() {
-        // Zero args. Emit an empty MaybeUninit buffer to match the
-        // shape expected by the downstream `assume_init_slice` call
-        // site. No postcard encoding happens.
         return quote! {
-            let argbuffer: [core::mem::MaybeUninit<u8>; 0] = [];
             let n = 0usize;
         };
     }
 
-    // Build a tuple of references so we don't move the args, even if
-    // they're non-Copy. Serde serializes `&T` transparently as `T`.
     let tuple_items: Vec<TokenStream2> = {
         let mut v = Vec::new();
         if let Some(h) = handle_expr {
@@ -43,28 +37,16 @@ pub fn gen_serialize_wire(
         v
     };
 
-    // A 1-tuple is syntactically `(x,)` in Rust — the trailing comma
-    // is meaningful. We always emit with trailing comma so 1-tuples
-    // serialize as tuples rather than being unwrapped to `T`.
-    //
-    // We keep `argbuffer` as `[MaybeUninit<u8>; N]` to match the
-    // shape the downstream `sys_send` call site expects (it calls
-    // `assume_init_slice`). Postcard needs `&mut [u8]`, so we cast
-    // the uninit slice to a mut u8 slice for write-only access.
-    // SAFETY: postcard::to_slice only WRITES to the buffer — never
-    // reads uninitialized bytes.
     quote! {
-        let mut argbuffer: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
-            unsafe { core::mem::MaybeUninit::uninit().assume_init() };
         let __tuple = ( #( #tuple_items ,)* );
         let n = {
-            let __tail: &mut [u8] = unsafe {
+            let __ipc_buf: &mut [u8] = unsafe {
                 core::slice::from_raw_parts_mut(
-                    argbuffer.as_mut_ptr() as *mut u8,
-                    argbuffer.len(),
+                    ipc::ipc_buf() as *mut u8,
+                    ipc::HUBRIS_MESSAGE_SIZE_LIMIT,
                 )
             };
-            match ipc::__postcard::to_slice(&__tuple, __tail) {
+            match ipc::__postcard::to_slice(&__tuple, __ipc_buf) {
                 Ok(slice) => slice.len(),
                 Err(_) => ipc::__ipc_panic!("postcard arg encode failed"),
             }

@@ -15,8 +15,9 @@ fun ctx => {
   # NACKs inbound IpcRequests if the build has no dispatcher.
   peers = ["sysmodule_host_proxy"],
   regions = {
-    code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 4 },
-    data  = { place = ctx.places.fast },
+    code    = { place = ctx.places.bulk },
+    stack   = { place = ctx.places.fast, size = 1536 },
+    data    = { place = ctx.places.fast },
+    tunnel  = { shared = "tunnel" },
   },
 }

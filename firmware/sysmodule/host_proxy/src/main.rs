@@ -6,6 +6,7 @@ use generated::slots::SLOTS;
 use once_cell::GlobalState;
 use rcard_log::{error, info, warn, OptionExt};
 use rcard_usb_proto::ipc_request::LeaseKind;
+use rcard_usb_proto::tunnel::TunnelBuffer;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
@@ -66,25 +67,19 @@ use usart_transport_binding::UsartTransport;
 const LEASE_POOL_SIZE: usize = rcard_usb_proto::LEASE_POOL_SIZE;
 const MAX_MESSAGE: usize = 256;
 const MAX_LEASES: usize = rcard_usb_proto::MAX_LEASES;
-const MAX_FRAME: usize = rcard_usb_proto::MAX_DECODED_FRAME;
 
 // ---------------------------------------------------------------------------
-// Static buffer
-//
-// The tunnel is synchronous — one IPC request at a time. A single buffer
-// serves all four phases of the request lifecycle:
-//
-//   1. Fetch:   transport writes the incoming frame into BUF
-//   2. Pool:    lease payloads are compacted in-place within BUF
-//   3. Gather:  write-lease results are gathered to the TAIL of BUF
-//   4. Reply:   IpcReply is encoded into the HEAD of BUF (split_at_mut
-//               keeps the writeback tail disjoint from the reply head)
-//
-// Lifetimes are strictly sequential — no two phases overlap. This
-// replaces the former FETCH_BUF + REPLY_BUF + POOL + WRITEBACK (4×8 KB).
+// Shared tunnel buffer
 // ---------------------------------------------------------------------------
 
-static BUF: GlobalState<[u8; MAX_FRAME]> = GlobalState::new([0u8; MAX_FRAME]);
+#[unsafe(link_section = ".tunnel")]
+static TUNNEL: TunnelBuffer = TunnelBuffer::new();
+
+fn tunnel() -> &'static TunnelBuffer {
+    &TUNNEL
+}
+
+static mut MSG_BUF: [u8; MAX_MESSAGE] = [0u8; MAX_MESSAGE];
 
 struct LastDelivery {
     transport: u8,
@@ -137,7 +132,7 @@ fn encode_tunnel_error(
 ///   4. Gather writebacks to the tail of `buf`, split_at_mut, encode
 ///      the reply into the head
 fn dispatch_tunneled_request(
-    buf: &mut [u8; MAX_FRAME],
+    buf: &mut [u8],
     fetch_len: usize,
 ) -> DispatchOutcome {
     // ── 1. Parse directly from `buf`. ──────────────────────────────────
@@ -165,7 +160,7 @@ fn dispatch_tunneled_request(
     // the compact pass below re-borrows `buf` mutably. Bad-lease errors
     // are recorded as a flag and encoded after the scope ends, for the
     // same reason.
-    let mut args = [0u8; MAX_MESSAGE];
+    let msg_buf = unsafe { &mut *(&raw mut MSG_BUF) };
     let mut slots: [LeaseSlot; MAX_LEASES] = [
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
         LeaseSlot { kind: LeaseKind::Read, offset: 0, length: 0 },
@@ -190,7 +185,7 @@ fn dispatch_tunneled_request(
 
         let args_data = view.args();
         let args_len = args_data.len().min(MAX_MESSAGE);
-        args[..args_len].copy_from_slice(&args_data[..args_len]);
+        msg_buf[..args_len].copy_from_slice(&args_data[..args_len]);
 
         // Record where each lease's data lives in the original frame, so
         // the compact pass can copy it forward into buf[0..pool_end].
@@ -254,7 +249,8 @@ fn dispatch_tunneled_request(
     }
 
     // ── 3. Build leases and call sys_send ──────────────────────────────
-    let mut kernel_reply = [0u8; MAX_MESSAGE];
+    // msg_buf already holds args from phase 2; sys_send reads args
+    // then overwrites with the reply in-place.
 
     let send_result = {
         let mut remaining = &mut buf[..pool_end];
@@ -281,8 +277,8 @@ fn dispatch_tunneled_request(
         ipc::kern::sys_send(
             target,
             opcode,
-            &args[..args_len],
-            &mut kernel_reply,
+            msg_buf,
+            args_len,
             &mut leases[..lease_count],
         )
     };
@@ -299,8 +295,9 @@ fn dispatch_tunneled_request(
                 }
             }
 
-            let wb_start = MAX_FRAME - wb_total;
-            let mut wb_cursor = MAX_FRAME;
+            let buf_len = buf.len();
+            let wb_start = buf_len - wb_total;
+            let mut wb_cursor = buf_len;
             for i in (0..lease_count).rev() {
                 if slots[i].kind.has_reply_data() {
                     let len = slots[i].length;
@@ -318,7 +315,7 @@ fn dispatch_tunneled_request(
 
             let reply = rcard_usb_proto::IpcReply {
                 rc: rc.0,
-                return_value: &kernel_reply[..effective_reply_len],
+                return_value: &msg_buf[..effective_reply_len],
                 lease_writeback: &wb_buf[..wb_total],
             };
             match reply.encode_into(reply_buf, request_seq) {
@@ -394,89 +391,97 @@ fn handle_host_request(sender: u16, code: u32) {
             warn!("host_proxy: redeliver transport mismatch");
             return;
         }
-        BUF.with(|buf| {
-            info!("host_proxy: redelivering {} bytes", last_len);
-            let deliver_result = match transport {
-                Transport::Usb => UsbTransport::deliver_reply(&buf[..last_len]),
-                Transport::Usart => UsartTransport::deliver_reply(&buf[..last_len]),
-            };
-            match deliver_result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => error!("host_proxy: redeliver failed: {}", e),
-                Err(e) => error!("host_proxy: redeliver IPC failed: {}", e),
-            }
-        })
-        .log_unwrap();
+        let tun = tunnel();
+        // Transfer ownership to the transport for the redeliver.
+        let transport_tid = tun.holder();
+        info!("host_proxy: redelivering {} bytes", last_len);
+        unsafe { tun.set_len(last_len as u32) };
+        tun.transfer(transport_tid);
+        let deliver_result = match transport {
+            Transport::Usb => UsbTransport::deliver_reply(&[]),
+            Transport::Usart => UsartTransport::deliver_reply(&[]),
+        };
+        match deliver_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("host_proxy: redeliver failed: {}", e),
+            Err(e) => error!("host_proxy: redeliver IPC failed: {}", e),
+        }
         return;
     }
 
     let t0 = userlib::sys_get_timer().now;
+    let tun = tunnel();
+    let tun_data = unsafe { tun.data_mut() };
 
-    BUF.with(|buf| {
-        // 1. Fetch the staged request into BUF.
-        let request_len = {
-            let result = match transport {
-                Transport::Usb => UsbTransport::fetch_pending_request(buf),
-                Transport::Usart => UsartTransport::fetch_pending_request(buf),
-            };
-            match result {
-                Ok(Ok(len)) => len as usize,
-                Ok(Err(e)) => {
-                    error!("host_proxy: fetch_pending_request failed: {}", e);
-                    return;
-                }
-                Err(e) => {
-                    error!("host_proxy: fetch IPC failed: {}", e);
-                    return;
-                }
-            }
+    // 1. Fetch — synchronization barrier. Data is already in the
+    //    shared tunnel (transport transferred ownership to us).
+    let request_len = {
+        let result = match transport {
+            Transport::Usb => UsbTransport::fetch_pending_request(tun_data),
+            Transport::Usart => UsartTransport::fetch_pending_request(tun_data),
         };
-
-        if request_len == 0 {
-            return;
-        }
-
-        let t1 = userlib::sys_get_timer().now;
-
-        // 2. Dispatch: parse → pool-compact → sys_send → gather wb →
-        //    encode reply, all within BUF.
-        let outcome = dispatch_tunneled_request(buf, request_len);
-
-        let t2 = userlib::sys_get_timer().now;
-
-        // 3. Hand the encoded reply back to the originating transport.
-        // BUF[..len] now holds the reply frame.
-        match outcome {
-            DispatchOutcome::Reply { len } | DispatchOutcome::Error { len } if len > 0 => {
-                LAST_DELIVERY
-                    .with(|ld| {
-                        ld.transport = match transport {
-                            Transport::Usb => 1,
-                            Transport::Usart => 2,
-                        };
-                        ld.len = len;
-                    })
-                    .log_unwrap();
-
-                let deliver_result = match transport {
-                    Transport::Usb => UsbTransport::deliver_reply(&buf[..len]),
-                    Transport::Usart => UsartTransport::deliver_reply(&buf[..len]),
-                };
-                let t3 = userlib::sys_get_timer().now;
-                info!(
-                    "host_proxy: fetch={}ms dispatch={}ms deliver={}ms total={}ms reply_len={}",
-                    t1 - t0, t2 - t1, t3 - t2, t3 - t0, len
-                );
-                match deliver_result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => error!("host_proxy: deliver_reply failed: {}", e),
-                    Err(e) => error!("host_proxy: deliver IPC failed: {}", e),
-                }
+        match result {
+            Ok(Ok(len)) => len as usize,
+            Ok(Err(e)) => {
+                error!("host_proxy: fetch_pending_request failed: {}", e);
+                return;
             }
-            _ => {}
+            Err(e) => {
+                error!("host_proxy: fetch IPC failed: {}", e);
+                return;
+            }
         }
-    })
-    .log_unwrap();
+    };
+
+    if request_len == 0 {
+        return;
+    }
+
+    let t1 = userlib::sys_get_timer().now;
+
+    // 2. Dispatch in-place in the shared tunnel buffer.
+    let outcome = dispatch_tunneled_request(tun_data, request_len);
+
+    let t2 = userlib::sys_get_timer().now;
+
+    // 3. Hand the encoded reply back to the originating transport.
+    match outcome {
+        DispatchOutcome::Reply { len } | DispatchOutcome::Error { len } if len > 0 => {
+            LAST_DELIVERY
+                .with(|ld| {
+                    ld.transport = match transport {
+                        Transport::Usb => 1,
+                        Transport::Usart => 2,
+                    };
+                    ld.len = len;
+                })
+                .log_unwrap();
+
+            // Transfer ownership back to the transport for wire emission.
+            unsafe { tun.set_len(len as u32) };
+            let transport_tid = match transport {
+                Transport::Usb => USB_TRANSPORT_TASK.map_or(0, |t| u16::from(t) as u32),
+                Transport::Usart => USART_TRANSPORT_TASK.map_or(0, |t| u16::from(t) as u32),
+            };
+            tun.transfer(transport_tid);
+
+            let deliver_result = match transport {
+                Transport::Usb => UsbTransport::deliver_reply(&[]),
+                Transport::Usart => UsartTransport::deliver_reply(&[]),
+            };
+            let t3 = userlib::sys_get_timer().now;
+            info!(
+                "host_proxy: fetch={}ms dispatch={}ms deliver={}ms total={}ms reply_len={}",
+                t1 - t0, t2 - t1, t3 - t2, t3 - t0, len
+            );
+            match deliver_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("host_proxy: deliver_reply failed: {}", e),
+                Err(e) => error!("host_proxy: deliver IPC failed: {}", e),
+            }
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------

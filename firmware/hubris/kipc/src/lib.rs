@@ -10,14 +10,15 @@ pub use abi::TaskState;
 
 /// Reads the scheduling/fault status of the task with the given index.
 pub fn read_task_status(task_index: usize) -> TaskState {
-    let mut response = [0; size_of::<TaskState>()];
+    let mut buf = [0u8; size_of::<TaskState>()];
+    buf[..4].copy_from_slice(&(task_index as u32).to_le_bytes());
     let (_, len) = userlib::sys_send_to_kernel(
         Kipcnum::ReadTaskStatus as u16,
-        &(task_index as u32).to_le_bytes(),
-        &mut response,
+        &mut buf,
+        4,
         &mut [],
     );
-    match ssmarshal::deserialize(&response[..len]) {
+    match ssmarshal::deserialize(&buf[..len]) {
         Ok((state, _)) => state,
         Err(_) => panic!(),
     }
@@ -25,27 +26,28 @@ pub fn read_task_status(task_index: usize) -> TaskState {
 
 /// Scans tasks from `task_index` looking for a task that has failed.
 pub fn find_faulted_task(task_index: usize) -> Option<NonZeroUsize> {
-    let mut response = [0; 4];
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&(task_index as u32).to_le_bytes());
     let (_, _len) = userlib::sys_send_to_kernel(
         Kipcnum::FindFaultedTask as u16,
-        &(task_index as u32).to_le_bytes(),
-        &mut response,
+        &mut buf,
+        4,
         &mut [],
     );
-    let i = u32::from_le_bytes(response);
+    let i = u32::from_le_bytes(buf);
     NonZeroUsize::new(i as usize)
 }
 
 /// Requests that the task at a given index be reinitialized and optionally started.
 pub fn reinitialize_task(task_index: usize, new_state: NewState) {
-    let mut msg = [0; 5];
-    msg[..4].copy_from_slice(&(task_index as u32).to_le_bytes());
-    msg[4] = new_state as u8;
+    let mut buf = [0u8; 5];
+    buf[..4].copy_from_slice(&(task_index as u32).to_le_bytes());
+    buf[4] = new_state as u8;
 
     let _ = userlib::sys_send_to_kernel(
         Kipcnum::ReinitTask as u16,
-        &msg,
-        &mut [],
+        &mut buf,
+        5,
         &mut [],
     );
 }
@@ -57,7 +59,7 @@ pub enum NewState {
 }
 
 pub fn reset() -> ! {
-    userlib::sys_send_to_kernel(Kipcnum::Reset as u16, &[], &mut [], &mut []);
+    userlib::sys_send_to_kernel(Kipcnum::Reset as u16, &mut [], 0, &mut []);
     loop {
         core::sync::atomic::compiler_fence(Ordering::SeqCst);
     }

@@ -203,7 +203,7 @@ async fn read_structured(
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        eprintln!("[usart2-wire] waiting for data...");
+        // eprintln!("[usart2-wire] waiting for data...");
 
         let n = tokio::select! {
             read_result = port.read(&mut buf) => match read_result {

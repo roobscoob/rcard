@@ -105,13 +105,12 @@ pub fn expand_species(input: SpeciesInput) -> TokenStream {
             #section_tokens
 
             let __species_id: u64 = #hash_lit;
-            let mut __writer = #krate::LogWriter::new(#level, __species_id);
-            let mut __f = #krate::formatter::Formatter::new(&mut __writer);
+            let __writer = #krate::LogWriter::new(#level, __species_id);
+            let mut __f = #krate::formatter::Formatter::new(__writer);
             #(
                 #krate::formatter::Format::format(&(#args), &mut __f);
             )*
             #stack_dump_code
-            drop(__writer);
         }
     }
 }

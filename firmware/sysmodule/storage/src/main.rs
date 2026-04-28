@@ -114,6 +114,8 @@ fn mpi() -> &'static Mpi {
 
 // ── Lease forwarding helpers ───────────────────────────────────────
 
+static mut MPI_TMP: [u8; 256] = [0u8; 256];
+
 /// Total attempts (not retries) for an MPI IPC operation before giving
 /// up. An IPC-layer error means the MPI sysmodule died mid-call and got
 /// restarted by the supervisor — the partially-done work is gone, so we
@@ -172,7 +174,7 @@ fn mpi_read_to_lease(
 ) -> Result<(), StorageError> {
     let t0 = userlib::sys_get_timer().now;
     let len = lease.len();
-    let mut tmp = [0u8; 256];
+    let tmp = unsafe { &mut *(&raw mut MPI_TMP) };
 
     'attempt: for attempt in 0..MPI_IPC_MAX_ATTEMPTS {
         let mut offset = 0;
@@ -229,7 +231,7 @@ fn mpi_program_from_lease(
     lease: &ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
 ) -> Result<(), StorageError> {
     let len = lease.len();
-    let mut tmp = [0u8; 256];
+    let tmp = unsafe { &mut *(&raw mut MPI_TMP) };
 
     'attempt: for attempt in 0..MPI_IPC_MAX_ATTEMPTS {
         let mut offset = 0;

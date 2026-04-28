@@ -91,26 +91,25 @@ macro_rules! bind_logger {
 
         #[no_mangle]
         fn __rcard_log_start(level: u8, species: u64) -> Option<u64> {
-            let lvl = $crate::LogLevel::from_u8(level);
-            match <$backend>::start(lvl, species) {
-                Ok(Some(handle)) => {
-                    let raw = handle.raw().0;
-                    core::mem::forget(handle);
-                    Some(raw)
-                }
-                Ok(None) => None,
-                Err(ipc::errors::ConstructorError::ArenaFull) => None,
-                Err(ipc::errors::ConstructorError::ServerDied) => {
-                    // Retry once
-                    match <$backend>::start(lvl, species) {
-                        Ok(Some(handle)) => {
-                            let raw = handle.raw().0;
-                            core::mem::forget(handle);
-                            Some(raw)
-                        }
-                        _ => None,
+            fn attempt(lvl: $crate::LogLevel, species: u64) -> core::result::Result<Option<u64>, ()> {
+                match <$backend>::start(lvl, species) {
+                    Ok(Some(handle)) => {
+                        let raw = handle.raw().0;
+                        core::mem::forget(handle);
+                        Ok(Some(raw))
                     }
+                    Ok(None) => Ok(None),
+                    Err(ipc::errors::ConstructorError::ArenaFull) => Ok(None),
+                    Err(ipc::errors::ConstructorError::ServerDied) => Err(()),
                 }
+            }
+            let lvl = $crate::LogLevel::from_u8(level);
+            match attempt(lvl, species) {
+                Ok(v) => v,
+                Err(()) => match attempt(lvl, species) {
+                    Ok(v) => v,
+                    Err(()) => None,
+                },
             }
         }
 

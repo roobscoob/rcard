@@ -229,20 +229,125 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
     let mut acl_only: Vec<RegionKey> = Vec::new();
     let mut cursors: CursorMap = BTreeMap::new();
 
-    // Sort fixed-size requests: pack each place's regions largest-first
-    // for tight allocation.
+    // ── Shared group coalescing ──────────────────────────────────────
+    //
+    // Collect requests that name the same `shared` group. Merge their
+    // place/size/align — error if two members both specify a field and
+    // disagree. The coalesced result must have at least place and size.
+
+    struct SharedGroup {
+        place: Option<Place>,
+        size: Option<u64>,
+        align: Option<u64>,
+        members: Vec<RegionKey>,
+    }
+
+    let mut shared_groups: BTreeMap<String, SharedGroup> = BTreeMap::new();
+
+    for (key, req) in &requests {
+        if let Some(group) = &req.shared {
+            let entry = shared_groups.entry(group.clone()).or_insert(SharedGroup {
+                place: None,
+                size: None,
+                align: None,
+                members: Vec::new(),
+            });
+            entry.members.push(key.clone());
+
+            if let Some(ref req_place) = req.place {
+                if let Some(ref existing) = entry.place {
+                    if place_key(existing) != place_key(req_place) {
+                        return Err(LayoutError::SharedConflict {
+                            group: group.clone(),
+                            field: "place".into(),
+                            owner: key.0.clone(),
+                            region: key.1.clone(),
+                        });
+                    }
+                } else {
+                    entry.place = Some(req_place.clone());
+                }
+            }
+            if let Some(req_size) = req.size {
+                if let Some(existing) = entry.size {
+                    if existing != req_size {
+                        return Err(LayoutError::SharedConflict {
+                            group: group.clone(),
+                            field: "size".into(),
+                            owner: key.0.clone(),
+                            region: key.1.clone(),
+                        });
+                    }
+                } else {
+                    entry.size = Some(req_size);
+                }
+            }
+            if let Some(req_align) = req.align {
+                if let Some(existing) = entry.align {
+                    if existing != req_align {
+                        return Err(LayoutError::SharedConflict {
+                            group: group.clone(),
+                            field: "align".into(),
+                            owner: key.0.clone(),
+                            region: key.1.clone(),
+                        });
+                    }
+                } else {
+                    entry.align = Some(req_align);
+                }
+            }
+        }
+    }
+
+    // Allocate each shared group once and map to all members.
+    for (group_name, group) in &shared_groups {
+        let place = group.place.as_ref().ok_or_else(|| LayoutError::SharedMissing {
+            group: group_name.clone(),
+            field: "place".into(),
+        })?;
+        let size = group.size.ok_or_else(|| LayoutError::SharedMissing {
+            group: group_name.clone(),
+            field: "size".into(),
+        })?;
+        let align = group.align.unwrap_or(4);
+
+        if !is_cpu_mapped(place) {
+            for key in &group.members {
+                acl_only.push(key.clone());
+            }
+            continue;
+        }
+
+        let alloc = try_allocate(place, size, align, &mut cursors, reservations)
+            .ok_or_else(|| LayoutError::OutOfSpace {
+                owner: format!("shared:{}", group_name),
+                region: group_name.clone(),
+                needed: size,
+                available: remaining_in_place(place, &cursors),
+            })?;
+
+        for key in &group.members {
+            placed.insert(key.clone(), alloc.clone());
+        }
+    }
+
+    // ── Private (non-shared) fixed-size regions ──────────────────────
+
     let mut fixed: Vec<&(RegionKey, &RegionRequest)> = requests
         .iter()
-        .filter(|(_, req)| req.size.is_some())
+        .filter(|(_, req)| req.shared.is_none() && req.size.is_some())
         .collect();
     fixed.sort_by(|a, b| {
-        place_key(&a.1.place)
-            .cmp(&place_key(&b.1.place))
+        let pa = a.1.place.as_ref().unwrap();
+        let pb = b.1.place.as_ref().unwrap();
+        place_key(pa)
+            .cmp(&place_key(pb))
             .then(b.1.size.cmp(&a.1.size))
     });
 
     for (key, req) in &fixed {
-        if !is_cpu_mapped(&req.place) {
+        let place = req.place.as_ref().unwrap();
+        if !is_cpu_mapped(place) {
             acl_only.push(key.clone());
             continue;
         }
@@ -250,12 +355,12 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
         let size = req.size.unwrap();
         let align = req.align.unwrap_or(4);
 
-        let alloc = try_allocate(&req.place, size, align, &mut cursors, reservations)
+        let alloc = try_allocate(place, size, align, &mut cursors, reservations)
             .ok_or_else(|| LayoutError::OutOfSpace {
                 owner: key.0.clone(),
                 region: key.1.clone(),
                 needed: size,
-                available: remaining_in_place(&req.place, &cursors),
+                available: remaining_in_place(place, &cursors),
             })?;
 
         placed.insert(key.clone(), alloc);
@@ -263,8 +368,12 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
 
     // Deferred regions (sized later by linker).
     for (key, req) in &requests {
+        if req.shared.is_some() {
+            continue;
+        }
         if req.size.is_none() {
-            if is_cpu_mapped(&req.place) {
+            let place = req.place.as_ref().unwrap();
+            if is_cpu_mapped(place) {
                 deferred.insert(key.clone(), (*req).clone());
             } else {
                 acl_only.push(key.clone());
@@ -361,13 +470,17 @@ impl Layout {
                 }
                 None => 0,
             };
-            if !is_cpu_mapped(&req.place) { continue; }
+            let place = match req.place {
+                Some(ref p) => p,
+                None => continue,
+            };
+            if !is_cpu_mapped(place) { continue; }
 
             regions.push(Region {
                 key: key.clone(),
                 size,
                 align: req.align.unwrap_or(32),
-                place: req.place.clone(),
+                place: place.clone(),
             });
         }
 
@@ -493,4 +606,8 @@ pub enum LayoutError {
     OutOfSpace { owner: String, region: String, needed: u64, available: u64 },
     #[error("{owner}.{region}: deferred region was not measured")]
     DeferredNotMeasured { owner: String, region: String },
+    #[error("shared group \"{group}\": {owner}.{region} conflicts on {field}")]
+    SharedConflict { group: String, field: String, owner: String, region: String },
+    #[error("shared group \"{group}\": no member specifies {field}")]
+    SharedMissing { group: String, field: String },
 }

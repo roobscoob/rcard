@@ -66,25 +66,23 @@ pub fn gen_handle_transfer_stmts(
                 quote! {
                     {
                         let __cancel_h = #prev_dh.handle;
-                        let mut __cancel_buf = [0u8; ipc::RawHandle::SIZE + 2];
-                        let __cancel_n = match ipc::__postcard::to_slice(
+                        let __cancel_buf = unsafe { &mut *ipc::ipc_buf() };
+                        if let Ok(s) = ipc::__postcard::to_slice(
                             &__cancel_h,
-                            &mut __cancel_buf,
+                            &mut __cancel_buf[..],
                         ) {
-                            Ok(s) => s.len(),
-                            Err(_) => 0,
-                        };
-                        let __cancel_k = #prev_dh.kind;
-                        let __cancel_opcode = ipc::opcode(__cancel_k, ipc::CANCEL_TRANSFER_METHOD);
-                        let mut __cancel_ret = [0u8; 0];
-                        let mut __cancel_leases = [];
-                        let _ = ipc::kern::sys_send(
-                            #prev_dh.task_id(),
-                            __cancel_opcode,
-                            &__cancel_buf[..__cancel_n],
-                            &mut __cancel_ret,
-                            &mut __cancel_leases,
-                        );
+                            let __cancel_n = s.len();
+                            let __cancel_k = #prev_dh.kind;
+                            let __cancel_opcode = ipc::opcode(__cancel_k, ipc::CANCEL_TRANSFER_METHOD);
+                            let mut __cancel_leases = [];
+                            let _ = ipc::kern::sys_send(
+                                #prev_dh.task_id(),
+                                __cancel_opcode,
+                                __cancel_buf,
+                                __cancel_n,
+                                &mut __cancel_leases,
+                            );
+                        }
                     }
                 }
             })
@@ -101,34 +99,31 @@ pub fn gen_handle_transfer_stmts(
             {
                 let __prep_h = #dh_var.handle;
                 let __target_idx: u16 = #server_expr.task_index();
-                let mut __prep_buf = [0u8; ipc::RawHandle::SIZE + 2 + 3];
-                let __prep_n = match ipc::__postcard::to_slice(
+                let __prep_buf = unsafe { &mut *ipc::ipc_buf() };
+                let __prep_ok = if let Ok(s) = ipc::__postcard::to_slice(
                     &(__prep_h, __target_idx),
-                    &mut __prep_buf,
+                    &mut __prep_buf[..],
                 ) {
-                    Ok(s) => s.len(),
-                    Err(_) => 0,
-                };
-                let __prep_k = #dh_var.kind;
-                let __prep_opcode = ipc::opcode(__prep_k, ipc::PREPARE_TRANSFER_METHOD);
-                let mut __prep_ret_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
-                    unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-                let __prep_ret = unsafe { ipc::wire::as_mut_byte_slice(&mut __prep_ret_mem) };
-                let mut __prep_leases = [];
-                let __prep_ok = match ipc::kern::sys_send(
-                    #dh_var.task_id(),
-                    __prep_opcode,
-                    &__prep_buf[..__prep_n],
-                    __prep_ret,
-                    &mut __prep_leases,
-                ) {
-                    Ok((__prep_rc, __prep_len)) => {
-                        // Wire: tag(0=Ok,1=Err) + payload
-                        __prep_rc == ipc::kern::ResponseCode::SUCCESS
-                            && __prep_len > 0
-                            && __prep_ret[0] == 0u8
+                    let __prep_n = s.len();
+                    let __prep_k = #dh_var.kind;
+                    let __prep_opcode = ipc::opcode(__prep_k, ipc::PREPARE_TRANSFER_METHOD);
+                    let mut __prep_leases = [];
+                    match ipc::kern::sys_send(
+                        #dh_var.task_id(),
+                        __prep_opcode,
+                        __prep_buf,
+                        __prep_n,
+                        &mut __prep_leases,
+                    ) {
+                        Ok((__prep_rc, __prep_len)) => {
+                            __prep_rc == ipc::kern::ResponseCode::SUCCESS
+                                && __prep_len > 0
+                                && __prep_buf[0] == 0u8
+                        }
+                        Err(_) => false,
                     }
-                    Err(_) => false,
+                } else {
+                    false
                 };
                 if !__prep_ok {
                     // Cancel all previously prepared handles

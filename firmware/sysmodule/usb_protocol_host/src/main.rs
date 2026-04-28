@@ -5,6 +5,7 @@ use generated::notifications;
 use generated::peers::PEERS;
 use generated::slots::SLOTS;
 use once_cell::{GlobalState, OnceCell};
+use rcard_usb_proto::tunnel::TunnelBuffer;
 use rcard_log::{error, info, warn, OptionExt, ResultExt};
 use sysmodule_host_transport_api::*;
 use sysmodule_usb_api::*;
@@ -20,11 +21,6 @@ sysmodule_usb_protocol_api::bind_usb_protocol_manager!(
 );
 
 use sysmodule_reactor_api::OverflowStrategy;
-
-const MAX_FRAME: usize = rcard_usb_proto::MAX_DECODED_FRAME;
-
-/// Buffer size — one frame + 2-byte CRC + 1-byte pad.
-const FRAME_BUF_SIZE: usize = MAX_FRAME + 3;
 
 /// Per-packet CRC-16/CCITT-FALSE (poly=0x1021, init=0xFFFF, no reflect,
 /// xorout=0). Used over the whole IPC frame on each bulk transfer.
@@ -47,34 +43,42 @@ fn crc16_update(mut crc: u16, data: &[u8]) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
-// Unified frame buffer
-//
-// The host protocol is strictly synchronous request-response: the host
-// will not send request N+1 until it has received the reply to N.
-// A single buffer serves both accumulation (USB packets → complete
-// transfer) and staging (validated frame held for host_proxy to fetch).
-// The two phases never overlap because `handle_usb_event` refuses to
-// drain further USB data while a frame is staged.
+// Shared tunnel buffer
+// ---------------------------------------------------------------------------
+
+#[unsafe(link_section = ".tunnel")]
+static TUNNEL: TunnelBuffer = TunnelBuffer::new();
+
+fn tunnel() -> &'static TunnelBuffer {
+    &TUNNEL
+}
+
+const SELF_TID: u32 = generated::tasks::TASK_ID_SYSMODULE_USB_PROTOCOL_HOST as u32;
+
+fn refresh_tid(tid: u32) -> u32 {
+    u16::from(userlib::sys_refresh_task_id(userlib::TaskId::from(tid as u16))) as u32
+}
+
+// ---------------------------------------------------------------------------
+// Transport-local accumulation state (not in shared memory)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FrameState {
+enum UsbTunnelState {
     Idle,
     Accumulating,
     Overflowed,
     Staged,
 }
 
-struct FrameBuffer {
-    buf: [u8; FRAME_BUF_SIZE],
+struct AccumState {
+    state: UsbTunnelState,
     len: usize,
-    state: FrameState,
 }
 
-static FRAME: GlobalState<FrameBuffer> = GlobalState::new(FrameBuffer {
-    buf: [0u8; FRAME_BUF_SIZE],
+static ACCUM: GlobalState<AccumState> = GlobalState::new(AccumState {
+    state: UsbTunnelState::Idle,
     len: 0,
-    state: FrameState::Idle,
 });
 
 // ---------------------------------------------------------------------------
@@ -132,25 +136,21 @@ struct HostTransportImpl;
 impl HostTransport for HostTransportImpl {
     fn fetch_pending_request(
         _meta: ipc::Meta,
-        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
+        _buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> Result<u32, HostTransportError> {
-        FRAME
-            .with(|f| {
-                if f.state != FrameState::Staged {
+        ACCUM
+            .with(|a| {
+                if a.state != UsbTunnelState::Staged {
                     return Err(HostTransportError::NoPendingRequest);
                 }
-                if buf.len() < f.len {
-                    return Err(HostTransportError::LeaseTooSmall);
-                }
-                let _ = buf.write_range(0, &f.buf[..f.len]);
-                Ok(f.len as u32)
+                Ok(tunnel().get_len())
             })
             .unwrap_or(Err(HostTransportError::NoPendingRequest))
     }
 
     fn deliver_reply(
         _meta: ipc::Meta,
-        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+        _buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<(), HostTransportError> {
         let Some(ep_in) = EP_IN.get() else {
             return Err(HostTransportError::WireWriteFailed);
@@ -158,70 +158,44 @@ impl HostTransport for HostTransportImpl {
 
         let t0 = userlib::sys_get_timer().now;
 
-        // Emit the reply as one USB bulk transfer: `[frame][crc16][pad?]`.
-        // The host verifies CRC over `[frame]` and strips it. The optional
-        // 1-byte pad is appended iff `(len + 2) % 64 == 0` so the transfer
-        // always terminates with a short packet.
-        //
-        // Two passes over the lease: compute CRC, then emit in 64-byte
-        // packets. We avoid a full-frame scratch buffer — that's another
-        // 8 KiB static per task that we don't need, given the streaming
-        // `read_range` API.
-        let len = buf.len();
-        let mut result = Ok(());
+        let tun = tunnel();
+        let len = tun.get_len() as usize;
+        let data = unsafe { &tun.data_ref()[..len] };
 
-        // Pass 1: compute CRC over the whole lease.
-        let mut crc: u16 = 0xFFFF;
-        {
-            let mut scratch = [0u8; 64];
-            let mut off = 0;
-            while off < len {
-                let chunk = (len - off).min(64);
-                let _ = buf.read_range(off, &mut scratch[..chunk]);
-                crc = crc16_update(crc, &scratch[..chunk]);
-                off += chunk;
-            }
-        }
+        let crc = crc16(data);
 
         let t1 = userlib::sys_get_timer().now;
 
-        // Pass 2: emit in 64-byte USB packets. Only the final packet may
-        // be short — that's what terminates the bulk transfer.
-        let full_lease_chunks = len / 64;
-        let tail_lease_len = len - full_lease_chunks * 64;
-        let mut packet = [0u8; 64];
+        let mut result = Ok(());
+        let full_chunks = len / 64;
+        let tail_len = len - full_chunks * 64;
 
         'emit: {
-            for i in 0..full_lease_chunks {
-                let _ = buf.read_range(i * 64, &mut packet[..64]);
-                if let Err(e) = write_usb(ep_in, &packet[..64]) {
+            for i in 0..full_chunks {
+                if let Err(e) = write_usb(ep_in, &data[i * 64..(i + 1) * 64]) {
                     result = Err(e);
                     break 'emit;
                 }
             }
 
-            if tail_lease_len > 0 {
-                // Tail lease + CRC (+ optional pad) in the final packet(s).
-                let _ = buf.read_range(full_lease_chunks * 64, &mut packet[..tail_lease_len]);
-                packet[tail_lease_len] = (crc >> 8) as u8;
-                packet[tail_lease_len + 1] = crc as u8;
-                let total = tail_lease_len + 2;
+            if tail_len > 0 {
+                let mut packet = [0u8; 66];
+                packet[..tail_len].copy_from_slice(&data[full_chunks * 64..]);
+                packet[tail_len] = (crc >> 8) as u8;
+                packet[tail_len + 1] = crc as u8;
+                let total = tail_len + 2;
                 if total <= 64 {
                     if let Err(e) = write_usb(ep_in, &packet[..total]) {
                         result = Err(e);
                         break 'emit;
                     }
                     if total == 64 {
-                        // Wire is a multiple of 64 — need a short pad packet.
-                        let pad = [0u8];
-                        if let Err(e) = write_usb(ep_in, &pad) {
+                        if let Err(e) = write_usb(ep_in, &[0u8]) {
                             result = Err(e);
                             break 'emit;
                         }
                     }
                 } else {
-                    // total == 65 (tail_lease_len == 63). Split into a full
-                    // 64-byte packet and a 1-byte short terminator.
                     if let Err(e) = write_usb(ep_in, &packet[..64]) {
                         result = Err(e);
                         break 'emit;
@@ -232,9 +206,6 @@ impl HostTransport for HostTransportImpl {
                     }
                 }
             } else {
-                // Lease ended at a 64-byte boundary. Emit CRC as a 2-byte
-                // short terminator — `(len + 2) % 64 != 0` here since
-                // len % 64 == 0, so no pad needed.
                 let trailer = [(crc >> 8) as u8, crc as u8];
                 if let Err(e) = write_usb(ep_in, &trailer) {
                     result = Err(e);
@@ -255,14 +226,11 @@ impl HostTransport for HostTransportImpl {
             *ls = LastSent::IpcReply;
         });
 
-        // Always clear the pending slot even if USB write failed — the
-        // dispatch is complete from host_proxy's perspective.
-        FRAME
-            .with(|f| {
-                f.state = FrameState::Idle;
-                f.len = 0;
-            })
-            .log_unwrap();
+        ACCUM.with(|a| {
+            a.state = UsbTunnelState::Idle;
+            a.len = 0;
+        });
+        tun.release();
 
         result
     }
@@ -278,6 +246,10 @@ impl HostTransport for HostTransportImpl {
 /// it. Resolved at codegen time from the `peers` table — host_proxy is
 /// declared as a peer in this task's `task.ncl` purely for this check.
 const HOST_FORWARDING_AVAILABLE: bool = PEERS.sysmodule_host_proxy.is_some();
+const HOST_PROXY_TID: u32 = match PEERS.sysmodule_host_proxy {
+    Some(tid) => tid.task_index() as u32,
+    None => 0,
+};
 
 /// Tracks whether we're currently in the "bus not Configured" state, so
 /// disconnect noise only emits on the true → false transition.
@@ -332,12 +304,12 @@ fn handle_usb_event(_sender: u16, _code: u32) {
     // If host_proxy hasn't consumed the previous request yet, don't drain
     // further USB bytes. The protocol is synchronous so the host won't
     // send more anyway, and this keeps backpressure clean.
-    let busy = FRAME.with(|f| f.state == FrameState::Staged).unwrap_or(false);
+    let busy = ACCUM.with(|a| a.state == UsbTunnelState::Staged).unwrap_or(false);
     if busy {
         return;
     }
 
-    // Drain packets into FRAME. A short packet (< 64 bytes) marks
+    // Drain packets into the tunnel buffer. A short packet (< 64 bytes) marks
     // end-of-transfer; each bulk transfer carries exactly one IPC frame
     // + trailing CRC16 (+ optional 1-byte pad). When end-of-transfer
     // arrives, we validate CRC and dispatch or NACK.
@@ -348,21 +320,26 @@ fn handle_usb_event(_sender: u16, _code: u32) {
                 USB_DISCONNECTED.store(false, core::sync::atomic::Ordering::Relaxed);
                 let n = n as usize;
                 let is_short = n < 64;
-                FRAME
-                    .with(|f| {
-                        if f.state == FrameState::Overflowed {
+                ACCUM
+                    .with(|a| {
+                        if a.state == UsbTunnelState::Overflowed {
                             return;
                         }
-                        if f.len + n > f.buf.len() {
-                            f.state = FrameState::Overflowed;
-                            f.len = 0;
+                        if a.state == UsbTunnelState::Idle {
+                            if !tunnel().try_acquire_or_wipe(SELF_TID, refresh_tid) {
+                                a.state = UsbTunnelState::Overflowed;
+                                return;
+                            }
+                            a.state = UsbTunnelState::Accumulating;
+                        }
+                        let tun_data = unsafe { tunnel().data_mut() };
+                        if a.len + n > tun_data.len() {
+                            a.state = UsbTunnelState::Overflowed;
+                            a.len = 0;
                             return;
                         }
-                        f.buf[f.len..f.len + n].copy_from_slice(&usb_buf[..n]);
-                        f.len += n;
-                        if f.state == FrameState::Idle {
-                            f.state = FrameState::Accumulating;
-                        }
+                        tun_data[a.len..a.len + n].copy_from_slice(&usb_buf[..n]);
+                        a.len += n;
                     })
                     .log_unwrap();
 
@@ -393,10 +370,13 @@ fn handle_usb_event(_sender: u16, _code: u32) {
                     !USB_DISCONNECTED.swap(true, core::sync::atomic::Ordering::Relaxed);
                 if was_connected {
                     warn!("USB disconnected");
-                    FRAME
-                        .with(|f| {
-                            f.state = FrameState::Idle;
-                            f.len = 0;
+                    ACCUM
+                        .with(|a| {
+                            if a.state != UsbTunnelState::Idle {
+                                tunnel().release();
+                            }
+                            a.state = UsbTunnelState::Idle;
+                            a.len = 0;
                         })
                         .log_unwrap();
                 }
@@ -410,13 +390,16 @@ fn handle_usb_event(_sender: u16, _code: u32) {
 /// Validate the CRC over the accumulated transfer and stage the frame.
 /// Returns `true` iff a request was staged for `host_proxy`.
 fn process_accumulated_frame() -> bool {
-    FRAME
-        .with(|f| {
-            let n = f.len;
+    ACCUM
+        .with(|a| {
+            let n = a.len;
+            let tun = tunnel();
+            let tun_data = unsafe { tun.data_ref() };
 
-            if f.state == FrameState::Overflowed {
-                f.state = FrameState::Idle;
-                f.len = 0;
+            if a.state == UsbTunnelState::Overflowed {
+                a.state = UsbTunnelState::Idle;
+                a.len = 0;
+                tun.release();
                 info!("USB RX transfer overflowed, NACKing");
                 send_request_corrupted();
                 return false;
@@ -424,18 +407,20 @@ fn process_accumulated_frame() -> bool {
 
             const HEADER_SIZE: usize = rcard_usb_proto::header::HEADER_SIZE;
             if n < HEADER_SIZE + 2 {
-                f.state = FrameState::Idle;
-                f.len = 0;
+                a.state = UsbTunnelState::Idle;
+                a.len = 0;
+                tun.release();
                 info!("USB RX transfer too short ({} bytes), NACKing", n);
                 send_request_corrupted();
                 return false;
             }
 
-            let header = match rcard_usb_proto::FrameHeader::decode(&f.buf[..n]) {
+            let header = match rcard_usb_proto::FrameHeader::decode(&tun_data[..n]) {
                 Ok(h) => h,
                 Err(_) => {
-                    f.state = FrameState::Idle;
-                    f.len = 0;
+                    a.state = UsbTunnelState::Idle;
+                    a.len = 0;
+                    tun.release();
                     info!("USB RX bad frame header, NACKing");
                     send_request_corrupted();
                     return false;
@@ -444,8 +429,9 @@ fn process_accumulated_frame() -> bool {
 
             let frame_size = HEADER_SIZE + header.length as usize;
             if frame_size + 2 > n {
-                f.state = FrameState::Idle;
-                f.len = 0;
+                a.state = UsbTunnelState::Idle;
+                a.len = 0;
+                tun.release();
                 info!(
                     "USB RX transfer short for declared length ({} < {} + 2), NACKing",
                     n, frame_size
@@ -454,11 +440,12 @@ fn process_accumulated_frame() -> bool {
                 return false;
             }
 
-            let expected = u16::from_be_bytes([f.buf[frame_size], f.buf[frame_size + 1]]);
-            let actual = crc16(&f.buf[..frame_size]);
+            let expected = u16::from_be_bytes([tun_data[frame_size], tun_data[frame_size + 1]]);
+            let actual = crc16(&tun_data[..frame_size]);
             if expected != actual {
-                f.state = FrameState::Idle;
-                f.len = 0;
+                a.state = UsbTunnelState::Idle;
+                a.len = 0;
+                tun.release();
                 info!("USB RX CRC mismatch, NACKing");
                 send_request_corrupted();
                 return false;
@@ -466,14 +453,15 @@ fn process_accumulated_frame() -> bool {
 
             let frame = rcard_usb_proto::RawFrame {
                 header,
-                payload: &f.buf[HEADER_SIZE..frame_size],
+                payload: &tun_data[HEADER_SIZE..frame_size],
             };
 
             if let Some(tunnel_err) = frame.parse_simple::<rcard_usb_proto::messages::TunnelError>()
             {
                 if tunnel_err.code == rcard_usb_proto::messages::TunnelErrorCode::ReplyCorrupted {
-                    f.state = FrameState::Idle;
-                    f.len = 0;
+                    a.state = UsbTunnelState::Idle;
+                    a.len = 0;
+                    tun.release();
                     info!("host requested reply retransmit");
                     let retransmitted = LAST_SENT
                         .with(|ls| match ls {
@@ -500,23 +488,26 @@ fn process_accumulated_frame() -> bool {
                     }
                     return retransmitted;
                 } else {
-                    f.state = FrameState::Idle;
-                    f.len = 0;
+                    a.state = UsbTunnelState::Idle;
+                    a.len = 0;
+                    tun.release();
                     warn!("host reported tunnel error: {}", tunnel_err.code);
                     return false;
                 }
             }
 
             if frame.as_ipc_request().is_none() {
-                f.state = FrameState::Idle;
-                f.len = 0;
+                a.state = UsbTunnelState::Idle;
+                a.len = 0;
+                tun.release();
                 warn!("Unexpected frame type on host channel");
                 return false;
             }
 
             if !HOST_FORWARDING_AVAILABLE {
-                f.state = FrameState::Idle;
-                f.len = 0;
+                a.state = UsbTunnelState::Idle;
+                a.len = 0;
+                tun.release();
                 if let Some(ep_in) = EP_IN.get() {
                     write_tunnel_error(
                         ep_in,
@@ -527,11 +518,9 @@ fn process_accumulated_frame() -> bool {
                 return false;
             }
 
-            // No copy needed — the frame is already in buf. Just
-            // trim len to the validated frame (strip CRC+pad) and
-            // transition to Staged.
-            f.len = frame_size;
-            f.state = FrameState::Staged;
+            unsafe { tun.set_len(frame_size as u32) };
+            tun.transfer(HOST_PROXY_TID);
+            a.state = UsbTunnelState::Staged;
             true
         })
         .unwrap_or(false)

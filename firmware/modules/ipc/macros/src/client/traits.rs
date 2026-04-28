@@ -38,26 +38,24 @@ pub fn gen_cloneable_impl(
         impl<S: #server_trait_name> ipc::Cloneable for #handle_name<S> {
             fn clone_for(&self, new_owner: ipc::kern::TaskId) -> core::result::Result<ipc::DynHandle, ipc::CloneError> {
                 let owner_idx = new_owner.task_index();
-                let mut argbuffer = [0u8; ipc::RawHandle::SIZE + 2 + 3];
+                let buf = unsafe { &mut *ipc::ipc_buf() };
                 let n = match ipc::__postcard::to_slice(
                     &(self.handle.get(), owner_idx),
-                    &mut argbuffer,
+                    buf,
                 ) {
                     Ok(s) => s.len(),
                     Err(_) => #_p!("ipc: clone arg encode failed"),
                 };
-                let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
-                    unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-                let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
                 let mut leases = [];
                 let opcode = ipc::opcode(#kind_lit, ipc::CLONE_METHOD);
                 let (rc, len) = ipc::kern::sys_send(
                     self.server.get(),
                     opcode,
-                    &argbuffer[..n],
-                    retbuffer,
+                    buf,
+                    n,
                     &mut leases,
                 ).map_err(|_| ipc::CloneError::ServerDied)?;
+                let retbuffer: &[u8] = buf;
                 if rc == ipc::ACCESS_VIOLATION {
                     #_p!("ipc: clone rejected: access violation \
                            (this task is not authorized to use this server)");
@@ -66,11 +64,16 @@ pub fn gen_cloneable_impl(
                     #_p!("ipc: clone got non-SUCCESS response code");
                 }
                 // Wire format: tag(0=Ok,1=Err) + payload
-                if len == 0 { #_p!("ipc: empty clone reply"); }
-                let new_handle = match retbuffer[0] {
+                let Some(&__tag) = retbuffer.get(0) else {
+                    #_p!("ipc: empty clone reply");
+                };
+                let Some(__payload) = retbuffer.get(1..len) else {
+                    #_p!("ipc: clone reply truncated");
+                };
+                let new_handle = match __tag {
                     0u8 => {
                         let Ok((h, _)) =
-                            ipc::__postcard::take_from_bytes::<ipc::RawHandle>(&retbuffer[1..len])
+                            ipc::__postcard::take_from_bytes::<ipc::RawHandle>(__payload)
                         else {
                             #_p!("ipc: malformed clone reply");
                         };
@@ -78,7 +81,7 @@ pub fn gen_cloneable_impl(
                     }
                     1u8 => {
                         let Ok((err, _)) =
-                            ipc::__postcard::take_from_bytes::<ipc::Error>(&retbuffer[1..len])
+                            ipc::__postcard::take_from_bytes::<ipc::Error>(__payload)
                         else {
                             #_p!("ipc: malformed clone error reply");
                         };

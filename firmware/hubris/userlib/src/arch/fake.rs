@@ -58,11 +58,11 @@ pub fn sys_panic(msg: &[u8]) -> ! {
 pub fn sys_send(
     target: TaskId,
     operation: u16,
-    outgoing: &[u8],
-    incoming: &mut [u8],
+    buf: &mut [u8],
+    arg_len: usize,
     leases: &mut [Lease<'_>],
 ) -> Result<(ResponseCode, usize), TaskDeath> {
-    let _ = (target, operation, outgoing, incoming, leases);
+    let _ = (target, operation, buf, arg_len, leases);
     unimplemented!()
 }
 
@@ -76,11 +76,11 @@ pub fn sys_send(
 /// `incoming` without checks.
 pub fn sys_send_to_kernel(
     operation: u16,
-    outgoing: &[u8],
-    incoming: &mut [u8],
+    buf: &mut [u8],
+    arg_len: usize,
     leases: &mut [Lease<'_>],
 ) -> (ResponseCode, usize) {
-    let _ = (operation, outgoing, incoming, leases);
+    let _ = (operation, buf, arg_len, leases);
     unimplemented!()
 }
 

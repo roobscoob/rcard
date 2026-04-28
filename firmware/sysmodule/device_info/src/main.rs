@@ -3,7 +3,7 @@
 
 use generated::slots::SLOTS;
 use once_cell::OnceCell;
-use rcard_log::{info, ResultExt};
+use rcard_log::{error, info};
 use sysmodule_device_info_api::*;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -31,10 +31,19 @@ fn main() -> ! {
     // Fetch the UID once. If efuse is unreachable (dead or mis-configured),
     // fall back to zero so the server still runs and clients see a
     // sentinel value instead of a hang.
-    let bank = Efuse::read(0).log_unwrap().log_unwrap();
-    let mut uid = [0u8; 16];
-    uid.copy_from_slice(&bank[..16]);
-    UID.set(uid).ok();
+    match Efuse::read(0) {
+        Ok(Ok(bank)) => {
+            let mut uid = [0u8; 16];
+            uid.copy_from_slice(&bank[..16]);
+            UID.set(uid).ok();
+        }
+        Ok(Err(e)) => {
+            error!("failed to read eFuse bank 0: {}", e);
+        }
+        Err(e) => {
+            error!("IPC error reading eFuse bank 0: {}", e);
+        }
+    }
 
     info!("Awake");
 

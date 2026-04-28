@@ -4,8 +4,8 @@ let lib = import "../lib.ncl" in
 
 fun args =>
   {
-    name = "rcard",
-    version = "0.1.0",
+    name = "Charm Production",
+    version = "0.2.0",
     target = args.board.target,
     vector_table_size = args.board.vector_table_size,
     kernel = (args.board.kernel) args.places,
@@ -47,5 +47,19 @@ fun args =>
       args.tasks.supervisor,
       args.tasks.idle,
       args.tasks.fob,
+
+      # Enable the host proxy, so the host can drive the stub firmware.
+      args.tasks.sysmodule_host_proxy,
+
+      # Include the USB protocol sysmodules so that the host can talk
+      # to the stub firmware over USB, and so that the stub firmware
+      # can talk to the host over USB.
+      args.tasks.sysmodule_usb_protocol,
+      args.tasks.sysmodule_usb_protocol_host,
+      args.tasks.sysmodule_usb_protocol_fob,
+
+      # We want to include the storage sysmodule in the stub firmware so 
+      # that we can flash the main firmware to the device
+      args.tasks.sysmodule_storage,
     ],
   }

@@ -166,10 +166,16 @@ pub struct CratePackage {
 }
 
 /// A region request: a place with optional size/alignment constraints.
+///
+/// When `shared` names a sharing group, the region is co-allocated with
+/// every other region in the same group. Only one member needs to specify
+/// `place`/`size`/`align`; the rest inherit. If multiple members specify a
+/// field and the values disagree, the build fails.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct RegionRequest {
     /// The resolved place from the layout.
-    pub place: Place,
+    #[serde(default)]
+    pub place: Option<Place>,
     /// Size in bytes for this region's allocation within the place.
     /// None = sized by linker (e.g. code, data sections).
     #[serde(default)]
@@ -177,9 +183,10 @@ pub struct RegionRequest {
     /// Alignment in bytes.
     #[serde(default)]
     pub align: Option<u64>,
-    /// If true, this region is shared with other tasks that declare the same name.
+    /// Sharing group name. All regions with the same group string are
+    /// co-allocated to the same physical address. `None` = private.
     #[serde(default)]
-    pub shared: bool,
+    pub shared: Option<String>,
 }
 
 // -- Peripherals --
@@ -338,7 +345,9 @@ fn stamp_place_names(config: &mut AppConfig) {
         lookup: &BTreeMap<(u64, u64, u64), String>,
     ) {
         for req in regions.values_mut() {
-            stamp(&mut req.place, lookup);
+            if let Some(ref mut place) = req.place {
+                stamp(place, lookup);
+            }
         }
     }
 

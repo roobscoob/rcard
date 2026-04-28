@@ -1,0 +1,11 @@
+[package]
+name = "memfns"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+test = false
+bench = false
+
+[lints]
+workspace = true

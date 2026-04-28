@@ -14,6 +14,8 @@ sysmodule_log_api::panic_handler!(Log);
 
 static MPI_IN_USE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
+static mut MPI_SCRATCH: [u8; 256] = [0u8; 256];
+
 fn mpi_instance(index: u8) -> Option<MpiPeri> {
     match index {
         1 => Some(sifli_pac::MPI1),
@@ -507,7 +509,7 @@ impl MpiResource {
         let nph = nph_raw.min(MAX_NPH);
 
         // Read parameter headers. 16 * 8 = 128 bytes; single read.
-        let mut ph_bytes = [0u8; MAX_NPH as usize * PH_BYTES];
+        let ph_bytes = unsafe { &mut *(&raw mut MPI_SCRATCH) };
         let total = (nph as usize) * PH_BYTES;
         let mut cursor = 0usize;
         while cursor < total {
@@ -578,7 +580,7 @@ impl MpiResource {
             );
             return Err(MpiOpenError::SfdpUnavailable);
         }
-        let mut bfpt_buf = [0u8; MAX_BFPT];
+        let bfpt_buf = unsafe { &mut *(&raw mut MPI_SCRATCH) };
         let mut cursor = 0usize;
         while cursor < body_len {
             let take = (body_len - cursor).min(CHUNK);
@@ -1097,10 +1099,7 @@ impl Mpi for MpiResource {
         });
         self.regs.cmdr1().write(|w| w.set_cmd(self.cmd_read()));
 
-        // Accumulate FIFO words into a local buffer, then bulk-write
-        // to the lease in one syscall — matches the bulk pattern in
-        // `write`. The LengthTooLarge guard above ensures fit.
-        let mut local = [0u8; PAGE_SIZE as usize];
+        let local = unsafe { &mut *(&raw mut MPI_SCRATCH) };
         let mut i = 0;
         while i < len {
             self.wait_rx_ready()?;
@@ -1135,11 +1134,7 @@ impl Mpi for MpiResource {
             return Err(MpiOperationError::AddressOutOfRange);
         }
 
-        // Local buffer holds one page. We bulk-read each chunk from
-        // the lease in a single syscall before pushing it word-by-word
-        // to the FIFO — avoids one syscall per byte (slow, and
-        // historically corruption-prone, see sysmodule_usb).
-        let mut local = [0u8; PAGE_SIZE as usize];
+        let local = unsafe { &mut *(&raw mut MPI_SCRATCH) };
         let mut offset: usize = 0;
         let mut addr = address;
 
@@ -1281,7 +1276,7 @@ impl Mpi for MpiResource {
             let body_len = (header.length_dwords as usize) * 4;
             let n = body_len.min(lease_len);
             const CHUNK: usize = 256;
-            let mut stage = [0u8; CHUNK];
+            let stage = unsafe { &mut *(&raw mut MPI_SCRATCH) };
             let pointer = header.pointer;
             let mut done = 0usize;
             while done < n {

@@ -10,7 +10,7 @@ use crate::wire_format;
 
 use super::constructs::gen_constructs_map;
 use super::error_types::error_type_for;
-use super::reply::{ctor_retbuffer_size, gen_ctor_reply, gen_parse_reply};
+use super::reply::{gen_ctor_reply, gen_parse_reply};
 
 /// Generate the method implementation for a single method on a concrete client.
 pub fn gen_client_method(m: &ParsedMethod, kind: u8, enum_name: &Ident) -> TokenStream2 {
@@ -122,7 +122,6 @@ fn gen_constructor(
         }
     };
 
-    let retbuf_size = ctor_retbuffer_size(ctor_return);
     let (fn_ret, parse_and_map) = gen_ctor_reply(ctor_return, err_type, &make_self);
 
     quote! {
@@ -133,20 +132,16 @@ fn gen_constructor(
             let server = core::cell::Cell::new(server_id.get());
             #handle_transfer_stmts
             #serialize
-            let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; #retbuf_size] =
-                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-            let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
             #lease_arr
-            let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
             let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-            let len = ipc::call_send(
+            let len = ipc::call_send_unified(
                 server_id,
                 server.get(),
                 opcode,
-                argbuffer,
-                retbuffer,
+                n,
                 &mut leases,
             ).map_err(#err_type::from_wire)?;
+            let retbuffer: &[u8] = unsafe { &*ipc::ipc_buf() };
             #parse_and_map
         }
     }
@@ -311,19 +306,15 @@ fn gen_static_message(
             #handle_transfer_stmts
             #serialize
             #lease_arr
-            let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
             let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-            let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
-                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-            let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
-            let len = ipc::call_send(
+            let len = ipc::call_send_unified(
                 server_id,
                 server_id.get(),
                 opcode,
-                argbuffer,
-                retbuffer,
+                n,
                 &mut leases,
             ).map_err(#err_type::from_wire)?;
+            let retbuffer: &[u8] = unsafe { &*ipc::ipc_buf() };
             let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
             wire_result.map_err(#err_type::from_wire)
         }
@@ -346,18 +337,14 @@ fn gen_instance_call_body(
     let kind_lit = proc_macro2::Literal::u8_suffixed(kind);
     quote! {
         #lease_arr
-        let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
         let opcode = ipc::opcode(#kind_lit, #method_id_expr);
-        let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
-            unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-        let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
-        let len = ipc::call_send(
+        let len = ipc::call_send_unified(
             S::server_id(),
             self.server.get(),
             opcode,
-            argbuffer,
-            retbuffer,
+            n,
             &mut leases,
         ).map_err(|_| #err_type::from_wire(ipc::Error::HandleLost))?;
+        let retbuffer: &[u8] = unsafe { &*ipc::ipc_buf() };
     }
 }

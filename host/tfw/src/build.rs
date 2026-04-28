@@ -213,8 +213,8 @@ pub struct AllocationRequest {
     pub requested_size: Option<u64>,
     /// Alignment constraint in bytes.
     pub align: Option<u64>,
-    /// Whether this region is shared with other tasks.
-    pub shared: bool,
+    /// Sharing group name, if any.
+    pub shared: Option<String>,
 }
 
 // ── Image resource (singleton) ─────────────────────────────────────────────
@@ -735,19 +735,19 @@ pub fn emit_memory_allocations(
             AllocationRequest {
                 requested_place: req
                     .place
-                    .name
-                    .clone()
+                    .as_ref()
+                    .and_then(|p| p.name.clone())
                     .unwrap_or_else(|| actual_place.clone()),
                 requested_size: req.size,
                 align: req.align,
-                shared: req.shared,
+                shared: req.shared.clone(),
             }
         } else {
             AllocationRequest {
                 requested_place: actual_place.clone(),
                 requested_size: None,
                 align: None,
-                shared: false,
+                shared: None,
             }
         };
 

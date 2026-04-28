@@ -55,18 +55,16 @@ pub fn gen_dyn_method(m: &ParsedMethod) -> TokenStream2 {
             #handle_transfer_stmts
             #serialize
             #lease_arr
-            let argbuffer = unsafe { ipc::wire::assume_init_slice(&argbuffer, n) };
             let opcode = ipc::opcode(self.kind, #method_id_lit);
-            let mut __retbuf_mem: [core::mem::MaybeUninit<u8>; ipc::HUBRIS_MESSAGE_SIZE_LIMIT] =
-                unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-            let retbuffer = unsafe { ipc::wire::as_mut_byte_slice(&mut __retbuf_mem) };
+            let buf = unsafe { &mut *ipc::ipc_buf() };
             let (rc, len) = ipc::kern::sys_send(
                 self.server.get(),
                 opcode,
-                argbuffer,
-                retbuffer,
+                buf,
+                n,
                 &mut leases,
             ).map_err(|_| #err_type::from_wire(ipc::Error::ServerDied))?;
+            let retbuffer: &[u8] = &buf[..];
             let wire_result: core::result::Result<_, ipc::Error> = { #parse_reply };
             wire_result.map_err(#err_type::from_wire)
         }

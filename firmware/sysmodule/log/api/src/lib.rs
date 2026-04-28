@@ -67,11 +67,9 @@ macro_rules! panic_handler {
                 // Bare core::panic! or compiler-inserted panic — send through
                 // the structured pipeline as a Format-encoded string value.
                 if let Some(msg) = _info.message().as_str() {
-                    let mut writer = rcard_log::LogWriter::new(rcard_log::LogLevel::Panic, 0);
-                    let mut f = rcard_log::formatter::Formatter::new(&mut writer);
+                    let writer = rcard_log::LogWriter::new(rcard_log::LogLevel::Panic, 0);
+                    let mut f = rcard_log::formatter::Formatter::new(writer);
                     rcard_log::formatter::Format::format(&msg, &mut f);
-                    // LogWriter's drop closes the stream; the log server
-                    // appends TAG_END_OF_STREAM on the wire.
                 }
             }
 

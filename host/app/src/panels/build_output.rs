@@ -100,10 +100,10 @@ pub fn show(ui: &mut egui::Ui, build: &BuildHandle) -> PanelAction {
                         pipeline_section(ui, build);
                     });
                     tui.style(Style::default()).ui(|ui| {
-                        two_column_body(ui, build);
+                        diagnostics_section(ui, build);
                     });
                     tui.style(Style::default()).ui(|ui| {
-                        diagnostics_section(ui, build);
+                        two_column_body(ui, build);
                     });
                 });
         });
@@ -971,11 +971,8 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
     let failed = c.state == CrateBuildState::Failed;
     let building = c.state == CrateBuildState::Building;
     let has_ipc = !c.provides.is_empty() || !c.uses.is_empty();
-    // The row earns a dropdown if it has:
-    //   - an active cargo log to stream
-    //   - a failure to explain
-    //   - IPC metadata (provides/uses) once linked
-    let has_body = failed || !c.cargo_messages.is_empty() || has_ipc;
+    let has_allocs = build.allocations.iter().any(|a| a.owner == alloc_owner_name(c));
+    let has_body = failed || !c.cargo_messages.is_empty() || has_ipc || has_allocs;
     let default_open = failed || building;
 
     let border = if failed {
@@ -1066,7 +1063,7 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
                         ui.horizontal(|ui| {
                             ui.small(egui::RichText::new(chevron).color(theme::TEXT_DIM));
                             ui.add_space(4.0);
-                            crate_row_header_content(ui, c);
+                            crate_row_header_content(ui, build, c);
                         });
                     });
                 let click = ui.interact(
@@ -1141,7 +1138,7 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
                                     },
                                     ..Default::default()
                                 })
-                                .ui(|ui| crate_row_body(ui, c));
+                                .ui(|ui| crate_row_body(ui, build, c));
                             },
                         );
                     });
@@ -1160,7 +1157,7 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
-                        crate_row_header_content(ui, c);
+                        crate_row_header_content(ui, build, c);
                     });
                 });
         }
@@ -1170,7 +1167,7 @@ fn crate_row(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
 /// Right-hand bulk of a crate row — rendered inside either the
 /// collapsing header (if the row has a body) or a plain horizontal
 /// layout (if it doesn't).
-fn crate_row_header_content(ui: &mut egui::Ui, c: &CrateProgress) {
+fn crate_row_header_content(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
     let kind_col = match c.state {
         CrateBuildState::Failed => theme::ERROR,
         _ => crate_kind_color(c.kind),
@@ -1195,7 +1192,13 @@ fn crate_row_header_content(ui: &mut egui::Ui, c: &CrateProgress) {
     );
     // Right-aligned state info.
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let right_text = right_side_label(c);
+        let alloc_size: u64 = build
+            .allocations
+            .iter()
+            .filter(|a| a.owner == alloc_owner_name(c))
+            .map(|a| a.size)
+            .sum();
+        let right_text = right_side_label(c, alloc_size);
         let right_col = match c.state {
             CrateBuildState::Queued => theme::TEXT_DIM,
             CrateBuildState::Linked => theme::TEXT_DIM,
@@ -1234,7 +1237,7 @@ fn crate_row_header_content(ui: &mut egui::Ui, c: &CrateProgress) {
 /// states (`Building → Compiled → Measuring → Linking`) so users can
 /// see how far along a crate is at a glance; `Linked` drops the pips
 /// and shows the ELF size.
-fn right_side_label(c: &CrateProgress) -> String {
+fn right_side_label(c: &CrateProgress, alloc_size: u64) -> String {
     let pri = c.priority.map(|p| format!("pri {p}")).unwrap_or_default();
     let pri_prefix = if pri.is_empty() {
         String::new()
@@ -1248,17 +1251,20 @@ fn right_side_label(c: &CrateProgress) -> String {
         CrateBuildState::Measuring => format!("{pri_prefix}●●●○ measuring"),
         CrateBuildState::Linking => format!("{pri_prefix}●●●● linking"),
         CrateBuildState::Linked => {
-            let size = c
-                .total_size
-                .map(|s| format!("  ·  {}", format_bytes(s)))
-                .unwrap_or_default();
+            let size = if alloc_size > 0 {
+                format!("  ·  {}", format_bytes(alloc_size))
+            } else {
+                c.total_size
+                    .map(|s| format!("  ·  {}", format_bytes(s)))
+                    .unwrap_or_default()
+            };
             format!("{pri}{size}")
         }
         CrateBuildState::Failed => format!("{pri_prefix}build failed"),
     }
 }
 
-fn crate_row_body(ui: &mut egui::Ui, c: &CrateProgress) {
+fn crate_row_body(ui: &mut egui::Ui, build: &BuildHandle, c: &CrateProgress) {
     let summary = &c.cargo_summary;
     let has_messages = !c.cargo_messages.is_empty();
     let has_ipc = !c.provides.is_empty() || !c.uses.is_empty();
@@ -1395,6 +1401,51 @@ fn crate_row_body(ui: &mut egui::Ui, c: &CrateProgress) {
                 chip_row(ui, &c.name, "uses", &name_refs);
             }
         }
+
+        // ── Allocations ───────────────────────────────────────────
+        let crate_allocs: Vec<&MemoryAllocation> = build
+            .allocations
+            .iter()
+            .filter(|a| a.owner == alloc_owner_name(c))
+            .collect();
+        if !crate_allocs.is_empty() {
+            if has_messages || has_ipc {
+                ui.add_space(4.0);
+            }
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    theme::TEXT_DIM,
+                    egui::RichText::new(icon::HARD_DRIVES).size(11.0),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} allocation{}",
+                        crate_allocs.len(),
+                        if crate_allocs.len() == 1 { "" } else { "s" }
+                    ))
+                    .monospace()
+                    .size(10.0)
+                    .color(theme::TEXT_DIM),
+                );
+            });
+            for a in &crate_allocs {
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}.{}  {}  @ {:#010x}",
+                            a.owner,
+                            a.region,
+                            format_bytes(a.size),
+                            a.base,
+                        ))
+                        .monospace()
+                        .size(10.0)
+                        .color(theme::TEXT_SECONDARY),
+                    );
+                });
+            }
+        }
     });
 }
 
@@ -1499,7 +1550,21 @@ fn memory_device_row(ui: &mut egui::Ui, build: &BuildHandle, dev: &crate::state:
         .iter()
         .filter(|a| dev.contains_address(a.base))
         .collect();
-    let used: u64 = allocs.iter().map(|a| a.size).sum();
+    let used: u64 = {
+        let mut intervals: Vec<(u64, u64)> =
+            allocs.iter().map(|a| (a.base, a.base + a.size)).collect();
+        intervals.sort_unstable();
+        let mut total = 0u64;
+        let mut end = 0u64;
+        for (s, e) in intervals {
+            let s = s.max(end);
+            if s < e {
+                total += e - s;
+                end = e;
+            }
+        }
+        total
+    };
     let capacity = dev.size;
     let pct = if capacity > 0 {
         Some((used as f64 / capacity as f64 * 100.0).round() as u32)
@@ -1545,22 +1610,29 @@ fn memory_device_row(ui: &mut egui::Ui, build: &BuildHandle, dev: &crate::state:
     }
 
     // Build segment rects first, then draw + hover.
+    // Position each segment by its actual address within the device so
+    // that allocations sharing the same address overlap visually instead
+    // of appearing as separate contiguous bars.
     struct Seg {
         rect: egui::Rect,
         color: egui::Color32,
         idx: usize,
     }
-    let gap = 1.0;
+    let dev_base = dev
+        .mappings
+        .iter()
+        .map(|(addr, _)| *addr)
+        .min()
+        .unwrap_or(0);
     let n = allocs.len();
     let mut segs = Vec::with_capacity(n);
-    let mut x = track_rect.left();
+    let px_per_byte = track_rect.width() / capacity as f32;
+    let half_gap = 0.5;
     for (i, a) in allocs.iter().enumerate() {
-        let w = ((a.size as f32 / capacity as f32) * track_rect.width()).max(1.0);
-        let right = if i + 1 < n {
-            (x + w).min(track_rect.right())
-        } else {
-            (x + w).min(track_rect.right())
-        };
+        let offset = a.base.saturating_sub(dev_base) as f32;
+        let x = (track_rect.left() + offset * px_per_byte + half_gap).min(track_rect.right());
+        let w = (a.size as f32 * px_per_byte - half_gap * 2.0).max(1.0);
+        let right = (x + w).min(track_rect.right());
         let rect = egui::Rect::from_min_max(
             egui::pos2(x, track_rect.top()),
             egui::pos2(right, track_rect.bottom()),
@@ -1570,7 +1642,6 @@ fn memory_device_row(ui: &mut egui::Ui, build: &BuildHandle, dev: &crate::state:
             color: alloc_color(&a.owner),
             idx: i,
         });
-        x = right + gap;
     }
 
     // Draw segments.
@@ -1579,18 +1650,22 @@ fn memory_device_row(ui: &mut egui::Ui, build: &BuildHandle, dev: &crate::state:
             .rect_filled(seg.rect, egui::CornerRadius::ZERO, seg.color);
     }
 
-    // Hover: check pointer position against segments.
+    // Hover: collect all segments under the pointer into one tooltip.
     if let Some(pointer) = ui.ctx().pointer_hover_pos() {
         if track_rect.contains(pointer) {
-            for seg in &segs {
-                if seg.rect.contains(pointer) {
-                    let a = &allocs[seg.idx];
-                    egui::popup::show_tooltip_at(
-                        ui.ctx(),
-                        ui.layer_id(),
-                        ui.id().with(("alloc_tip", seg.idx)),
-                        pointer + egui::vec2(12.0, 12.0),
-                        |ui| {
+            let hits: Vec<&Seg> = segs.iter().filter(|s| s.rect.contains(pointer)).collect();
+            if !hits.is_empty() {
+                egui::popup::show_tooltip_at(
+                    ui.ctx(),
+                    ui.layer_id(),
+                    ui.id().with("alloc_tip"),
+                    pointer + egui::vec2(12.0, 12.0),
+                    |ui| {
+                        for (i, seg) in hits.iter().enumerate() {
+                            if i > 0 {
+                                ui.separator();
+                            }
+                            let a = &allocs[seg.idx];
                             ui.label(
                                 egui::RichText::new(format!("{}.{}", a.owner, a.region))
                                     .monospace()
@@ -1607,10 +1682,9 @@ fn memory_device_row(ui: &mut egui::Ui, build: &BuildHandle, dev: &crate::state:
                                 .size(11.0)
                                 .color(theme::TEXT_SECONDARY),
                             );
-                        },
-                    );
-                    break;
-                }
+                        }
+                    },
+                );
             }
         }
     }
@@ -1633,6 +1707,14 @@ fn memory_device_row(ui: &mut egui::Ui, build: &BuildHandle, dev: &crate::state:
                 );
             }
         });
+    }
+}
+
+fn alloc_owner_name(c: &CrateProgress) -> &str {
+    match c.kind {
+        CrateKind::Kernel => "kernel",
+        CrateKind::Bootloader => "bootloader",
+        _ => &c.name,
     }
 }
 
@@ -1673,6 +1755,10 @@ fn shorten_path(path: &str) -> String {
 // ── Diagnostics ─────────────────────────────────────────────────────────
 
 fn diagnostics_section(ui: &mut egui::Ui, build: &BuildHandle) {
+    let build_error = match &build.status {
+        BuildStatus::Failed { error } => Some(error.as_str()),
+        _ => None,
+    };
     let all = collect_diagnostics(build);
     let warnings: Vec<_> = all
         .iter()
@@ -1682,7 +1768,7 @@ fn diagnostics_section(ui: &mut egui::Ui, build: &BuildHandle) {
         .iter()
         .filter(|d| d.diag.level == CargoDiagLevel::Error)
         .collect();
-    if warnings.is_empty() && errors.is_empty() {
+    if warnings.is_empty() && errors.is_empty() && build_error.is_none() {
         return;
     }
     card(ui, |ui| {
@@ -1696,11 +1782,49 @@ fn diagnostics_section(ui: &mut egui::Ui, build: &BuildHandle) {
                     .color(theme::TEXT_PRIMARY),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                pill(ui, theme::ERROR, &format!("{} ERRORS", errors.len()));
+                let n_errors = errors.len() + if build_error.is_some() { 1 } else { 0 };
+                pill(ui, theme::ERROR, &format!("{} ERRORS", n_errors));
                 pill(ui, theme::WARN, &format!("{} WARNINGS", warnings.len()));
             });
         });
         ui.add_space(6.0);
+        if let Some(err) = build_error {
+            egui::Frame::NONE
+                .fill(theme::BG)
+                .corner_radius(egui::CornerRadius::same(6))
+                .stroke(egui::Stroke::new(1.0, theme::ERROR.gamma_multiply(0.25)))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(3.0, 34.0), egui::Sense::hover());
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::CornerRadius::same(1),
+                            theme::ERROR,
+                        );
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("build failed")
+                                    .monospace()
+                                    .strong()
+                                    .size(11.0)
+                                    .color(theme::ERROR),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(err)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(theme::TEXT_SECONDARY),
+                                )
+                                .wrap(),
+                            );
+                        });
+                    });
+                });
+            ui.add_space(4.0);
+        }
         for d in errors.iter().take(6) {
             diagnostic_row(ui, d);
         }

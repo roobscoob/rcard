@@ -8,13 +8,6 @@ pub trait Writer {
     fn write(&mut self, bytes: &[u8]);
 }
 
-impl<W: Writer> Writer for &mut W {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        (**self).write(bytes);
-    }
-}
-
 pub trait Format {
     fn format<W: Writer>(&self, formatter: &mut Formatter<W>);
 }
@@ -47,49 +40,49 @@ impl<W: Writer> Formatter<W> {
     #[inline]
     pub fn write_u16(&mut self, word: u16) {
         self.w.write(&[TAG_U16]);
-        varint::encode_u64(&mut self.w, word as u64);
+        self.encode_u64(word as u64);
     }
 
     #[inline]
     pub fn write_i16(&mut self, word: i16) {
         self.w.write(&[TAG_I16]);
-        varint::encode_i64(&mut self.w, word as i64);
+        self.encode_i64(word as i64);
     }
 
     #[inline]
     pub fn write_u32(&mut self, dword: u32) {
         self.w.write(&[TAG_U32]);
-        varint::encode_u64(&mut self.w, dword as u64);
+        self.encode_u64(dword as u64);
     }
 
     #[inline]
     pub fn write_i32(&mut self, dword: i32) {
         self.w.write(&[TAG_I32]);
-        varint::encode_i64(&mut self.w, dword as i64);
+        self.encode_i64(dword as i64);
     }
 
     #[inline]
     pub fn write_u64(&mut self, qword: u64) {
         self.w.write(&[TAG_U64]);
-        varint::encode_u64(&mut self.w, qword);
+        self.encode_u64(qword);
     }
 
     #[inline]
     pub fn write_i64(&mut self, qword: i64) {
         self.w.write(&[TAG_I64]);
-        varint::encode_i64(&mut self.w, qword);
+        self.encode_i64(qword);
     }
 
     #[inline]
     pub fn write_u128(&mut self, oword: u128) {
         self.w.write(&[TAG_U128]);
-        varint::encode_u128(&mut self.w, oword);
+        self.encode_u128(oword);
     }
 
     #[inline]
     pub fn write_i128(&mut self, oword: i128) {
         self.w.write(&[TAG_I128]);
-        varint::encode_i128(&mut self.w, oword);
+        self.encode_i128(oword);
     }
 
     #[inline]
@@ -107,7 +100,7 @@ impl<W: Writer> Formatter<W> {
     #[inline]
     pub fn write_char(&mut self, c: char) {
         self.w.write(&[TAG_CHAR]);
-        varint::encode_u64(&mut self.w, c as u64);
+        self.encode_u64(c as u64);
     }
 
     #[inline]
@@ -118,7 +111,7 @@ impl<W: Writer> Formatter<W> {
     #[inline]
     pub fn write_str(&mut self, s: &str) {
         self.w.write(&[TAG_STR]);
-        varint::encode_u64(&mut self.w, s.len() as u64);
+        self.encode_u64(s.len() as u64);
         self.w.write(s.as_bytes());
     }
 
@@ -130,7 +123,7 @@ impl<W: Writer> Formatter<W> {
     #[inline]
     pub fn write_array<T: Format, const N: usize>(&mut self, array: &[T; N]) {
         self.w.write(&[TAG_ARRAY]);
-        varint::encode_u64(&mut self.w, N as u64);
+        self.encode_u64(N as u64);
         for item in array {
             item.format(self);
         }
@@ -139,7 +132,7 @@ impl<W: Writer> Formatter<W> {
     #[inline]
     pub fn write_slice<T: Format>(&mut self, slice: &[T]) {
         self.w.write(&[TAG_SLICE]);
-        varint::encode_u64(&mut self.w, slice.len() as u64);
+        self.encode_u64(slice.len() as u64);
         for item in slice {
             item.format(self);
         }
@@ -148,22 +141,22 @@ impl<W: Writer> Formatter<W> {
     #[inline]
     pub fn with_tuple(&mut self, type_id: u64, field_count: u64, f: impl FnOnce(&mut Self)) {
         self.w.write(&[TAG_TUPLE]);
-        varint::encode_u64(&mut self.w, type_id);
-        varint::encode_u64(&mut self.w, field_count);
+        self.encode_u64(type_id);
+        self.encode_u64(field_count);
         f(self);
     }
 
     #[inline]
     pub fn with_struct(&mut self, type_id: u64, field_count: u64, f: impl FnOnce(&mut Self)) {
         self.w.write(&[TAG_STRUCT]);
-        varint::encode_u64(&mut self.w, type_id);
-        varint::encode_u64(&mut self.w, field_count);
+        self.encode_u64(type_id);
+        self.encode_u64(field_count);
         f(self);
     }
 
     #[inline]
     pub fn write_field_id(&mut self, field_id: u64) {
-        varint::encode_u64(&mut self.w, field_id);
+        self.encode_u64(field_id);
     }
 
     /// Write a raw stack dump: 68-byte register header + stack bytes.

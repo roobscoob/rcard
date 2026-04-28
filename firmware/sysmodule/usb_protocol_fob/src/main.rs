@@ -108,6 +108,9 @@ fn write_usb(data: &[u8]) -> Result<(), FobSendError> {
 // UsbProtocolFob resource
 // ---------------------------------------------------------------------------
 
+static mut FOB_DATA: [u8; 500] = [0u8; 500];
+static mut FOB_ENCODE: [u8; 512] = [0u8; 512];
+
 struct FobResource;
 
 impl UsbProtocolFob for FobResource {
@@ -116,15 +119,13 @@ impl UsbProtocolFob for FobResource {
         opcode: u8,
         payload: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<(), FobSendError> {
-        // Bulk-copy lease data into a stack buffer.
-        let mut data = [0u8; 500];
+        let data = unsafe { &mut *(&raw mut FOB_DATA) };
         let len = payload.len().min(data.len());
         let _ = payload.read_range(0, &mut data[..len]);
 
-        // Encode and send.
-        let mut buf = [0u8; 512];
+        let buf = unsafe { &mut *(&raw mut FOB_ENCODE) };
         let n = WRITER
-            .with(|w| w.write_simple_raw(opcode, &data[..len], &mut buf))
+            .with(|w| w.write_simple_raw(opcode, &data[..len], buf))
             .ok_or(FobSendError::BufferFull)?
             .ok_or(FobSendError::BufferFull)?;
 

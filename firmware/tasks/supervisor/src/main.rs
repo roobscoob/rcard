@@ -324,15 +324,16 @@ fn handle_faults() {
     while let Some(fault_index) = kipc::find_faulted_task(next_task) {
         let fault_index = usize::from(fault_index);
         let state = {
-            static mut RESPONSE: [u8; core::mem::size_of::<TaskState>()] = [0; core::mem::size_of::<TaskState>()];
-            let response = unsafe { &mut *(&raw mut RESPONSE) };
+            static mut BUF: [u8; core::mem::size_of::<TaskState>()] = [0; core::mem::size_of::<TaskState>()];
+            let buf = unsafe { &mut *(&raw mut BUF) };
+            buf[..4].copy_from_slice(&(fault_index as u32).to_le_bytes());
             userlib::sys_send_to_kernel(
                 hubris_abi::Kipcnum::ReadTaskStatus as u16,
-                &(fault_index as u32).to_le_bytes(),
-                response,
+                buf,
+                4,
                 &mut [],
             );
-            ssmarshal::deserialize::<TaskState>(response)
+            ssmarshal::deserialize::<TaskState>(buf)
         };
 
         let name = TASK_NAMES.get(fault_index).copied().unwrap_or("?");

@@ -18,6 +18,8 @@ extern "Rust" {
     fn __rcard_log_end(handle: u64);
 }
 
+static mut LOG_BUF: [u8; BUF_SIZE] = [0u8; BUF_SIZE];
+
 /// State of the streaming session.
 enum Session {
     /// Haven't needed streaming yet (message still fits in buffer).
@@ -37,9 +39,12 @@ enum Session {
 pub struct LogWriter {
     level: u8,
     species: u64,
-    buf: [u8; BUF_SIZE],
     pos: usize,
     session: Session,
+}
+
+fn log_buf() -> &'static mut [u8; BUF_SIZE] {
+    unsafe { &mut *(&raw mut LOG_BUF) }
 }
 
 impl LogWriter {
@@ -48,7 +53,6 @@ impl LogWriter {
         LogWriter {
             level: level as u8,
             species,
-            buf: [0u8; BUF_SIZE],
             pos: 0,
             session: Session::Buffered,
         }
@@ -78,8 +82,11 @@ impl LogWriter {
             },
         };
 
+        let buf = log_buf();
+        // SAFETY: self.pos <= BUF_SIZE is maintained by write().
+        let data = unsafe { buf.get_unchecked(..self.pos) };
         unsafe {
-            __rcard_log_write(handle, &self.buf[..self.pos]);
+            __rcard_log_write(handle, data);
         }
         self.pos = 0;
     }
@@ -92,26 +99,37 @@ impl Writer for LogWriter {
             return;
         }
 
+        let buf = log_buf();
         let mut offset = 0;
         while offset < bytes.len() {
             let remaining_buf = BUF_SIZE - self.pos;
             let chunk = bytes.len() - offset;
 
+            // SAFETY: self.pos <= BUF_SIZE is maintained throughout.
+            // The if/else guarantees chunk <= remaining_buf or we
+            // copy exactly remaining_buf bytes respectively.
             if chunk <= remaining_buf {
-                // Fits in buffer
-                self.buf[self.pos..self.pos + chunk]
-                    .copy_from_slice(&bytes[offset..offset + chunk]);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr().add(offset),
+                        buf.as_mut_ptr().add(self.pos),
+                        chunk,
+                    );
+                }
                 self.pos += chunk;
                 offset += chunk;
             } else {
-                // Fill buffer, flush, continue
-                self.buf[self.pos..BUF_SIZE]
-                    .copy_from_slice(&bytes[offset..offset + remaining_buf]);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr().add(offset),
+                        buf.as_mut_ptr().add(self.pos),
+                        remaining_buf,
+                    );
+                }
                 self.pos = BUF_SIZE;
                 self.flush_buf();
                 offset += remaining_buf;
 
-                // flush_buf may have transitioned to Rejected
                 if matches!(self.session, Session::Rejected) {
                     return;
                 }
@@ -125,7 +143,6 @@ impl Drop for LogWriter {
         match self.session {
             Session::Rejected => {}
             Session::Active(h) => {
-                // Flush remainder, then end session
                 if self.pos > 0 {
                     self.flush_buf();
                 }
@@ -134,10 +151,11 @@ impl Drop for LogWriter {
                 }
             }
             Session::Buffered => {
-                // Single-shot send (even empty data is meaningful:
-                // it registers the log occurrence with its level and species)
+                let buf = log_buf();
+                // SAFETY: self.pos <= BUF_SIZE maintained by write().
+                let data = unsafe { buf.get_unchecked(..self.pos) };
                 unsafe {
-                    __rcard_log_send(self.level, self.species, &self.buf[..self.pos]);
+                    __rcard_log_send(self.level, self.species, data);
                 }
             }
         }

@@ -9,13 +9,12 @@
 //!   0x02 ipc reply         (device→host only — ignored inbound)
 //!   0x03 ipc request       (host→device — staged for host_proxy)
 //!
-//! Memory budget: one shared `FRAME_BUF` (8.7 KB) serves both the
-//! receive path (streaming COBS decode via `DecoderState`) and the
-//! send path (COBS encode output). No separate accumulator, decode
-//! scratch, or staging buffers.
+//! The inbound decode path writes directly into the shared tunnel
+//! buffer. The outbound path uses a streaming COBS encoder (255 bytes).
 
 use generated::peers::PEERS;
 use once_cell::GlobalState;
+use rcard_usb_proto::tunnel::TunnelBuffer;
 use sysmodule_host_transport_api::*;
 
 use crate::{send_ipc_reply, Reactor, Usart, USART};
@@ -24,65 +23,56 @@ use crate::{send_ipc_reply, Reactor, Usart, USART};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Max wire-format `IpcRequest` frame we can stage. Derived from the
-/// protocol constants so all transports accept the same ceiling.
-const MAX_FRAME: usize = rcard_usb_proto::MAX_DECODED_FRAME;
-
-/// Max COBS-encoded chunk. Budget: 1 (type) + MAX_FRAME body + ~34 bytes
-/// of COBS overhead (one per 254) + 1 delimiter. Rounded up.
-const MAX_COBS_CHUNK: usize = MAX_FRAME + 64;
-
 /// True iff this firmware build includes a `sysmodule_host_proxy` task.
 const HOST_FORWARDING_AVAILABLE: bool = PEERS.sysmodule_host_proxy.is_some();
 
-// ---------------------------------------------------------------------------
-// Shared frame buffer
-// ---------------------------------------------------------------------------
+const HOST_PROXY_TID: u32 = match PEERS.sysmodule_host_proxy {
+    Some(tid) => tid.task_index() as u32,
+    None => 0,
+};
 
-/// Single buffer for both receive (streaming COBS decode output) and
-/// send (COBS encode output for deliver_reply). The protocol is
-/// synchronous — only one direction is active at a time.
-pub struct FrameBuffer {
-    pub buf: [u8; MAX_COBS_CHUNK],
-    /// Write position for the streaming decoder.
-    write_pos: usize,
-    /// Length of the decoded/staged frame.
-    pub staged_len: usize,
-    /// True between successful staging and `deliver_reply`'s clear.
-    pub staged: bool,
-    /// Set when `push_decoded_byte` drops bytes because the decoded
-    /// output exceeds `MAX_COBS_CHUNK`. Checked (and cleared) on
-    /// `DataComplete` to reject truncated frames.
-    truncated: bool,
+const SELF_TID: u32 = generated::tasks::TASK_ID_SYSMODULE_LOG as u32;
+
+fn refresh_tid(tid: u32) -> u32 {
+    u16::from(userlib::sys_refresh_task_id(userlib::TaskId::from(tid as u16))) as u32
 }
 
-impl FrameBuffer {
+// ---------------------------------------------------------------------------
+// Shared tunnel buffer
+// ---------------------------------------------------------------------------
+
+#[unsafe(link_section = ".tunnel")]
+static TUNNEL: TunnelBuffer = TunnelBuffer::new();
+
+fn tunnel() -> &'static TunnelBuffer {
+    &TUNNEL
+}
+
+// ---------------------------------------------------------------------------
+// Transport-local decode state (not in shared memory)
+// ---------------------------------------------------------------------------
+
+struct DecodeState {
+    write_pos: usize,
+    staged_len: usize,
+    staged: bool,
+    truncated: bool,
+    locked: bool,
+}
+
+impl DecodeState {
     const fn new() -> Self {
         Self {
-            buf: [0u8; MAX_COBS_CHUNK],
             write_pos: 0,
             staged_len: 0,
             staged: false,
             truncated: false,
+            locked: false,
         }
-    }
-
-    fn push_decoded_byte(&mut self, b: u8) {
-        if self.write_pos < self.buf.len() {
-            self.buf[self.write_pos] = b;
-            self.write_pos += 1;
-        } else {
-            self.truncated = true;
-        }
-    }
-
-    fn discard(&mut self) {
-        self.write_pos = 0;
-        self.truncated = false;
     }
 }
 
-pub static FRAME_BUF: GlobalState<FrameBuffer> = GlobalState::new(FrameBuffer::new());
+static DECODE: GlobalState<DecodeState> = GlobalState::new(DecodeState::new());
 
 /// Streaming COBS decoder state.
 static DECODER: GlobalState<cobs::DecoderState> = GlobalState::new(cobs::DecoderState::Idle);
@@ -96,7 +86,7 @@ static DECODER: GlobalState<cobs::DecoderState> = GlobalState::new(cobs::Decoder
 pub fn handle_usart_rx() {
     let Some(usart) = USART.get() else { return };
 
-    let busy = FRAME_BUF.with(|fb| fb.staged).unwrap_or(false);
+    let busy = DECODE.with(|ds| ds.staged).unwrap_or(false);
     if busy {
         return;
     }
@@ -123,47 +113,80 @@ fn feed_byte(usart: &Usart, b: u8) {
 
     match result {
         Some(Ok(DecodeResult::DataContinue(byte))) => {
-            FRAME_BUF.with(|fb| fb.push_decoded_byte(byte));
+            DECODE.with(|ds| {
+                if ds.truncated {
+                    return;
+                }
+                if !ds.locked && !ds.staged {
+                    if !tunnel().try_acquire_or_wipe(SELF_TID, refresh_tid) {
+                        ds.truncated = true;
+                        return;
+                    }
+                    ds.locked = true;
+                }
+                let tun_data = unsafe { tunnel().data_mut() };
+                if ds.write_pos < tun_data.len() {
+                    tun_data[ds.write_pos] = byte;
+                    ds.write_pos += 1;
+                } else {
+                    ds.truncated = true;
+                }
+            });
         }
         Some(Ok(DecodeResult::DataComplete)) => {
-            FRAME_BUF.with(|fb| {
-                let decoded_len = fb.write_pos;
-                let was_truncated = fb.truncated;
-                fb.write_pos = 0;
-                fb.truncated = false;
+            DECODE.with(|ds| {
+                let decoded_len = ds.write_pos;
+                let was_truncated = ds.truncated;
+                ds.write_pos = 0;
+                ds.truncated = false;
 
                 if decoded_len == 0 || was_truncated {
+                    if ds.locked {
+                        tunnel().release();
+                        ds.locked = false;
+                    }
                     return;
                 }
 
-                let type_byte = fb.buf[0];
-                // Shift the body to the front so FRAME_BUF holds just
-                // the body (without the type prefix). This way
-                // fetch_pending_request can read fb.buf[..staged_len]
-                // and get the raw IPC frame without the wire type byte.
-                fb.buf.copy_within(1..decoded_len, 0);
+                let tun_data = unsafe { tunnel().data_mut() };
+                let type_byte = tun_data[0];
+                tun_data.copy_within(1..decoded_len, 0);
                 let body_len = decoded_len - 1;
 
                 match type_byte {
                     rcard_log::wire::TYPE_IPC_REQUEST => {
-                        if stage_ipc_request(usart, &fb.buf[..body_len]) {
-                            fb.staged_len = body_len;
-                            fb.staged = true;
+                        if stage_ipc_request(usart, &tun_data[..body_len]) {
+                            ds.staged_len = body_len;
+                            ds.staged = true;
+                            unsafe { tunnel().set_len(body_len as u32) };
+                            tunnel().transfer(HOST_PROXY_TID);
+                        } else {
+                            tunnel().release();
+                            ds.locked = false;
                         }
                     }
                     rcard_log::wire::TYPE_CONTROL_REQUEST => {
-                        handle_control_request(usart, &fb.buf[..body_len]);
+                        handle_control_request(usart, &tun_data[..body_len]);
+                        tunnel().release();
+                        ds.locked = false;
                     }
-                    _ => {}
+                    _ => {
+                        tunnel().release();
+                        ds.locked = false;
+                    }
                 }
             });
         }
-        Some(Ok(DecodeResult::NoData)) => {
-            // Header byte or idle sentinel — no output yet.
-        }
+        Some(Ok(DecodeResult::NoData)) => {}
         Some(Err(_)) | None => {
-            // Decode error or GlobalState contention — discard.
-            FRAME_BUF.with(|fb| fb.discard());
+            DECODE.with(|ds| {
+                if ds.locked {
+                    tunnel().release();
+                    ds.locked = false;
+                }
+                ds.write_pos = 0;
+                ds.truncated = false;
+            });
         }
     }
 }
@@ -221,7 +244,7 @@ fn stage_ipc_request(usart: &Usart, body: &[u8]) -> bool {
         return false;
     }
 
-    // Data is already in FRAME_BUF (placed by the streaming decoder).
+    // Data is already in the tunnel buffer (placed by the streaming decoder).
     // Wake host_proxy; the caller sets `staged = true`.
     let _ = Reactor::push(
         generated::notifications::GROUP_ID_HOST_REQUEST,
@@ -241,6 +264,66 @@ fn send_tunnel_error(usart: &Usart, seq: u16, code: rcard_usb_proto::messages::T
 }
 
 // ---------------------------------------------------------------------------
+// Streaming COBS encoder — flushes completed blocks to USART
+//
+// COBS encodes a stream of bytes such that 0x00 never appears in the
+// output.  The encoding works in blocks of up to 254 data bytes:
+//
+//   [overhead_byte] [data_0] [data_1] ... [data_N-1]
+//
+// where overhead_byte = N+1 (distance to the next overhead byte or end),
+// and none of data_0..data_N-1 are 0x00.  A 0x00 in the input ends the
+// current block early.  A run of 254 non-zero bytes also ends a block.
+//
+// This encoder buffers a single block (≤255 bytes) and flushes it to
+// the USART when the block is complete.  Total buffer: 255 bytes.
+// ---------------------------------------------------------------------------
+
+static mut COBS_BUF: [u8; 255] = [0u8; 255];
+
+struct StreamingCobsEncoder<'a> {
+    usart: &'a Usart,
+    buf: &'a mut [u8; 255],
+    count: u8,
+}
+
+impl<'a> StreamingCobsEncoder<'a> {
+    fn new(usart: &'a Usart) -> Self {
+        Self {
+            usart,
+            buf: unsafe { &mut *(&raw mut COBS_BUF) },
+            count: 0,
+        }
+    }
+
+    fn flush_block(&mut self, overhead: u8) {
+        self.buf[0] = overhead;
+        let len = 1 + self.count as usize;
+        let _ = self.usart.write(&self.buf[..len]);
+        self.count = 0;
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        for &byte in data {
+            if byte == 0 {
+                self.flush_block(self.count + 1);
+            } else {
+                self.buf[1 + self.count as usize] = byte;
+                self.count += 1;
+                if self.count == 254 {
+                    self.flush_block(0xFF);
+                }
+            }
+        }
+    }
+
+    fn finalize(mut self) {
+        self.flush_block(self.count + 1);
+        let _ = self.usart.write(&[0x00]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HostTransport server impl
 // ---------------------------------------------------------------------------
 
@@ -249,71 +332,44 @@ pub struct LogHostTransport;
 impl HostTransport for LogHostTransport {
     fn fetch_pending_request(
         _meta: ipc::Meta,
-        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
+        _buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> Result<u32, HostTransportError> {
-        FRAME_BUF
-            .with(|fb| {
-                if !fb.staged {
+        DECODE
+            .with(|ds| {
+                if !ds.staged {
                     return Err(HostTransportError::NoPendingRequest);
                 }
-                if buf.len() < fb.staged_len {
-                    return Err(HostTransportError::LeaseTooSmall);
-                }
-                let _ = buf.write_range(0, &fb.buf[..fb.staged_len]);
-                Ok(fb.staged_len as u32)
+                Ok(ds.staged_len as u32)
             })
             .unwrap_or(Err(HostTransportError::NoPendingRequest))
     }
 
     fn deliver_reply(
         _meta: ipc::Meta,
-        buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
+        _buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<(), HostTransportError> {
-        let len = buf.len();
-        if len > MAX_FRAME {
-            return Err(HostTransportError::LeaseTooSmall);
-        }
-
         let Some(usart) = USART.get() else {
             return Err(HostTransportError::WireWriteFailed);
         };
 
-        // COBS-encode the reply ([TYPE_IPC_REPLY || lease data]) directly
-        // into FRAME_BUF, reading the lease in small stack-local chunks.
-        // FRAME_BUF is free at this point — fetch_pending_request already
-        // copied the staged data out.
-        let result = FRAME_BUF.with(|fb| {
-            let mut encoder = cobs::CobsEncoder::new(&mut fb.buf);
+        let tun = tunnel();
+        let len = tun.get_len() as usize;
+        let data = unsafe { &tun.data_ref()[..len] };
 
-            // Type prefix byte.
-            encoder
-                .push(&[rcard_log::wire::TYPE_IPC_REPLY])
-                .map_err(|_| ())?;
+        {
+            let mut encoder = StreamingCobsEncoder::new(usart);
+            encoder.push(&[rcard_log::wire::TYPE_IPC_REPLY]);
+            encoder.push(data);
+            encoder.finalize();
+        }
 
-            // Lease body in 256-byte chunks.
-            let mut scratch = [0u8; 256];
-            let mut offset = 0;
-            while offset < len {
-                let chunk_len = (len - offset).min(256);
-                let _ = buf.read_range(offset, &mut scratch[..chunk_len]);
-                encoder.push(&scratch[..chunk_len]).map_err(|_| ())?;
-                offset += chunk_len;
-            }
-
-            let enc_len = encoder.finalize();
-            let _ = usart.write(&fb.buf[..enc_len]);
-            let _ = usart.write(&[0x00]); // COBS delimiter
-            Ok(())
+        DECODE.with(|ds| {
+            ds.staged = false;
+            ds.staged_len = 0;
+            ds.locked = false;
         });
+        tun.release();
 
-        // Clear the staged flag; dispatch is complete.
-        FRAME_BUF.with(|fb| {
-            fb.staged = false;
-            fb.staged_len = 0;
-        });
-
-        result
-            .unwrap_or(Err(()))
-            .map_err(|_| HostTransportError::WireWriteFailed)
+        Ok(())
     }
 }

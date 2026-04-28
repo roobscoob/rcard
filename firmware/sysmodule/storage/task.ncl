@@ -10,7 +10,7 @@ fun ctx => {
   peers = ["sysmodule_fs"],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 8 },
+    stack = { place = ctx.places.fast, size = 1536 },
     data  = { place = ctx.places.fast },
   },
 }

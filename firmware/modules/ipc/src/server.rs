@@ -90,19 +90,19 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
 
     /// Register a resource dispatcher for a given kind byte.
     pub fn register(&mut self, kind: u8, dispatcher: &'a mut dyn ResourceDispatch) {
-        assert!(
-            !self.dispatchers[..self.count]
-                .iter()
-                .any(|e| matches!(e, Some((k, _)) if *k == kind)),
-            "ipc::Server: duplicate dispatcher registered for kind 0x{:02X}",
-            kind,
-        );
-        assert!(
-            self.count < MAX_RESOURCES,
-            "ipc::Server: MAX_RESOURCES ({}) exceeded",
-            MAX_RESOURCES
-        );
-        self.dispatchers[self.count] = Some((kind, dispatcher));
+        // SAFETY: self.count <= MAX_RESOURCES is maintained by this function.
+        let registered = unsafe { self.dispatchers.get_unchecked(..self.count) };
+        if registered
+            .iter()
+            .any(|e| matches!(e, Some((k, _)) if *k == kind))
+        {
+            crate::__ipc_panic!("ipc::Server: duplicate dispatcher registered for kind {}", kind);
+        }
+        if self.count >= MAX_RESOURCES {
+            crate::__ipc_panic!("ipc::Server: MAX_RESOURCES exceeded");
+        }
+        // SAFETY: self.count < MAX_RESOURCES proven above.
+        unsafe { *self.dispatchers.get_unchecked_mut(self.count) = Some((kind, dispatcher)) };
         self.count += 1;
     }
 

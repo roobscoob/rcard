@@ -38,10 +38,10 @@ pub fn gen_acquire_stmts(m: &ParsedMethod) -> (TokenStream2, TokenStream2) {
                     let __h = #pname.handle;
                     __acq_call.push_arg(&__h);
                     match __acq_call.send_raw() {
-                        Ok((rc, len, retbuf)) => {
+                        Ok((rc, len)) => {
                             rc == ipc::kern::ResponseCode::SUCCESS
                                 && len > 0
-                                && retbuf[0] == 0u8
+                                && unsafe { (&*ipc::ipc_buf())[0] == 0u8 }
                         }
                         _ => false,
                     }

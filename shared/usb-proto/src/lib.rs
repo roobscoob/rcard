@@ -28,6 +28,8 @@ pub use writer::FrameWriter;
 /// Maximum number of lease descriptors per IPC request/reply.
 pub const MAX_LEASES: usize = 4;
 
+pub mod tunnel;
+
 /// Maximum decoded frame size (header + largest payload).
 ///
 /// The largest payload is an IPC request:

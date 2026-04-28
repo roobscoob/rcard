@@ -20,8 +20,8 @@ pub(crate) fn idle() {
 pub fn sys_send(
     target: TaskId,
     operation: u16,
-    outgoing: &[u8],
-    incoming: &mut [u8],
+    buf: &mut [u8],
+    arg_len: usize,
     leases: &mut [Lease<'_>],
 ) -> Result<(ResponseCode, usize), TaskDeath> {
     let target_and_operation = u32::from(target.0) << 16
@@ -29,10 +29,10 @@ pub fn sys_send(
     let ret64 = unsafe {
         sys_send_stub(
             target_and_operation,
-            outgoing.as_ptr(),
-            outgoing.len(),
-            incoming.as_mut_ptr(),
-            incoming.len(),
+            buf.as_ptr(),
+            arg_len,
+            buf.as_mut_ptr(),
+            buf.len(),
             leases.as_mut_ptr().cast(),
             leases.len(),
         )
@@ -48,8 +48,8 @@ pub fn sys_send(
 #[inline(always)]
 pub fn sys_send_to_kernel(
     operation: u16,
-    outgoing: &[u8],
-    incoming: &mut [u8],
+    buf: &mut [u8],
+    arg_len: usize,
     leases: &mut [Lease<'_>],
 ) -> (ResponseCode, usize) {
     let target_and_operation = u32::from(TaskId::KERNEL.0) << 16
@@ -57,10 +57,10 @@ pub fn sys_send_to_kernel(
     let ret64 = unsafe {
         sys_send_stub(
             target_and_operation,
-            outgoing.as_ptr(),
-            outgoing.len(),
-            incoming.as_mut_ptr(),
-            incoming.len(),
+            buf.as_ptr(),
+            arg_len,
+            buf.as_mut_ptr(),
+            buf.len(),
             leases.as_mut_ptr().cast(),
             leases.len(),
         )
