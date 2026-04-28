@@ -21,7 +21,8 @@ pub fn emit(value: &serde_json::Value) -> TokenStream {
 
     quote! {
         const _: () = {
-            #[link_section = ".log_strings"]
+            #[cfg_attr(target_vendor = "apple", link_section = "__DATA,log_strings")]
+            #[cfg_attr(not(target_vendor = "apple"), link_section = ".log_strings")]
             #[used]
             #[allow(non_upper_case_globals)]
             static __log_meta: [u8; #len] = [#(#bytes),*];
