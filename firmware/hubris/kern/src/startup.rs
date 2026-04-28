@@ -11,6 +11,14 @@ use crate::task::Task;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+extern "C" {
+    fn kernel_debug_print(ptr: *const u8, len: usize);
+}
+
+fn klog(msg: &str) {
+    unsafe { kernel_debug_print(msg.as_ptr(), msg.len()) }
+}
+
 /// Tracks when a mutable reference to the task table is floating around in
 /// kernel code, to prevent production of a second one. This forms a sort of
 /// ad-hoc Mutex around the task table.
@@ -44,6 +52,7 @@ pub unsafe fn start_kernel(tick_divisor: u32) -> ! {
     // Set our clock frequency so debuggers can find it as needed
     //
     // Safety: TODO it is not clear that this operation needs to be unsafe.
+    klog("set_clock_freq");
     unsafe {
         crate::arch::set_clock_freq(tick_divisor);
     }
@@ -63,7 +72,7 @@ pub unsafe fn start_kernel(tick_divisor: u32) -> ! {
     // storing them in an architecture-optimized format for this particular MPU,
     // and (2) moving them into RAM where random accesses don't imply wait
     // states.
-
+    klog("init task table");
     // Now, generate the task table.
     // Safety: MaybeUninit<[T]> -> [MaybeUninit<T>] is defined as safe.
     let task_table: &mut [MaybeUninit<Task>; HUBRIS_TASK_COUNT] =
@@ -76,17 +85,21 @@ pub unsafe fn start_kernel(tick_divisor: u32) -> ! {
     let task_table: &mut [Task; HUBRIS_TASK_COUNT] =
         unsafe { &mut *(task_table as *mut _ as *mut _) };
 
+    klog("reinitialize tasks");
     // With that done, set up initial register state etc.
     for task in task_table.iter_mut() {
         crate::arch::reinitialize(task);
     }
 
+    klog("select first task");
     // Great! Pick our first task. We'll act like we're scheduling after the
     // last task, which will cause a scan from 0 on.
     let first_task = crate::task::select(task_table.len() - 1, task_table);
 
+    klog("apply memory protection");
     crate::arch::apply_memory_protection(first_task);
     TASK_TABLE_IN_USE.store(false, Ordering::Release);
+    klog("start_first_task");
     crate::arch::start_first_task(tick_divisor, first_task)
 }
 

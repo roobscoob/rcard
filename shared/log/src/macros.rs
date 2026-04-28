@@ -90,8 +90,12 @@ macro_rules! bind_logger {
         }
 
         #[no_mangle]
+        #[cold]
         fn __rcard_log_start(level: u8, species: u64) -> Option<u64> {
-            fn attempt(lvl: $crate::LogLevel, species: u64) -> core::result::Result<Option<u64>, ()> {
+            fn attempt(
+                lvl: $crate::LogLevel,
+                species: u64,
+            ) -> core::result::Result<Option<u64>, ()> {
                 match <$backend>::start(lvl, species) {
                     Ok(Some(handle)) => {
                         let raw = handle.raw().0;
@@ -114,6 +118,7 @@ macro_rules! bind_logger {
         }
 
         #[no_mangle]
+        #[cold]
         fn __rcard_log_write(handle: u64, data: &[u8]) {
             let h = <$backend>::from_raw(ipc::RawHandle(handle));
             let _ = h.write(data);
@@ -121,6 +126,7 @@ macro_rules! bind_logger {
         }
 
         #[no_mangle]
+        #[cold]
         fn __rcard_log_end(handle: u64) {
             let h = <$backend>::from_raw(ipc::RawHandle(handle));
             drop(h);

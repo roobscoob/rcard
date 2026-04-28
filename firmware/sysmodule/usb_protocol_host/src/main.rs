@@ -69,6 +69,7 @@ enum UsbTunnelState {
     Accumulating,
     Overflowed,
     Staged,
+    Retransmitting,
 }
 
 struct AccumState {
@@ -301,10 +302,11 @@ fn write_tunnel_error(
 fn handle_usb_event(_sender: u16, _code: u32) {
     let Some(ep_out) = EP_OUT.get() else { return };
 
-    // If host_proxy hasn't consumed the previous request yet, don't drain
-    // further USB bytes. The protocol is synchronous so the host won't
-    // send more anyway, and this keeps backpressure clean.
-    let busy = ACCUM.with(|a| a.state == UsbTunnelState::Staged).unwrap_or(false);
+    // If host_proxy hasn't consumed the previous request yet, or a
+    // retransmit is in flight, don't drain further USB bytes.
+    let busy = ACCUM
+        .with(|a| matches!(a.state, UsbTunnelState::Staged | UsbTunnelState::Retransmitting))
+        .unwrap_or(false);
     if busy {
         return;
     }
@@ -459,13 +461,15 @@ fn process_accumulated_frame() -> bool {
             if let Some(tunnel_err) = frame.parse_simple::<rcard_usb_proto::messages::TunnelError>()
             {
                 if tunnel_err.code == rcard_usb_proto::messages::TunnelErrorCode::ReplyCorrupted {
-                    a.state = UsbTunnelState::Idle;
+                    a.state = UsbTunnelState::Retransmitting;
                     a.len = 0;
                     tun.release();
                     info!("host requested reply retransmit");
                     let retransmitted = LAST_SENT
                         .with(|ls| match ls {
                             LastSent::IpcReply => {
+                                // host_proxy will call deliver_reply(),
+                                // which clears Retransmitting → Idle.
                                 let _ = Reactor::push(
                                     notifications::GROUP_ID_HOST_REQUEST,
                                     1,
@@ -478,6 +482,8 @@ fn process_accumulated_frame() -> bool {
                                 if let Some(ep_in) = EP_IN.get() {
                                     let _ = write_usb(ep_in, &buf[..*len]);
                                 }
+                                // Done inline — clear state now.
+                                a.state = UsbTunnelState::Idle;
                                 true
                             }
                             LastSent::None => false,
@@ -485,8 +491,9 @@ fn process_accumulated_frame() -> bool {
                         .unwrap_or(false);
                     if !retransmitted {
                         warn!("retransmit requested but nothing cached");
+                        a.state = UsbTunnelState::Idle;
                     }
-                    return retransmitted;
+                    return false;
                 } else {
                     a.state = UsbTunnelState::Idle;
                     a.len = 0;

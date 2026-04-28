@@ -19,7 +19,7 @@ fun ctx => {
   peers = ["sysmodule_host_proxy"],
   regions = {
     code    = { place = ctx.places.bulk },
-    stack   = { place = ctx.places.fast, size = 1280 },
+    stack   = { place = ctx.places.fast, size = 1536 },
     data    = { place = ctx.places.fast },
     tunnel  = { shared = "tunnel" },
   },

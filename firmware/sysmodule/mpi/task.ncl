@@ -9,7 +9,7 @@ fun ctx => {
   ],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = 1536 },
+    stack = { place = ctx.places.fast, size = 2048 },
     data  = { place = ctx.places.fast },
   },
 }

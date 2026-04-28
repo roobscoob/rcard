@@ -79,6 +79,19 @@ use crate::atomic::AtomicExt;
 use crate::descs::RegionAttributes;
 use crate::startup::with_task_table;
 use crate::task;
+
+extern "C" {
+    fn kernel_debug_print(ptr: *const u8, len: usize);
+    fn kernel_debug_hex(ptr: *const u8, len: usize, val: u32);
+}
+
+fn klog(msg: &str) {
+    unsafe { kernel_debug_print(msg.as_ptr(), msg.len()) }
+}
+
+fn klog_hex(label: &str, val: u32) {
+    unsafe { kernel_debug_hex(label.as_ptr(), label.len(), val) }
+}
 use crate::time::Timestamp;
 use crate::umem::USlice;
 #[cfg(any(armv7m, armv8m))]
@@ -623,6 +636,7 @@ pub fn apply_memory_protection(task: &task::Task) {
 }
 
 pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
+    klog("enable faults + priorities");
     // Enable faults and set fault/exception priorities to reasonable settings.
     // Our goal here is to keep the kernel non-preemptive, which means the
     // kernel entry points (SVCall, PendSV, SysTick, interrupt handlers) must be
@@ -729,6 +743,7 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
         }
     }
 
+    klog("configure systick");
     // Safety: this, too, is safe in practice but unsafe in API.
     unsafe {
         // Configure the timer.
@@ -740,6 +755,7 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
         // Enable counter and interrupt.
         syst.csr.modify(|v| v | 0b111);
     }
+    klog("enable mpu");
     // We are manufacturing authority to interact with the MPU here, because we
     // can't thread a cortex-specific peripheral through an
     // architecture-independent API. This approach might bear revisiting later.
@@ -759,6 +775,7 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
 
     CURRENT_TASK_PTR.store(task as *const _ as *mut _, Ordering::Relaxed);
 
+    klog("write msplim + psp");
     extern "C" {
         // Exposed by the linker script.
         static _stack_base: u32;
@@ -784,6 +801,9 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
         cortex_m::register::psp::write(task.save().psp);
     }
 
+    klog_hex("task psp=", task.save().psp);
+    klog_hex("task pc=", task.descriptor().entry_point);
+    klog("svc");
     // Run the final pre-kernel assembly sequence to set up the kernel
     // environment!
     //

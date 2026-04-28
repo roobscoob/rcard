@@ -92,7 +92,7 @@ fn approx_cos(x: f32) -> f32 {
 
 fn spawn_star(rng: &mut Xorshift32) -> Star {
     let angle = (rng.next() as f32) * (6.2831853 / 4294967296.0);
-    let r = (rng.next() % 1200) as f32 * 0.01; // 0–12 px radius
+    let r = (rng.next() % 1199 + 1) as f32 * 0.01;
     Star {
         x: CX + r * approx_cos(angle),
         y: CY + r * approx_sin(angle),
@@ -206,9 +206,6 @@ fn main() -> ! {
     }
 
     let mut fb = [0u8; FB_SIZE];
-    let mut contrast: u8 = 0;
-    let mut frame_count: u32 = 0;
-    let mut going_up = true;
     let mut fps: u32 = 0;
     let mut fps_frames: u32 = 0;
     let mut fps_last = userlib::sys_get_timer().now;
@@ -238,7 +235,6 @@ fn main() -> ! {
         }
 
         blit_charm(&mut fb);
-        draw_number(&mut fb, 1, 1, contrast as u32);
 
         let fps_digits = if fps == 0 { 1usize } else {
             let mut n = fps;
@@ -250,30 +246,14 @@ fn main() -> ! {
 
         let _ = display.draw(&fb);
 
-        frame_count += 1;
         fps_frames += 1;
         let now = userlib::sys_get_timer().now;
         if now - fps_last >= 1000 {
             fps = fps_frames;
             fps_frames = 0;
             fps_last = now;
+            info!("fps: {}", fps);
         }
 
-        if frame_count % 4 == 0 {
-            if going_up {
-                if contrast == 255 {
-                    going_up = false;
-                } else {
-                    contrast += 1;
-                }
-            } else {
-                if contrast == 0 {
-                    going_up = true;
-                } else {
-                    contrast -= 1;
-                }
-            }
-            let _ = display.set_contrast(contrast);
-        }
     }
 }

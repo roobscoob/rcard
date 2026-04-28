@@ -103,7 +103,7 @@ async fn read_loop(
     frame_tx: mpsc::Sender<Frame>,
     mut control_rx: mpsc::Receiver<TapControl>,
 ) {
-    eprintln!("[tap] read_loop started");
+    // eprintln!("[tap] read_loop started");
     let mut reader = BufReader::new(reader);
     let mut noise = Vec::new();
     let mut prev_was_7e = false;
@@ -114,10 +114,10 @@ async fn read_loop(
             ctrl = control_rx.recv() => {
                 match ctrl {
                     Some(TapControl::ResyncOnSentinel { sentinel, done }) => {
-                        eprintln!(
-                            "[tap] resync requested, sentinel={:02x?} ({} bytes), flushing {} noise bytes",
-                            sentinel, sentinel.len(), noise.len()
-                        );
+                        // eprintln!(
+                        //     "[tap] resync requested, sentinel={:02x?} ({} bytes), flushing {} noise bytes",
+                        //     sentinel, sentinel.len(), noise.len()
+                        // );
                         // Flush any accumulated noise before entering resync.
                         if !noise.is_empty() {
                             let _ = passthrough_tx.send(std::mem::take(&mut noise)).await;
@@ -127,10 +127,10 @@ async fn read_loop(
                             .await
                             .is_err()
                         {
-                            eprintln!("[tap] resync_on_sentinel failed (read error), exiting");
+                            // eprintln!("[tap] resync_on_sentinel failed (read error), exiting");
                             return;
                         }
-                        eprintln!("[tap] resync complete, resuming normal framing");
+                        // eprintln!("[tap] resync complete, resuming normal framing");
                         let _ = done.send(());
                         continue;
                     }
@@ -157,42 +157,42 @@ async fn read_loop(
             // Start marker found. The 0x7E we held back is part of the
             // marker, not noise — don't include it.
             prev_was_7e = false;
-            eprintln!("[tap] frame start marker 0x[7e79] detected");
+            // eprintln!("[tap] frame start marker 0x[7e79] detected");
 
             // Flush any accumulated noise to passthrough.
             if !noise.is_empty() {
-                if noise.len() <= 16 {
-                    eprintln!(
-                        "[tap] flushing {} noise bytes before frame: {:02x?}",
-                        noise.len(),
-                        noise
-                    );
-                } else {
-                    eprintln!(
-                        "[tap] flushing {} noise bytes before frame: {:02x?}...",
-                        noise.len(),
-                        &noise[..16]
-                    );
-                }
+                // if noise.len() <= 16 {
+                //     eprintln!(
+                //         "[tap] flushing {} noise bytes before frame: {:02x?}",
+                //         noise.len(),
+                //         noise
+                //     );
+                // } else {
+                //     eprintln!(
+                //         "[tap] flushing {} noise bytes before frame: {:02x?}...",
+                //         noise.len(),
+                //         &noise[..16]
+                //     );
+                // }
                 let _ = passthrough_tx.send(std::mem::take(&mut noise)).await;
             }
 
             // Read the rest of the frame (length, header, payload).
             match read_frame_body(&mut reader).await {
                 Ok(frame) => {
-                    if frame.payload().len() <= 16 {
-                        eprintln!(
-                            "[tap] frame complete, {} payload bytes: {:02x?}",
-                            frame.payload().len(),
-                            frame.payload()
-                        );
-                    } else {
-                        eprintln!(
-                            "[tap] frame complete, {} payload bytes: {:02x?}...",
-                            frame.payload().len(),
-                            &frame.payload()[..16]
-                        );
-                    }
+                    // if frame.payload().len() <= 16 {
+                    //     eprintln!(
+                    //         "[tap] frame complete, {} payload bytes: {:02x?}",
+                    //         frame.payload().len(),
+                    //         frame.payload()
+                    //     );
+                    // } else {
+                    //     eprintln!(
+                    //         "[tap] frame complete, {} payload bytes: {:02x?}...",
+                    //         frame.payload().len(),
+                    //         &frame.payload()[..16]
+                    //     );
+                    // }
                     let _ = frame_tx.send(frame).await;
                 }
                 Err(e) => {
@@ -202,11 +202,11 @@ async fn read_loop(
         } else {
             if prev_was_7e {
                 // The previous 0x7E was not a start marker — it's noise.
-                eprintln!("[tap] false 7e (followed by {:02x}), pushing to noise", b);
+                // eprintln!("[tap] false 7e (followed by {:02x}), pushing to noise", b);
                 noise.push(0x7E);
             }
             if b == 0x7E {
-                eprintln!("[tap] holding 7e (possible start marker)");
+                // eprintln!("[tap] holding 7e (possible start marker)");
                 prev_was_7e = true;
             } else {
                 prev_was_7e = false;
@@ -218,34 +218,34 @@ async fn read_loop(
         // next read will actually go to the OS), so passthrough stays
         // responsive without flushing on every single byte.
         if !noise.is_empty() && reader.buffer().is_empty() {
-            if noise.len() <= 16 {
-                eprintln!(
-                    "[tap] flushing {} noise bytes (buffer drained, prev_7e={}): {:02x?}",
-                    noise.len(),
-                    prev_was_7e,
-                    noise,
-                );
-            } else {
-                eprintln!(
-                    "[tap] flushing {} noise bytes (buffer drained, prev_7e={}): {:02x?}...",
-                    noise.len(),
-                    prev_was_7e,
-                    &noise[..16],
-                );
-            }
+            // if noise.len() <= 16 {
+            //     eprintln!(
+            //         "[tap] flushing {} noise bytes (buffer drained, prev_7e={}): {:02x?}",
+            //         noise.len(),
+            //         prev_was_7e,
+            //         noise,
+            //     );
+            // } else {
+            //     eprintln!(
+            //         "[tap] flushing {} noise bytes (buffer drained, prev_7e={}): {:02x?}...",
+            //         noise.len(),
+            //         prev_was_7e,
+            //         &noise[..16],
+            //     );
+            // }
             let _ = passthrough_tx.send(std::mem::take(&mut noise)).await;
         }
     }
 
     // Flush any remaining noise on exit.
     if !noise.is_empty() {
-        eprintln!(
-            "[tap] flushing {} remaining noise bytes on exit",
-            noise.len()
-        );
+        // eprintln!(
+        //     "[tap] flushing {} remaining noise bytes on exit",
+        //     noise.len()
+        // );
         let _ = passthrough_tx.send(noise).await;
     }
-    eprintln!("[tap] read_loop exited");
+    // eprintln!("[tap] read_loop exited");
 }
 
 /// Sentinel-resync sub-loop.
@@ -405,8 +405,16 @@ impl DebugHandle {
     }
 
     /// Read `count` 32-bit words starting at `addr`.
-    pub async fn mem_read(&self, poison_gen: u64, addr: u32, count: u16) -> Result<Vec<u32>, Error> {
-        match self.request(poison_gen, &Command::MemRead { addr, count }).await? {
+    pub async fn mem_read(
+        &self,
+        poison_gen: u64,
+        addr: u32,
+        count: u16,
+    ) -> Result<Vec<u32>, Error> {
+        match self
+            .request(poison_gen, &Command::MemRead { addr, count })
+            .await?
+        {
             Response::MemRead(words) => Ok(words),
             _ => Err(Error::Protocol(
                 super::protocol::ProtocolError::UnexpectedResponse("MemRead"),
@@ -416,7 +424,10 @@ impl DebugHandle {
 
     /// Write 32-bit words to `addr`.
     pub async fn mem_write(&self, poison_gen: u64, addr: u32, data: &[u32]) -> Result<(), Error> {
-        match self.request(poison_gen, &Command::MemWrite { addr, data }).await? {
+        match self
+            .request(poison_gen, &Command::MemWrite { addr, data })
+            .await?
+        {
             Response::MemWrite => Ok(()),
             _ => Err(Error::Protocol(
                 super::protocol::ProtocolError::UnexpectedResponse("MemWrite"),

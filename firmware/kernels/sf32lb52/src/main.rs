@@ -61,15 +61,15 @@ pub unsafe fn apply_pin_config() {
     // PA07 -> atim1 ch1 (FSEL=5, pull=down)
     rmw(0x5000_3050, 0x7F, 0x15);
     rmw(0x5000_B078, 0x3F, 0x07); // PINR: atim1 ch1 = PA07
-    // PA08 -> haptic_en gpio out (FSEL=0, pull=down)
+                                  // PA08 -> haptic_en gpio out (FSEL=0, pull=down)
     rmw(0x5000_3054, 0x7F, 0x10);
     // PA09 -> usart2 tx (FSEL=4, pull=down)
     rmw(0x5000_3058, 0x7F, 0x14);
     rmw(0x5000_B05C, 0x3F, 0x09); // PINR: usart2 tx = PA09
-    // PA10 -> usart2 rx (FSEL=4, pull=up, IE)
+                                  // PA10 -> usart2 rx (FSEL=4, pull=up, IE)
     rmw(0x5000_305C, 0x7F, 0x74);
     rmw(0x5000_B05C, 0x3F00, 0x0A00); // PINR: usart2 rx = PA10
-    // PA12 -> mpi2 cs (FSEL=1, pull=up)
+                                      // PA12 -> mpi2 cs (FSEL=1, pull=up)
     rmw(0x5000_3064, 0x7F, 0x31);
     // PA13 -> mpi2 dio1 (FSEL=1, pull=down, IE)
     rmw(0x5000_3068, 0x7F, 0x51);
@@ -84,10 +84,10 @@ pub unsafe fn apply_pin_config() {
     // PA18 -> usart1 rx (FSEL=4, pull=up, IE)
     rmw(0x5000_307C, 0x7F, 0x74);
     rmw(0x5000_B058, 0x3F00, 0x1200); // PINR: usart1 rx = PA18
-    // PA19 -> usart1 tx (FSEL=4, pull=none)
+                                      // PA19 -> usart1 tx (FSEL=4, pull=none)
     rmw(0x5000_3080, 0x7F, 0x04);
     rmw(0x5000_B058, 0x3F, 0x13); // PINR: usart1 tx = PA19
-    // PA24 -> spi1 dio (FSEL=2, pull=down)
+                                  // PA24 -> spi1 dio (FSEL=2, pull=down)
     rmw(0x5000_3094, 0x7F, 0x12);
     // PA25 -> i2s1 sdo (FSEL=3, pull=down)
     rmw(0x5000_3098, 0x7F, 0x13);
@@ -100,16 +100,16 @@ pub unsafe fn apply_pin_config() {
     // PA30 -> i2c3 sda (FSEL=4, pull=down, IE)
     rmw(0x5000_30AC, 0x7F, 0x54);
     rmw(0x5000_B050, 0x3F00, 0x1E00); // PINR: i2c3 sda = PA30
-    // PA31 -> i2c3 scl (FSEL=4, pull=down, IE)
+                                      // PA31 -> i2c3 scl (FSEL=4, pull=down, IE)
     rmw(0x5000_30B0, 0x7F, 0x54);
     rmw(0x5000_B050, 0x3F, 0x1F); // PINR: i2c3 scl = PA31
-    // PA32 -> i2c2 sda (FSEL=4, pull=down, IE)
+                                  // PA32 -> i2c2 sda (FSEL=4, pull=down, IE)
     rmw(0x5000_30B4, 0x7F, 0x54);
     rmw(0x5000_B04C, 0x3F00, 0x2000); // PINR: i2c2 sda = PA32
-    // PA33 -> i2c2 scl (FSEL=4, pull=down, IE)
+                                      // PA33 -> i2c2 scl (FSEL=4, pull=down, IE)
     rmw(0x5000_30B8, 0x7F, 0x54);
     rmw(0x5000_B04C, 0x3F, 0x21); // PINR: i2c2 scl = PA33
-    // PA37 -> spi2 dio (FSEL=2, pull=down)
+                                  // PA37 -> spi2 dio (FSEL=2, pull=down)
     rmw(0x5000_30C8, 0x7F, 0x12);
     // PA38 -> spi2 di (FSEL=2, pull=down, IE)
     rmw(0x5000_30CC, 0x7F, 0x52);
@@ -120,10 +120,10 @@ pub unsafe fn apply_pin_config() {
     // PA41 -> i2c1 scl (FSEL=4, pull=up, IE)
     rmw(0x5000_30D8, 0x7F, 0x74);
     rmw(0x5000_B048, 0x3F, 0x29); // PINR: i2c1 scl = PA41
-    // PA42 -> i2c1 sda (FSEL=4, pull=up, IE)
+                                  // PA42 -> i2c1 sda (FSEL=4, pull=up, IE)
     rmw(0x5000_30DC, 0x7F, 0x74);
     rmw(0x5000_B048, 0x3F00, 0x2A00); // PINR: i2c1 sda = PA42
-    // PA43 -> accel_int gpio in (FSEL=0, pull=down, IE)
+                                      // PA43 -> accel_int gpio in (FSEL=0, pull=down, IE)
     rmw(0x5000_30E0, 0x7F, 0x50);
     // PA44 -> nfc_int gpio in (FSEL=0, pull=down, IE)
     rmw(0x5000_30E4, 0x7F, 0x50);
@@ -190,6 +190,22 @@ fn usart1_write_u32_hex(label: &str, val: u32) {
 }
 
 const TICK_ZERO: &str = "T0000000000000000 ";
+
+#[no_mangle]
+pub extern "C" fn kernel_debug_print(ptr: *const u8, len: usize) {
+    usart1_write_str(TICK_ZERO);
+    usart1_write_str("hubris: ");
+    usart1_write_bytes(unsafe { core::slice::from_raw_parts(ptr, len) });
+    usart1_write_str("\r\n");
+}
+
+#[no_mangle]
+pub extern "C" fn kernel_debug_hex(ptr: *const u8, len: usize, val: u32) {
+    usart1_write_str(TICK_ZERO);
+    usart1_write_str("hubris: ");
+    usart1_write_bytes(unsafe { core::slice::from_raw_parts(ptr, len) });
+    usart1_write_u32_hex("0x", val);
+}
 
 fn clock_setup() -> u32 {
     use sifli_pac::hpsys_rcc::vals::SelSys;

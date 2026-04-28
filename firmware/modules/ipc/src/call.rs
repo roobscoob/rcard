@@ -166,8 +166,10 @@ impl<'a> IpcCall<'a> {
     #[inline]
     pub fn push_arg<T: serde::Serialize>(&mut self, val: &T) {
         let full = unsafe { &mut *ipc_buf() };
-        let written = crate::__postcard::to_slice(val, &mut full[self.arglen..])
-            .expect("ipc: IpcCall argbuf overflow");
+        let written = match crate::__postcard::to_slice(val, &mut full[self.arglen..]) {
+            Ok(s) => s,
+            Err(_) => crate::__ipc_panic!("ipc: argbuf overflow"),
+        };
         self.arglen += written.len();
     }
 
@@ -180,22 +182,14 @@ impl<'a> IpcCall<'a> {
 
     #[inline]
     pub fn add_read_lease(&mut self, data: &'a [u8]) {
-        assert!(
-            self.lease_count < MAX_LEASES,
-            "ipc: too many leases (max {})",
-            MAX_LEASES
-        );
+        debug_assert!(self.lease_count < MAX_LEASES);
         self.leases[self.lease_count] = Some(kern::Lease::read_only(data));
         self.lease_count += 1;
     }
 
     #[inline]
     pub fn add_write_lease(&mut self, data: &'a mut [u8]) {
-        assert!(
-            self.lease_count < MAX_LEASES,
-            "ipc: too many leases (max {})",
-            MAX_LEASES
-        );
+        debug_assert!(self.lease_count < MAX_LEASES);
         self.leases[self.lease_count] = Some(kern::Lease::read_write(data));
         self.lease_count += 1;
     }

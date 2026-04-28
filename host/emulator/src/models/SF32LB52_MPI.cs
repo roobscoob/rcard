@@ -3,15 +3,19 @@
 // Emulates the MPI peripheral with a backing NOR flash store.
 // Implements the subset of SPI NOR commands used by the firmware:
 //   0x06 Write Enable
-//   0x05 Read Status Register 1 (WIP polling)
+//   0x05 Read Status Register 1 / 0x35 Read Status Register 2
 //   0x03 Read Data
 //   0x0B Fast Read
 //   0x9F Read JEDEC ID
+//   0x5A Read SFDP
 //   0x02 Page Program (256-byte pages)
 //   0x20 Sector Erase 4K
 //   0x52 Block Erase 32K
 //   0xD8 Block Erase 64K
 //   0xC7 Chip Erase
+//   0xAB Release Deep Power-Down
+//   0x66/0x99 Reset Enable / Reset
+//   0xB7/0xE9 Enter/Exit 4-Byte Address Mode
 
 using System;
 using System.Collections.Generic;
@@ -81,11 +85,80 @@ namespace Antmicro.Renode.Peripherals.SPI
         private const byte CMD_BLOCK_ERASE_32K = 0x52;
         private const byte CMD_BLOCK_ERASE_64K = 0xD8;
         private const byte CMD_CHIP_ERASE     = 0xC7;
+        private const byte CMD_SFDP           = 0x5A;
+        private const byte CMD_READ_STATUS_2  = 0x35;
+        private const byte CMD_RELEASE_DPD    = 0xAB;
+        private const byte CMD_RESET_ENABLE   = 0x66;
+        private const byte CMD_RESET          = 0x99;
+        private const byte CMD_ENTER_4BYTE    = 0xB7;
+        private const byte CMD_EXIT_4BYTE     = 0xE9;
 
         // GD25Q256EWIGR JEDEC ID
         private const byte JEDEC_MANUFACTURER = 0xC8; // GigaDevice
         private const byte JEDEC_MEMORY_TYPE  = 0x65;
         private const byte JEDEC_CAPACITY     = 0x19; // 32MB
+
+        // SFDP table for a GD25Q256E-like chip (32 MB, 3/4-byte addressing,
+        // single-line reads only).  Layout:
+        //   0x00  8-byte SFDP global header
+        //   0x08  8-byte parameter header (BFPT)
+        //   0x10  64-byte BFPT body (16 DWORDs)
+        private static readonly byte[] SfdpTable = BuildSfdpTable();
+
+        private static byte[] BuildSfdpTable()
+        {
+            var t = new byte[0x10 + 64]; // header + PH + BFPT body
+
+            // --- SFDP global header (8 bytes at 0x00) ---
+            t[0] = 0x53; // 'S'
+            t[1] = 0x46; // 'F'
+            t[2] = 0x44; // 'D'
+            t[3] = 0x50; // 'P'
+            t[4] = 0x06; // minor rev (JESD216B)
+            t[5] = 0x01; // major rev
+            t[6] = 0x00; // NPH-1 = 0 → 1 parameter header
+            t[7] = 0xFF; // access protocol (legacy SPI)
+
+            // --- Parameter header 0: BFPT (8 bytes at 0x08) ---
+            t[0x08] = 0x00; // ID LSB (BFPT = 0xFF00, LSB = 0x00)
+            t[0x09] = 0x06; // minor version
+            t[0x0A] = 0x01; // major version
+            t[0x0B] = 0x10; // length = 16 DWORDs
+            t[0x0C] = 0x10; // pointer low byte (BFPT body at 0x000010)
+            t[0x0D] = 0x00; // pointer mid
+            t[0x0E] = 0x00; // pointer high
+            t[0x0F] = 0xFF; // ID MSB (BFPT = 0xFF00)
+
+            // --- BFPT body (16 DWORDs = 64 bytes at 0x10) ---
+            int bp = 0x10;
+
+            // DWORD 1: erase/address/fast-read support bits
+            //   bits 1:0  = 01  (4KB erase supported, opcode in bits 15:8)
+            //   bit 2     = 1   (write granularity ≥ 64 bytes)
+            //   bits 15:8 = 0x20 (4KB erase opcode)
+            //   bits 18:17 = 01 (supports 3-byte and 4-byte addressing)
+            //   bits 22:19 = 0  (no multi-lane fast-read in emulation)
+            uint dw1 = 0x00022005;
+            WriteDword(t, bp + 0, dw1);
+
+            // DWORD 2: density — 32 MB = 256 Mbit = 0x0FFF_FFFF (bits, minus 1)
+            uint dw2 = (uint)(32 * 1024 * 1024 * 8 - 1); // 0x0FFFFFFF
+            WriteDword(t, bp + 4, dw2);
+
+            // DWORDs 3-16: zero is fine — driver treats missing fast-read
+            // triples as "not supported" and falls back to single-line.
+            // DWORD 15 (index 14) QER field: bits 22:20 = 0 → QER::None.
+
+            return t;
+        }
+
+        private static void WriteDword(byte[] buf, int offset, uint value)
+        {
+            buf[offset + 0] = (byte)(value);
+            buf[offset + 1] = (byte)(value >> 8);
+            buf[offset + 2] = (byte)(value >> 16);
+            buf[offset + 3] = (byte)(value >> 24);
+        }
 
         // -----------------------------------------------------------------
         // CCR1 field extraction
@@ -186,6 +259,37 @@ namespace Antmicro.Renode.Peripherals.SPI
                     for(int i = 0; i < flash.Length; i++)
                         flash[i] = 0xFF;
                     writeEnabled = false;
+                    SetTransferComplete();
+                    break;
+
+                case CMD_SFDP:
+                    {
+                        uint addr = ar1Value;
+                        for(int i = 0; i < dataLen; i += 4)
+                        {
+                            uint word = 0;
+                            for(int b = 0; b < 4 && (i + b) < dataLen; b++)
+                            {
+                                uint byteAddr = addr + (uint)(i + b);
+                                byte val = (byteAddr < SfdpTable.Length) ? SfdpTable[byteAddr] : (byte)0xFF;
+                                word |= (uint)val << (b * 8);
+                            }
+                            rxFifo.Enqueue(word);
+                        }
+                        SetTransferComplete();
+                    }
+                    break;
+
+                case CMD_READ_STATUS_2:
+                    rxFifo.Enqueue(0x00);
+                    SetTransferComplete();
+                    break;
+
+                case CMD_RELEASE_DPD:
+                case CMD_RESET_ENABLE:
+                case CMD_RESET:
+                case CMD_ENTER_4BYTE:
+                case CMD_EXIT_4BYTE:
                     SetTransferComplete();
                     break;
 
