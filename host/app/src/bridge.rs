@@ -271,9 +271,13 @@ pub enum Event {
 ///   0 = Resetting, 1 = WritingStub, 2 = VerifyingStub, 3 = BootingStub,
 ///   4 = Erasing, 5 = Programming, 6 = Verifying
 pub enum FlashPhase {
-    /// Step 0: Attempting to reset the device via SifliDebug.
+    /// Step 0a: Attempting to reset the device via SifliDebug.
     Resetting,
-    /// Step 0: Auto-reset failed — asking the user to reset manually.
+    /// Step 0b: SifliDebug failed, attempting reset via IPC
+    /// (`Device::reset()`). Requires an active IPC transport.
+    ResettingViaIpc,
+    /// Step 0c: All auto-reset attempts failed — asking the user to
+    /// reset manually.
     WaitingForReset,
     /// Step 1: Writing stub firmware to RAM.
     WritingStub {
@@ -365,6 +369,69 @@ fn get_or_create_persistent_device(
     id
 }
 
+/// Resolve a `(ChipUid, session_id)` to a `DeviceId` with a live
+/// `BridgeDevice`. If the session changed (or no device exists yet),
+/// the old `BridgeDevice` is evicted and a fresh one is created.
+///
+/// Returns `(device_id, evicted)` — `evicted` is true when a stale
+/// device was replaced, so callers know adapter handles were revoked.
+fn resolve_device_for_session(
+    uid: ChipUid,
+    session_id: [u8; 16],
+    persistent_devices: &Mutex<HashMap<ChipUid, DeviceId>>,
+    next_device_id: &AtomicU64,
+    bridge_devices: &Mutex<HashMap<DeviceId, BridgeDevice>>,
+    tx: &crossbeam_channel::Sender<Event>,
+) -> (DeviceId, bool) {
+    let device_id = get_or_create_persistent_device(
+        uid,
+        format!("Device {uid}"),
+        None,
+        persistent_devices,
+        next_device_id,
+        tx,
+    );
+
+    let mut devs = bridge_devices.lock().unwrap();
+    let needs_fresh = match devs.get(&device_id) {
+        None => true,
+        Some(dev) if dev.session_id == [0; 16] => {
+            // Existing device has unknown session — update it in place.
+            false
+        }
+        Some(dev) if session_id == [0; 16] => {
+            // Caller has unknown session — don't evict.
+            false
+        }
+        Some(dev) if dev.session_id == session_id => false,
+        Some(_) => true,
+    };
+
+    if needs_fresh {
+        devs.remove(&device_id);
+        devs.insert(
+            device_id,
+            BridgeDevice {
+                device: Box::new(device::physical::PhysicalDevice::new()),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                handles: vec![],
+                session_id,
+            },
+        );
+        (device_id, true)
+    } else {
+        // Update the session if we know it and the device doesn't yet.
+        if session_id != [0; 16] {
+            if let Some(dev) = devs.get_mut(&device_id) {
+                if dev.session_id == [0; 16] {
+                    dev.session_id = session_id;
+                }
+            }
+        }
+        (device_id, false)
+    }
+}
+
 // ── Bridge state ───────────────────────────────────────────────────────
 
 /// A device owned by the bridge. The device is a trait object —
@@ -377,6 +444,10 @@ pub(crate) struct BridgeDevice {
     /// is managed externally (e.g. serial connect loops). Handles can be
     /// revoked by the adapter without dropping the BridgeDevice.
     handles: Vec<device::handle::AdapterHandle>,
+    /// Session ID from the device's current boot. All-zeros means unknown
+    /// (e.g. emulator, old firmware, TRNG failure). Transports compare
+    /// against this to detect reboots.
+    session_id: [u8; 16],
 }
 
 impl BridgeDevice {
@@ -399,7 +470,10 @@ impl BridgeDevice {
     pub(crate) fn query_all_capabilities(
         &self,
         type_id: std::any::TypeId,
-    ) -> Vec<(device::adapter::AdapterId, Arc<dyn std::any::Any + Send + Sync>)> {
+    ) -> Vec<(
+        device::adapter::AdapterId,
+        Arc<dyn std::any::Any + Send + Sync>,
+    )> {
         let mut out: Vec<_> = self
             .handles
             .iter()
@@ -414,6 +488,16 @@ impl BridgeDevice {
         out.extend(self.device.query_all_capabilities(type_id));
         out
     }
+}
+
+fn has_ipc(
+    bridge_devices: &Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
+    device_id: DeviceId,
+) -> bool {
+    let devs = bridge_devices.lock().unwrap();
+    devs.get(&device_id)
+        .and_then(|bd| crate::ipc::pick(bd))
+        .is_some()
 }
 
 struct BridgeSerial {
@@ -475,8 +559,6 @@ pub async fn run(
     let flash_generation: Arc<std::sync::atomic::AtomicU64> =
         Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    let (usb_rebind_tx, usb_rebind_rx) = mpsc::unbounded_channel::<UsbRebind>();
-
     // Spawn the native-USB supervisor. Owns attach/detach lifecycle for
     // all rcard fobs enumerated over native USB. Uses polling today
     // (nusb 0.1); swap the discovery function for `nusb::watch_devices`
@@ -488,7 +570,6 @@ pub async fn run(
         persistent_devices.clone(),
         next_device_id.clone(),
         flash_wait_usb.clone(),
-        usb_rebind_rx,
     ));
 
     while let Some(cmd) = cmd_rx.recv().await {
@@ -564,6 +645,7 @@ pub async fn run(
                                         device: Box::new(dev),
                                         cancel: task_cancel.clone(),
                                         handles: vec![],
+                                        session_id: [0; 16],
                                     },
                                 );
 
@@ -684,7 +766,6 @@ pub async fn run(
                     usart1_settling.clone(),
                     cmd_tx.clone(),
                     usart2_sender.clone(),
-                    usb_rebind_tx.clone(),
                 ));
 
                 serials.insert(
@@ -1117,7 +1198,6 @@ async fn serial_connect_loop(
     // once `Usart2::connect` succeeds so `ProbeMoshiMoshi` can find the
     // wire even before an Awake identifies the device. Unused by USART1.
     usart2_sender: Arc<Mutex<Option<Arc<serial::SerialSender>>>>,
-    usb_rebind_tx: mpsc::UnboundedSender<UsbRebind>,
 ) {
     match adapter_type {
         SerialAdapterType::Usart1 => {
@@ -1129,6 +1209,7 @@ async fn serial_connect_loop(
                 cancel,
                 persistent_devices,
                 next_device_id,
+                bridge_devices,
                 pending_flash,
                 flash_notify,
                 flash_wait_usb,
@@ -1149,7 +1230,6 @@ async fn serial_connect_loop(
                 next_device_id,
                 bridge_devices,
                 usart2_sender,
-                usb_rebind_tx.clone(),
             )
             .await;
         }
@@ -1189,6 +1269,7 @@ async fn usart1_connect_loop(
     cancel: tokio_util::sync::CancellationToken,
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
+    bridge_devices: Arc<Mutex<HashMap<DeviceId, BridgeDevice>>>,
     pending_flash: Arc<Mutex<HashMap<DeviceId, PendingFlash>>>,
     flash_notify: Arc<tokio::sync::Notify>,
     flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
@@ -1239,7 +1320,7 @@ async fn usart1_connect_loop(
 
         let _ = tx.send(Event::AdapterCreated {
             adapter_id,
-            display_name: format!("USART1 ({})", port),
+            display_name: "USART1".into(),
             // USART1 carries SifliDebug, not IPC.
             ipc_transport: None,
         });
@@ -1305,6 +1386,7 @@ async fn usart1_connect_loop(
             &next_device_id,
             &ctx,
         );
+        let mut current_session_id: Option<[u8; 16]> = None;
         if current_device.is_some() {
             let _ = tx.send(Event::SerialStatus {
                 index,
@@ -1376,11 +1458,18 @@ async fn usart1_connect_loop(
                                     eprintln!("[usart1:{port}] tap resync complete");
                                 }
                                 Err(serial::sifli_debug::Error::Timeout) => {
-                                    eprintln!("[usart1:{port}] auto-reset didn't trigger SFBL within 1s — asking user to reset manually");
+                                    eprintln!("[usart1:{port}] auto-reset didn't trigger SFBL within 1s");
                                     if let Some(dev_id) = current_device {
+                                        let phase = if has_ipc(&bridge_devices, dev_id) {
+                                            eprintln!("[usart1:{port}] trying IPC Device::reset() fallback");
+                                            FlashPhase::ResettingViaIpc
+                                        } else {
+                                            eprintln!("[usart1:{port}] no IPC available — asking user to reset manually");
+                                            FlashPhase::WaitingForReset
+                                        };
                                         let _ = tx.send(Event::FlashProgress {
                                             device_id: dev_id,
-                                            phase: FlashPhase::WaitingForReset,
+                                            phase,
                                         });
                                         ctx.request_repaint();
                                     }
@@ -1392,11 +1481,18 @@ async fn usart1_connect_loop(
                             }
                         }
                         None => {
-                            eprintln!("[usart1:{port}] auto-reset failed — asking user to reset manually");
+                            eprintln!("[usart1:{port}] SifliDebug acquire failed");
                             if let Some(dev_id) = current_device {
+                                let phase = if has_ipc(&bridge_devices, dev_id) {
+                                    eprintln!("[usart1:{port}] trying IPC Device::reset() fallback");
+                                    FlashPhase::ResettingViaIpc
+                                } else {
+                                    eprintln!("[usart1:{port}] no IPC available — asking user to reset manually");
+                                    FlashPhase::WaitingForReset
+                                };
                                 let _ = tx.send(Event::FlashProgress {
                                     device_id: dev_id,
-                                    phase: FlashPhase::WaitingForReset,
+                                    phase,
                                 });
                                 ctx.request_repaint();
                             }
@@ -1575,68 +1671,49 @@ async fn usart1_connect_loop(
                     // another device mid-session, etc.), detach the old
                     // adapter attachment and rebind. Same-DeviceId is a
                     // silent no-op: repeated MoshiMoshi pings change nothing.
-                    if let Some((uid_bytes, build_id_bytes)) = parse_hello_line(&line) {
+                    if let Some((uid_bytes, build_id_bytes, session_id)) =
+                        parse_hello_line(&line)
+                    {
                         let chip_uid = ChipUid(uid_bytes);
-
-                        // Get-or-mint the persistent DeviceId for this UID.
-                        // Shared registry with USART2/USB, so the same chip
-                        // always resolves to the same id regardless of which
-                        // transport identified it first.
-                        let persistent_id = get_or_create_persistent_device(
+                        let (dev_id, evicted) = resolve_device_for_session(
                             chip_uid,
-                            format!("Device {chip_uid}"),
-                            None,
+                            session_id,
                             &persistent_devices,
                             &next_device_id,
+                            &bridge_devices,
                             &tx,
                         );
 
-                        if current_device != Some(persistent_id) {
-                            // Unbind from prior device — it was wrong (or
-                            // ephemeral). The adapter persists; only the
-                            // binding changes.
+                        if evicted || current_device != Some(dev_id) {
                             if let Some(old_id) = current_device.take() {
-                                eprintln!(
-                                    "[usart1:{port}] discovery: hello uid {chip_uid} \
-                                    supersedes bound {old_id:?}, rebinding"
-                                );
                                 let _ = tx.send(Event::AdapterUnbound {
                                     adapter_id,
                                     device_id: old_id,
                                 });
                             }
-
                             eprintln!(
                                 "[usart1:{port}] discovery: identified device \
-                                {chip_uid} ({persistent_id:?}) via hello"
+                                {chip_uid} ({dev_id:?}) via hello"
                             );
-
-                            // Bind this adapter to the persistent device.
                             let _ = tx.send(Event::AdapterBound {
                                 adapter_id,
-                                device_id: persistent_id,
+                                device_id: dev_id,
                                 capabilities: vec![KnownCapability::SifliDebug],
-                            });
-                            // Hello only fires from a running Hubris kernel
-                            // (sysmodule_log triggers it), so the phase is
-                            // unambiguously Kernel.
-                            let _ = tx.send(Event::DevicePhaseChanged {
-                                device_id: persistent_id,
-                                phase: DevicePhase::Kernel,
                             });
                             let _ = tx.send(Event::SerialStatus {
                                 index,
                                 status: SerialPortStatus::DeviceDetected,
                             });
-                            current_device = Some(persistent_id);
+                            current_device = Some(dev_id);
                             ctx.request_repaint();
                         }
 
-                        // Always forward the build ID — even when the
-                        // device was already bound (same chip rebooted
-                        // into different firmware, e.g. stub for flashing).
+                        let _ = tx.send(Event::DevicePhaseChanged {
+                            device_id: dev_id,
+                            phase: DevicePhase::Kernel,
+                        });
                         let _ = tx.send(Event::DeviceReportedBuildId {
-                            device_id: persistent_id,
+                            device_id: dev_id,
                             build_id_bytes,
                         });
                     }
@@ -1645,7 +1722,7 @@ async fn usart1_connect_loop(
                         let _ = tx.send(Event::Log {
                             device: dev_id,
                             log: device::logs::Log {
-                                adapter: adapter_id,
+                                adapters: vec![adapter_id],
                                 contents: device::logs::LogContents::Text(line),
                                 received_at: line_received_at,
                                 device_tick,
@@ -1690,7 +1767,6 @@ async fn usart2_connect_loop(
     // wires. Populated here after a successful `Usart2::connect`; cleared
     // when this loop exits so probes don't fire on a dead sender.
     usart2_sender_slot: Arc<Mutex<Option<Arc<serial::SerialSender>>>>,
-    usb_rebind_tx: mpsc::UnboundedSender<UsbRebind>,
 ) {
     let adapter_id = device::adapter::AdapterId(index as u64 + 500_000);
 
@@ -1725,15 +1801,12 @@ async fn usart2_connect_loop(
                 // on each Awake and attached to the BridgeDevice.
                 let mut link = {
                     use device::adapter::Adapter;
-                    device::handle::AdapterLink::new(
-                        adapter_id,
-                        adapter.capabilities(),
-                    )
+                    device::handle::AdapterLink::new(adapter_id, adapter.capabilities())
                 };
 
                 let _ = tx.send(Event::AdapterCreated {
                     adapter_id,
-                    display_name: format!("USART2 ({})", port),
+                    display_name: "USART2".into(),
                     ipc_transport: Some(("usart2", serial::USART2_IPC_PRIORITY)),
                 });
                 let _ = tx.send(Event::SerialStatus {
@@ -1743,6 +1816,7 @@ async fn usart2_connect_loop(
                 ctx.request_repaint();
 
                 let mut current_device: Option<DeviceId> = None;
+                let mut current_session_id: Option<[u8; 16]> = None;
 
                 // Forward decoded events to the panel until cancelled.
                 loop {
@@ -1774,51 +1848,59 @@ async fn usart2_connect_loop(
                                     ctx.request_repaint();
                                 }
                                 Ok(device::device::DeviceEvent::Control { event, .. }) => {
-                                    // Awake is the device-attached signal on
-                                    // USART2. Bind (or re-bind on reboot) the
-                                    // persistent device before forwarding.
                                     if let device::logs::ControlEvent::Awake {
                                         uid,
                                         firmware_id,
+                                        session_id,
                                         ..
                                     } = &event
                                     {
                                         let chip_uid = ChipUid(*uid);
-
-                                        link.revoke();
-                                        if let Some(old_id) = current_device {
-                                            bridge_devices.lock().unwrap().remove(&old_id);
-                                        }
-
-                                        handle_usart2_awake(
-                                            index,
-                                            adapter_id,
-                                            &port,
+                                        let (dev_id, evicted) = resolve_device_for_session(
                                             chip_uid,
-                                            *firmware_id,
-                                            &mut current_device,
-                                            &tx,
+                                            *session_id,
                                             &persistent_devices,
                                             &next_device_id,
-                                            &ctx,
+                                            &bridge_devices,
+                                            &tx,
                                         );
 
-                                        if let Some(dev_id) = current_device {
-                                            let handle = link.handle();
-                                            let dev = device::physical::PhysicalDevice::new();
-                                            bridge_devices.lock().unwrap().insert(
-                                                dev_id,
-                                                BridgeDevice {
-                                                    device: Box::new(dev),
-                                                    cancel: cancel.clone(),
-                                                    handles: vec![handle],
-                                                },
+                                        if evicted || current_device != Some(dev_id) {
+                                            link.revoke();
+                                            eprintln!(
+                                                "[usart2:{port}] awake — binding to \
+                                                {dev_id:?}"
                                             );
-                                            let _ = usb_rebind_tx.send(UsbRebind {
-                                                uid: chip_uid,
-                                                new_device_id: dev_id,
-                                            });
                                         }
+
+                                        let handle = link.handle();
+                                        {
+                                            let mut devs = bridge_devices.lock().unwrap();
+                                            if let Some(bd) = devs.get_mut(&dev_id) {
+                                                bd.handles.push(handle);
+                                            }
+                                        }
+
+                                        let _ = tx.send(Event::AdapterBound {
+                                            adapter_id,
+                                            device_id: dev_id,
+                                            capabilities: vec![KnownCapability::Ipc],
+                                        });
+                                        let _ = tx.send(Event::DeviceReportedBuildId {
+                                            device_id: dev_id,
+                                            build_id_bytes: *firmware_id,
+                                        });
+                                        let _ = tx.send(Event::DevicePhaseChanged {
+                                            device_id: dev_id,
+                                            phase: DevicePhase::Kernel,
+                                        });
+                                        let _ = tx.send(Event::SerialStatus {
+                                            index,
+                                            status: SerialPortStatus::DeviceDetected,
+                                        });
+
+                                        current_device = Some(dev_id);
+                                        current_session_id = Some(*session_id);
                                     }
 
                                     let _ = tx.send(Event::SerialControlEvent { index, event });
@@ -1869,68 +1951,6 @@ async fn usart2_connect_loop(
 /// the adapter is torn down and re-announced first — same shape as the
 /// USART1 SFBL re-bind.
 #[allow(clippy::too_many_arguments)]
-fn handle_usart2_awake(
-    index: SerialPortIndex,
-    adapter_id: device::adapter::AdapterId,
-    port: &str,
-    uid: ChipUid,
-    build_id_bytes: [u8; 16],
-    current_device: &mut Option<DeviceId>,
-    tx: &crossbeam_channel::Sender<Event>,
-    persistent_devices: &Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
-    next_device_id: &Arc<AtomicU64>,
-    ctx: &egui::Context,
-) {
-    // Reboot during session: unbind from the old device. The adapter
-    // persists — only the binding changes.
-    if let Some(old_id) = current_device.take() {
-        eprintln!("[usart2:{port}] awake during session — device rebooted, re-binding");
-        let _ = tx.send(Event::AdapterUnbound {
-            adapter_id,
-            device_id: old_id,
-        });
-    }
-
-    // Get-or-create the persistent DeviceId for this chip UID.
-    let persistent_id = get_or_create_persistent_device(
-        uid,
-        format!("Device {uid}"),
-        None,
-        persistent_devices,
-        next_device_id,
-        tx,
-    );
-
-    eprintln!("[usart2:{port}] discovery: identified device {uid} ({persistent_id:?})");
-
-    let _ = tx.send(Event::AdapterBound {
-        adapter_id,
-        device_id: persistent_id,
-        capabilities: vec![KnownCapability::Ipc],
-    });
-    // Awake also carries the firmware image's build id. Forward it so
-    // state.rs can resolve it against the loaded .tfw archives and
-    // bind firmware metadata to the device.
-    let _ = tx.send(Event::DeviceReportedBuildId {
-        device_id: persistent_id,
-        build_id_bytes,
-    });
-    // Awake fires from sysmodule_log::main, which only runs once the
-    // kernel has started all tasks — so the device is unambiguously
-    // past bootloader by the time we see this.
-    let _ = tx.send(Event::DevicePhaseChanged {
-        device_id: persistent_id,
-        phase: DevicePhase::Kernel,
-    });
-    let _ = tx.send(Event::SerialStatus {
-        index,
-        status: SerialPortStatus::DeviceDetected,
-    });
-
-    *current_device = Some(persistent_id);
-    ctx.request_repaint();
-}
-
 // ── Stub flash via SifliDebug ───────────────────────────────────────────
 
 /// One contiguous region to write to device RAM.
@@ -2301,23 +2321,32 @@ fn parse_hex16(s: &[u8]) -> Option<[u8; 16]> {
     Some(out)
 }
 
-/// Parse a `hello uid=<32hex> build=<32hex>` line as emitted by the
-/// supervisor's `OP_EMIT_LOG` handler in response to a USART2 MoshiMoshi.
-/// Returns `(uid, firmware_id)` on a successful match.
-fn parse_hello_line(line: &str) -> Option<([u8; 16], [u8; 16])> {
+/// Parse a `hello uid=<32hex> build=<32hex> [session=<32hex>]` line as
+/// emitted by the supervisor's `OP_EMIT_LOG` handler in response to a
+/// USART2 MoshiMoshi. Returns `(uid, firmware_id, session_id)`. The
+/// `session=` suffix is optional for backward compat with old firmware;
+/// when absent, session_id defaults to all-zeros (the host treats this
+/// as "always different", preserving current teardown behavior).
+fn parse_hello_line(line: &str) -> Option<([u8; 16], [u8; 16], [u8; 16])> {
     let rest = line.strip_prefix("hello uid=")?;
     if rest.len() < 32 {
         return None;
     }
     let uid_hex = &rest.as_bytes()[..32];
     let rest = &rest[32..];
-    let build_hex = rest.strip_prefix(" build=")?;
-    if build_hex.len() != 32 {
+    let rest = rest.strip_prefix(" build=")?;
+    if rest.len() < 32 {
         return None;
     }
+    let build_hex = &rest.as_bytes()[..32];
+    let rest = &rest[32..];
     let uid = parse_hex16(uid_hex)?;
-    let build = parse_hex16(build_hex.as_bytes())?;
-    Some((uid, build))
+    let build = parse_hex16(build_hex)?;
+    let session = rest
+        .strip_prefix(" session=")
+        .and_then(|s| parse_hex16(s.as_bytes()))
+        .unwrap_or([0u8; 16]);
+    Some((uid, build, session))
 }
 
 /// Background task spawned when an SFBL sentinel is received.
@@ -2670,14 +2699,6 @@ fn register_from_discovery(
 
 // ── USB supervisor ──────────────────────────────────────────────────────
 
-/// Sent by USART2 when it detects a device reboot. Tells the USB
-/// supervisor to move its adapter from the old BridgeDevice to the
-/// new one.
-struct UsbRebind {
-    uid: ChipUid,
-    new_device_id: DeviceId,
-}
-
 /// Per-fob state the supervisor tracks.
 struct UsbEntry {
     chip_uid: ChipUid,
@@ -2698,7 +2719,6 @@ async fn usb_supervisor_loop(
     persistent_devices: Arc<Mutex<HashMap<ChipUid, DeviceId>>>,
     next_device_id: Arc<AtomicU64>,
     flash_wait_usb: Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
-    mut usb_rebind_rx: mpsc::UnboundedReceiver<UsbRebind>,
 ) {
     use futures_util::StreamExt;
 
@@ -2770,40 +2790,6 @@ async fn usb_supervisor_loop(
                     }
                 }
             }
-            rebind = usb_rebind_rx.recv() => {
-                let Some(rebind) = rebind else { break };
-                if let Some(old_entry) = entries_by_uid.remove(&rebind.uid) {
-                    let _ = tx.send(Event::AdapterRemoved {
-                        adapter_id: old_entry.adapter_id,
-                    });
-                    eprintln!("[usb:{}] detached (device rebooted)", rebind.uid);
-                }
-
-                let serial = format!("{}", rebind.uid);
-                let adapter_id =
-                    device::adapter::AdapterId(USB_ADAPTER_ID_BASE + next_usb_adapter_index);
-                next_usb_adapter_index += 1;
-
-                match handle_usb_attach(
-                    &serial,
-                    rebind.uid,
-                    adapter_id,
-                    &tx,
-                    &ctx,
-                    &bridge_devices,
-                    &persistent_devices,
-                    &next_device_id,
-                    &flash_wait_usb,
-                ) {
-                    Ok(entry) => {
-                        entries_by_uid.insert(rebind.uid, entry);
-                        eprintln!("[usb:{}] reattached to {:?}", rebind.uid, rebind.new_device_id);
-                    }
-                    Err(e) => {
-                        eprintln!("[usb:{}] reattach failed: {e}", rebind.uid);
-                    }
-                }
-            }
         }
     }
 }
@@ -2834,38 +2820,35 @@ fn handle_usb_attach(
     next_device_id: &Arc<AtomicU64>,
     flash_wait_usb: &Arc<Mutex<HashMap<ChipUid, (u64, tokio::sync::oneshot::Sender<()>)>>>,
 ) -> Result<UsbEntry, String> {
-    // Resolve / mint the persistent DeviceId for this chip UID.
-    let device_id = get_or_create_persistent_device(
+    let usb_conn = usb::Usb::connect(adapter_id, serial).map_err(|e| format!("{e}"))?;
+
+    let session_id = usb_conn
+        .identity()
+        .map(|id| id.session_id)
+        .unwrap_or([0; 16]);
+
+    let (device_id, evicted) = resolve_device_for_session(
         uid,
-        format!("Device {uid}"),
-        None,
+        session_id,
         persistent_devices,
         next_device_id,
+        bridge_devices,
         tx,
     );
 
-    // Ensure a BridgeDevice exists, grab a LogSink from it.
-    let sink = {
-        let mut devs = bridge_devices.lock().unwrap();
-        let bridge_dev = devs.entry(device_id).or_insert_with(|| {
-            let dev = device::physical::PhysicalDevice::new();
-            BridgeDevice {
-                device: Box::new(dev),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                handles: vec![],
-            }
-        });
-        bridge_dev
-            .device
-            .log_sink(adapter_id)
-            .ok_or_else(|| "device does not expose a log sink".to_string())?
-    };
+    if evicted {
+        eprintln!("[usb:{serial}] session changed — device rebooted, created fresh device");
+    }
 
-    let usb = usb::Usb::connect(adapter_id, serial, sink).map_err(|e| format!("{e}"))?;
+    if let Some(identity) = usb_conn.identity() {
+        let _ = tx.send(Event::DeviceReportedBuildId {
+            device_id,
+            build_id_bytes: identity.build_id,
+        });
+    }
 
     // Subscribe to the device's broadcast before attaching so we don't
-    // miss the AdapterConnected event. Also used to forward Awake logs
-    // → DeviceReportedBuildId in the future.
+    // miss the AdapterConnected event.
     let mut rx = {
         let devs = bridge_devices.lock().unwrap();
         let bridge_dev = devs
@@ -2873,6 +2856,16 @@ fn handle_usb_attach(
             .ok_or_else(|| "bridge device vanished between log_sink() and attach()".to_string())?;
         bridge_dev.device.subscribe()
     };
+
+    // Get the real LogSink from the resolved device and start the reader
+    // tasks — logs now flow into the device's broadcast channel.
+    let sink = {
+        let devs = bridge_devices.lock().unwrap();
+        devs.get(&device_id)
+            .and_then(|bd| bd.device.log_sink(adapter_id))
+            .ok_or_else(|| "bridge device vanished before start()".to_string())?
+    };
+    let usb = usb_conn.start(sink);
 
     // Attach on the bridge device. This registers the Ipc capability and
     // emits AdapterConnected on the broadcast channel.
@@ -2886,7 +2879,7 @@ fn handle_usb_attach(
     // Announce to the GUI.
     let _ = tx.send(Event::AdapterCreated {
         adapter_id,
-        display_name: format!("USB ({serial})"),
+        display_name: "USB".into(),
         ipc_transport: Some(("usb", usb::USB_IPC_PRIORITY)),
     });
     let _ = tx.send(Event::AdapterBound {

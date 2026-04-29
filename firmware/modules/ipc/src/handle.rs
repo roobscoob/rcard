@@ -55,6 +55,10 @@ pub const TRY_DROP_METHOD: u8 = 0xF9;
 /// The server runs `cleanup_client` for the sender across all dispatchers.
 pub const NOTIFY_DEAD_METHOD: u8 = 0xF8;
 
+/// Reserved method ID for revoking all handles owned by the sender.
+/// Used by host_proxy to clean up orphaned handles when a transport dies.
+pub const REVOKE_ALL_METHOD: u8 = 0xF7;
+
 /// Metadata about the incoming message, passed to handler methods.
 ///
 /// Firmware-only: `Meta` carries a kernel `TaskId` and is produced by

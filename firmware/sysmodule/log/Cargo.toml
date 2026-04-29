@@ -18,6 +18,7 @@ sysmodule_log_api = { path = "api", features = ["bare-panics"] }
 sysmodule_usart_api = { path = "../usart/api", features = ["bare-panics"] }
 sysmodule_reactor_api = { path = "../reactor/api", features = ["bare-panics"] }
 sysmodule_efuse_api = { path = "../efuse/api", features = ["bare-panics"] }
+sysmodule_device_api = { path = "../device/api", features = ["bare-panics"] }
 once-cell = { path = "../../modules/once_cell" }
 userlib.workspace = true
 zerocopy = "0.8"

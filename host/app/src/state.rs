@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use device::adapter::AdapterId;
-use device::logs::Log;
+use device::logs::{Log, LogContents};
 use tfw::archive::TfwMetadata;
 
 use crate::panels::Pane;
@@ -220,10 +220,20 @@ impl DeviceHandle {
     }
 
     pub fn push_log(&mut self, log: Log) {
-        // Sorted insertion. When both logs carry a device-side tick,
-        // compare by tick — immune to USB-serial buffering jitter.
-        // Fall back to host `received_at` when either side lacks a
-        // device tick (early boot, auxiliary streams, etc.).
+        if let LogContents::Structured(ref entry) = log.contents {
+            let log_id = entry.log_id;
+            if let Some(existing) = self.log_buffer.iter_mut().rev().find(|l| {
+                matches!(&l.contents, LogContents::Structured(e) if e.log_id == log_id)
+            }) {
+                for &adapter in &log.adapters {
+                    if !existing.adapters.contains(&adapter) {
+                        existing.adapters.push(adapter);
+                    }
+                }
+                return;
+            }
+        }
+
         let idx = self.log_buffer.partition_point(|existing| {
             match (existing.device_tick, log.device_tick) {
                 (Some(a), Some(b)) => a <= b,
@@ -2050,6 +2060,24 @@ impl AppState {
                                     dev.ipc_registry = None;
                                 }
                             }
+                            if matches!(phase, crate::bridge::FlashPhase::ResettingViaIpc) {
+                                match self.ipc_call(
+                                    device_id,
+                                    "Device",
+                                    "reset",
+                                    ipc_runtime::IpcValue::Struct(Default::default()),
+                                ) {
+                                    Ok(_rx) => {
+                                        // Don't await — the device is rebooting,
+                                        // no reply will arrive. The USART1 handler
+                                        // will see SFBL and continue the flash.
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[flash] IPC reset failed: {e}");
+                                        phase = crate::bridge::FlashPhase::WaitingForReset;
+                                    }
+                                }
+                            }
                             if let Some(FlashModalState::Flashing { phase: p, .. }) =
                                 &mut self.flash_modal
                             {
@@ -2533,6 +2561,22 @@ async fn run_flash(
         return;
     }
     eprintln!("[flash] DONE ({} + {} bytes)", places.len(), ftab.len());
+
+    // Reset the device so it boots into the newly flashed firmware.
+    if let Ok(encoded) = registry.encode_call(
+        "Device",
+        "reset",
+        ipc_runtime::IpcValue::Struct(Default::default()),
+    ) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let _ = cmd_tx.send(crate::bridge::Command::IpcCall {
+            device_id,
+            call: encoded,
+            reply: tx,
+        });
+        eprintln!("[flash] sent Device::reset()");
+    }
+
     let _ = cmd_tx.send(crate::bridge::Command::FlashComplete { device_id });
 }
 

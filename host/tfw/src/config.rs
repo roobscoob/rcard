@@ -307,6 +307,10 @@ pub fn load(
     let tasks = discover_tasks(firmware_dir);
     let shim = build_shim(firmware_dir, root_ncl, board_ncl, layout_ncl, &tasks);
 
+    let shim_dump = std::path::PathBuf::from(firmware_dir).join("../.nickel_shim_debug.ncl");
+    std::fs::write(&shim_dump, &shim).ok();
+    eprintln!("[tfw] shim written to {}", shim_dump.display());
+
     let mut config: AppConfig =
         nickel_lang_core::deserialize::from_str(&shim)
             .map_err(|e| ConfigError::Eval(ConfigEvalError::from(e)))?;

@@ -2,8 +2,8 @@ use device::device::LogSink;
 use device::logs::LogEntry;
 use nusb::Endpoint;
 use nusb::transfer::{Buffer, Bulk, In};
-use rcard_log::decoder::{Decoder, FeedResult};
 use rcard_log::LogMetadata;
+use rcard_log::decoder::{Decoder, FeedResult};
 use rcard_usb_proto::FrameReader;
 use tokio_util::sync::CancellationToken;
 use zerocopy::TryFromBytes;
@@ -86,6 +86,11 @@ fn dispatch_frame(frame: &rcard_usb_proto::RawFrame<'_>, sink: &LogSink) {
         return;
     };
 
+    // println!(
+    //     "Received frame: opcode={:02x} payload={:02x?}",
+    //     simple.opcode, simple.payload
+    // );
+
     if simple.opcode == rcard_usb_proto::messages::log_entry::OP_LOG_ENTRY {
         parse_log_entries(simple.payload, sink);
     }
@@ -114,6 +119,8 @@ fn parse_log_entries(data: &[u8], sink: &LogSink) {
         if idx == 0 && payload.len() >= METADATA_SIZE {
             match LogMetadata::try_read_from_bytes(&payload[..METADATA_SIZE]) {
                 Ok(meta) => {
+                    // println!("Parsed log metadata: {:?}", meta);
+
                     let arg_data = &payload[METADATA_SIZE..];
                     let values = decode_values(arg_data, sink);
 
@@ -127,7 +134,9 @@ fn parse_log_entries(data: &[u8], sink: &LogSink) {
                         truncated: false,
                     });
                 }
-                Err(_) => {
+                Err(e) => {
+                    // println!("Failed to parse log metadata: {:?}", e);
+
                     sink.error(UsbError::LogMetadata);
                 }
             }

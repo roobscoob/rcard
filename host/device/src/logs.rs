@@ -4,10 +4,10 @@ use rcard_log::{LogLevel, OwnedValue};
 
 use crate::adapter::AdapterId;
 
-/// A log event with its source adapter.
+/// A log event with its source adapter(s).
 #[derive(Clone, Debug)]
 pub struct Log {
-    pub adapter: AdapterId,
+    pub adapters: Vec<AdapterId>,
     pub contents: LogContents,
     /// Host wall-clock at which the *first byte* of this log was
     /// observed on the adapter's wire. Used as a fallback ordering
@@ -48,6 +48,7 @@ pub enum ControlEvent {
         seq: u16,
         uid: [u8; rcard_usb_proto::messages::AWAKE_FIELD_SIZE],
         firmware_id: [u8; rcard_usb_proto::messages::AWAKE_FIELD_SIZE],
+        session_id: [u8; rcard_usb_proto::messages::AWAKE_FIELD_SIZE],
     },
     /// A tunnel-level error frame from the device.
     TunnelError {

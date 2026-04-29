@@ -1,10 +1,10 @@
 [package]
-name = "sysmodule_device_info_api"
+name = "sysmodule_device_api"
 version = "0.1.0"
 edition = "2021"
 
 [features]
-bare-panics = []
+bare-panics = ["ipc/bare-panics"]
 host = ["ipc/host"]
 
 [dependencies]

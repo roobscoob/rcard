@@ -354,6 +354,15 @@ enum Transport {
     Usart,
 }
 
+fn revoke_all_handles() {
+    let mut msg = [0u8; 1];
+    for task_index in 0..generated::tasks::TASK_COUNT {
+        let target = ipc::kern::TaskId::gen0(task_index as u16);
+        let opcode = ipc::opcode(0, ipc::REVOKE_ALL_METHOD);
+        let _ = ipc::kern::sys_send(target, opcode, &mut msg, 0, &mut []);
+    }
+}
+
 fn select_transport(sender: u16) -> Option<Transport> {
     // Gate on `is_some()` of the original peer option so a build
     // without one of the transports can never route to the sentinel
@@ -373,6 +382,12 @@ fn handle_host_request(sender: u16, code: u32) {
         warn!("host_proxy: host_request from unknown sender {}", sender);
         return;
     };
+
+    if code == 0xFFFF_FFFF {
+        warn!("host_proxy: transport disconnected, revoking all handles");
+        revoke_all_handles();
+        return;
+    }
 
     if code == 1 {
         // ReplyCorrupted — retransmit the last reply without re-dispatching.

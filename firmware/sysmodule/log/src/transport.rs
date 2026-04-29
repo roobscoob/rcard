@@ -217,7 +217,8 @@ fn handle_control_request(_usart: &Usart, body: &[u8]) {
     // even though USART1 has no RX path of its own. Best-effort.
     let uid = crate::CACHED_UID.get().copied().unwrap_or([0u8; 16]);
     let firmware_id = ::generated::build_info::BUILD_ID_BYTES;
-    crate::emit_supervisor_hello(uid, firmware_id);
+    let session_id = crate::CACHED_SESSION_ID.get().copied().unwrap_or([0u8; 16]);
+    crate::emit_supervisor_hello(uid, firmware_id, session_id);
 }
 
 /// Validate and stage an IPC request frame for host_proxy. Returns

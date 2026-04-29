@@ -481,6 +481,7 @@ async fn process_ipc_reply(
                             seq,
                             uid: awake.uid,
                             firmware_id: awake.firmware_id,
+                            session_id: awake.session_id,
                         });
                     } else if let Some(err) = simple.parse::<TunnelError>() {
                         // Tunnel errors can be responses to pending IPC

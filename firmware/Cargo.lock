@@ -944,22 +944,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysmodule_device_info"
+name = "sysmodule_device"
 version = "0.1.0"
 dependencies = [
  "generated",
  "ipc",
+ "kipc",
  "once-cell",
- "rcard-log",
- "rcard-log-macros",
- "sysmodule_device_info_api",
+ "sysmodule_device_api",
  "sysmodule_efuse_api",
- "sysmodule_log_api",
+ "sysmodule_rand_api",
  "userlib",
 ]
 
 [[package]]
-name = "sysmodule_device_info_api"
+name = "sysmodule_device_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
@@ -1086,6 +1085,7 @@ dependencies = [
  "once-cell",
  "rcard-log",
  "rcard-usb-proto",
+ "sysmodule_device_api",
  "sysmodule_efuse_api",
  "sysmodule_host_transport_api",
  "sysmodule_log_api",
@@ -1156,6 +1156,30 @@ dependencies = [
 
 [[package]]
 name = "sysmodule_mpi_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
+name = "sysmodule_rand"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "sifli-pac",
+ "sysmodule_rand_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_rand_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
@@ -1306,7 +1330,8 @@ dependencies = [
  "once-cell",
  "rcard-log",
  "rcard-log-macros",
- "sysmodule_device_info_api",
+ "rcard-usb-proto",
+ "sysmodule_device_api",
  "sysmodule_log_api",
  "sysmodule_usb_api",
  "sysmodule_usb_protocol_api",

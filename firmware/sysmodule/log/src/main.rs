@@ -14,6 +14,7 @@ mod transport;
 sysmodule_usart_api::bind_usart!(Usart = SLOTS.sysmodule_usart);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 sysmodule_efuse_api::bind_efuse!(Efuse = SLOTS.sysmodule_efuse);
+sysmodule_device_api::bind_device!(Device = SLOTS.sysmodule_device);
 
 pub(crate) static USART: OnceCell<Usart> = OnceCell::new();
 
@@ -21,6 +22,11 @@ pub(crate) static USART: OnceCell<Usart> = OnceCell::new();
 /// `send_awake` to populate the `Awake` payload without re-IPCing the
 /// efuse server on every control-request reply.
 pub(crate) static CACHED_UID: OnceCell<[u8; 16]> = OnceCell::new();
+
+/// Session ID generated once at boot from hardware TRNG. Stable for the
+/// lifetime of a single boot — lets the host distinguish USB
+/// re-enumeration from a real reboot.
+pub(crate) static CACHED_SESSION_ID: OnceCell<[u8; 16]> = OnceCell::new();
 
 pub(crate) fn usart_write(data: &[u8]) {
     if let Some(usart) = USART.get() {
@@ -73,12 +79,14 @@ fn main() -> ! {
     USART.set(usart).ok();
 
     CACHED_UID.set(read_chip_uid()).ok();
+    CACHED_SESSION_ID.set(read_session_id()).ok();
 
     send_awake(0);
 
     emit_supervisor_hello(
         CACHED_UID.get().copied().unwrap_or([0u8; 16]),
         generated::build_info::BUILD_ID_BYTES,
+        CACHED_SESSION_ID.get().copied().unwrap_or([0u8; 16]),
     );
 
     ipc::server! {
@@ -104,12 +112,13 @@ pub(crate) fn send_awake(seq: u16) {
 
     let uid = CACHED_UID.get().copied().unwrap_or([0u8; 16]);
     let firmware_id = ::generated::build_info::BUILD_ID_BYTES;
+    let session_id = CACHED_SESSION_ID.get().copied().unwrap_or([0u8; 16]);
 
-    // header + opcode + payload
     const FRAME_LEN: usize = HEADER_SIZE + 1 + AWAKE_PAYLOAD_SIZE;
     let mut frame = [0u8; FRAME_LEN];
 
-    let Some(n) = encode_simple(&Awake::new(uid, firmware_id), &mut frame, seq) else {
+    let Some(n) = encode_simple(&Awake::new(uid, firmware_id, session_id), &mut frame, seq)
+    else {
         panic!("failed to encode Awake frame");
     };
 
@@ -126,18 +135,20 @@ pub(crate) fn send_awake(seq: u16) {
 /// `peers = ["sysmodule_log"]` entry in supervisor's `task.ncl`.
 const OP_EMIT_LOG: u16 = 0xE10C;
 
-/// Push a `hello uid=<32hex> build=<32hex>\r\n` line to USART1 by IPC'ing
-/// the supervisor (which owns USART1 via `uses_peripherals = ["usart1"]`).
+/// Push a `hello uid=<32hex> build=<32hex> session=<32hex>\r\n` line to
+/// USART1 by IPC'ing the supervisor (which owns USART1 via
+/// `uses_peripherals = ["usart1"]`).
 ///
 /// Used as a side-effect of the MoshiMoshi → Awake exchange on USART2: the
 /// host gets the same identity payload on whichever wire it's listening
 /// to. Best-effort — failures are silently dropped.
-pub(crate) fn emit_supervisor_hello(uid: [u8; 16], firmware_id: [u8; 16]) {
-    // Layout: "hello uid=" + 32 hex + " build=" + 32 hex + "\r\n" = 81 bytes.
+pub(crate) fn emit_supervisor_hello(uid: [u8; 16], firmware_id: [u8; 16], session_id: [u8; 16]) {
     const PREFIX_UID: &[u8] = b"hello uid=";
     const PREFIX_BUILD: &[u8] = b" build=";
+    const PREFIX_SESSION: &[u8] = b" session=";
     const SUFFIX: &[u8] = b"\r\n";
-    const LEN: usize = PREFIX_UID.len() + 32 + PREFIX_BUILD.len() + 32 + SUFFIX.len();
+    const LEN: usize =
+        PREFIX_UID.len() + 32 + PREFIX_BUILD.len() + 32 + PREFIX_SESSION.len() + 32 + SUFFIX.len();
 
     let mut buf = [0u8; LEN];
     let mut i = 0;
@@ -149,10 +160,12 @@ pub(crate) fn emit_supervisor_hello(uid: [u8; 16], firmware_id: [u8; 16]) {
     i += PREFIX_BUILD.len();
     write_hex32(&mut buf[i..i + 32], &firmware_id);
     i += 32;
+    buf[i..i + PREFIX_SESSION.len()].copy_from_slice(PREFIX_SESSION);
+    i += PREFIX_SESSION.len();
+    write_hex32(&mut buf[i..i + 32], &session_id);
+    i += 32;
     buf[i..i + SUFFIX.len()].copy_from_slice(SUFFIX);
 
-    // Address the supervisor at the well-known TaskId(0) — same convention
-    // the reactor uses for OP_DROP_REPORT (see reactor::main.rs:57).
     let n = buf.len();
     let sup = userlib::TaskId::gen0(0);
     let _ = userlib::sys_send(sup, OP_EMIT_LOG, &mut buf, n, &mut []);
@@ -165,6 +178,10 @@ fn write_hex32(out: &mut [u8], bytes: &[u8; 16]) {
         out[i * 2] = HEX[(b >> 4) as usize];
         out[i * 2 + 1] = HEX[(b & 0xF) as usize];
     }
+}
+
+fn read_session_id() -> [u8; 16] {
+    Device::get_session_id().unwrap_or([0u8; 16])
 }
 
 /// Fetch eFuse bank 0 and return its first 16 bytes as the chip UID.

@@ -731,6 +731,11 @@ impl<T, const N: usize> SharedArena<T, N> {
                 reply.reply_ok(&[]);
                 None
             }
+            REVOKE_ALL_METHOD => {
+                self.remove_by_owner(sender_index);
+                reply.reply_ok(&[]);
+                None
+            }
             _ => Some(reply),
         }
     }

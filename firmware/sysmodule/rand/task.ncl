@@ -2,14 +2,11 @@ let lib = import "../../lib.ncl" in
 
 fun ctx => {
   crate_info = import "./Cargo.toml",
-  priority = lib.workgroup.sysmodule,
-  depends_on = [
-    ctx.tasks.sysmodule_log,
-    ctx.tasks.sysmodule_efuse,
-  ],
+  priority = lib.workgroup.core_sysmodule,
+  uses_peripherals = ["trng", "rcc"],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = 1024 },
+    stack = { place = ctx.places.fast, size = lib.kiB 1 },
     data  = { place = ctx.places.fast },
   },
 }

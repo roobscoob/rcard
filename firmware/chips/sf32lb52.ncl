@@ -37,5 +37,6 @@ let miB = fun n => n * 1024 * 1024 in
     usbc        = { base = 0x50047000, size = 0x1000, irqs = { irq = 92 } },
     rtc         = { base = 0x500CB000, size = 0x78, renode = { model = "Timers.SF32LB52_RTC" } },
     efusec      = { base = 0x5000C000, size = 0x1000 },
+    trng        = { base = 0x5000F000, size = 0x1000, irqs = { irq = 69 } },
   },
 }

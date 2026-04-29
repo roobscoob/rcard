@@ -47,6 +47,15 @@ const IN_BUFFER_SIZE: usize = (rcard_usb_proto::MAX_DECODED_FRAME + 3 + 511) / 5
 /// the pipeline full while we decode the previous buffer.
 const IN_PIPELINE_DEPTH: usize = 2;
 
+/// Device identity read from the USB BOS platform capability descriptor
+/// at attach time. Contains the same triple as the USART2 Awake message.
+#[derive(Clone, Debug)]
+pub struct UsbDeviceIdentity {
+    pub uid: [u8; 16],
+    pub build_id: [u8; 16],
+    pub session_id: [u8; 16],
+}
+
 /// USB adapter — connects to a fob over USB.
 ///
 /// Provides the `ipc_protocol::Ipc` capability on the host-driven channel,
@@ -54,17 +63,69 @@ const IN_PIPELINE_DEPTH: usize = 2;
 pub struct Usb {
     id: AdapterId,
     serial: String,
+    identity: Option<UsbDeviceIdentity>,
     ipc: Arc<ipc_protocol::Ipc>,
     cancel: CancellationToken,
     host_task: Option<JoinHandle<()>>,
     fob_task: Option<JoinHandle<()>>,
 }
 
+/// Intermediate state after USB enumeration but before reader tasks are
+/// spawned. Holds the claimed endpoints so `start()` can wire them up
+/// with the correct `LogSink` once the device is resolved.
+pub struct UsbConnected {
+    id: AdapterId,
+    serial: String,
+    identity: Option<UsbDeviceIdentity>,
+    protocol: Arc<IpcProtocol>,
+    sender: Arc<dyn ipc_protocol::FrameSender>,
+    ipc: Arc<ipc_protocol::Ipc>,
+    host_in: nusb::Endpoint<Bulk, In>,
+    fob_in: nusb::Endpoint<Bulk, In>,
+}
+
+impl UsbConnected {
+    /// Device identity parsed from the BOS platform capability
+    /// descriptor at connect time. `None` if the descriptor was absent
+    /// or couldn't be parsed.
+    pub fn identity(&self) -> Option<&UsbDeviceIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// Spawn the reader tasks with the real `LogSink` and return the
+    /// fully operational `Usb` adapter.
+    pub fn start(self, sink: LogSink) -> Usb {
+        let cancel = CancellationToken::new();
+
+        let host_task = tokio::spawn(host_reader(
+            self.host_in,
+            self.protocol.clone(),
+            self.sender,
+            sink.clone(),
+            cancel.clone(),
+        ));
+
+        let fob_task = tokio::spawn(fob_reader::run(self.fob_in, sink, cancel.clone()));
+
+        Usb {
+            id: self.id,
+            serial: self.serial,
+            identity: self.identity,
+            ipc: self.ipc,
+            cancel,
+            host_task: Some(host_task),
+            fob_task: Some(fob_task),
+        }
+    }
+}
+
 impl Usb {
     /// Connect to the USB device whose string serial descriptor matches
-    /// `serial` (case-insensitive). Errors if no such device is present
-    /// or if its interfaces can't be claimed.
-    pub fn connect(id: AdapterId, serial: &str, sink: LogSink) -> Result<Self, ConnectError> {
+    /// `serial` (case-insensitive). Opens the device, reads the BOS
+    /// identity, and claims endpoints — but does NOT spawn reader tasks.
+    /// Call `UsbConnected::start(sink)` to begin I/O with the correct
+    /// `LogSink`.
+    pub fn connect(id: AdapterId, serial: &str) -> Result<UsbConnected, ConnectError> {
         let dev_info = nusb::list_devices()
             .wait()
             .map_err(ConnectError::Enumerate)?
@@ -79,6 +140,17 @@ impl Usb {
             })?;
 
         let dev = dev_info.open().wait().map_err(ConnectError::Open)?;
+
+        let identity = match dev
+            .get_descriptor(0x0F, 0, 0, std::time::Duration::from_millis(500))
+            .wait()
+        {
+            Ok(bos_bytes) => parse_rcard_identity(&bos_bytes),
+            Err(e) => {
+                eprintln!("[usb] BOS read failed (non-fatal): {e}");
+                None
+            }
+        };
 
         let host_iface = dev
             .claim_interface(HOST_DRIVEN_INTERFACE)
@@ -115,25 +187,15 @@ impl Usb {
             sender.clone(),
         ));
 
-        let cancel = CancellationToken::new();
-
-        let host_task = tokio::spawn(host_reader(
-            host_in,
-            protocol.clone(),
-            sender,
-            sink.clone(),
-            cancel.clone(),
-        ));
-
-        let fob_task = tokio::spawn(fob_reader::run(fob_in, sink, cancel.clone()));
-
-        Ok(Usb {
+        Ok(UsbConnected {
             id,
             serial: serial.to_string(),
+            identity,
+            protocol,
+            sender,
             ipc,
-            cancel,
-            host_task: Some(host_task),
-            fob_task: Some(fob_task),
+            host_in,
+            fob_in,
         })
     }
 
@@ -142,6 +204,13 @@ impl Usb {
     /// side).
     pub fn serial(&self) -> &str {
         &self.serial
+    }
+
+    /// Device identity parsed from the BOS platform capability
+    /// descriptor at connect time. `None` if the descriptor was absent
+    /// or couldn't be parsed (e.g. old firmware without the capability).
+    pub fn identity(&self) -> Option<&UsbDeviceIdentity> {
+        self.identity.as_ref()
     }
 
     /// Best-effort graceful shutdown. Poisons the IPC protocol so any
@@ -213,6 +282,55 @@ impl std::fmt::Display for ConnectError {
 }
 
 impl std::error::Error for ConnectError {}
+
+// ── BOS identity parsing ─────────────────────────────────────────────────
+
+fn parse_rcard_identity(bos: &[u8]) -> Option<UsbDeviceIdentity> {
+    use rcard_usb_proto::messages::awake::{AWAKE_FIELD_SIZE, RCARD_IDENTITY_UUID};
+
+    if bos.len() < 5 || bos[1] != 0x0F {
+        return None;
+    }
+    let total_len = u16::from_le_bytes([bos[2], bos[3]]) as usize;
+    let bos = &bos[..bos.len().min(total_len)];
+
+    let mut pos = 5;
+    while pos + 2 < bos.len() {
+        let cap_len = bos[pos] as usize;
+        if cap_len < 3 || pos + cap_len > bos.len() {
+            break;
+        }
+        let cap_type = bos[pos + 2];
+        if cap_type == 0x05 && cap_len >= 4 + 16 {
+            let uuid_start = pos + 4;
+            if bos.len() >= uuid_start + 16
+                && bos[uuid_start..uuid_start + 16] == RCARD_IDENTITY_UUID
+            {
+                let data_start = uuid_start + 16;
+                let data = &bos[data_start..pos + cap_len];
+                if data.len() >= AWAKE_FIELD_SIZE * 3 {
+                    let mut uid = [0u8; 16];
+                    let mut build_id = [0u8; 16];
+                    let mut session_id = [0u8; 16];
+                    uid.copy_from_slice(&data[..AWAKE_FIELD_SIZE]);
+                    build_id.copy_from_slice(
+                        &data[AWAKE_FIELD_SIZE..AWAKE_FIELD_SIZE * 2],
+                    );
+                    session_id.copy_from_slice(
+                        &data[AWAKE_FIELD_SIZE * 2..AWAKE_FIELD_SIZE * 3],
+                    );
+                    return Some(UsbDeviceIdentity {
+                        uid,
+                        build_id,
+                        session_id,
+                    });
+                }
+            }
+        }
+        pos += cap_len;
+    }
+    None
+}
 
 // ── Host-driven reader task ──────────────────────────────────────────────
 

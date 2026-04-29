@@ -20,9 +20,20 @@ pub fn uid_to_hex<'a>(uid: &[u8; 16], buf: &'a mut [u8; UID_HEX_LEN]) -> &'a str
 }
 
 #[ipc::resource(arena_size = 0, kind = 0x07)]
-pub trait DeviceInfo {
+pub trait Device {
     /// Return the device's 16-byte chip UID, read once at boot from
     /// eFuse bank 0 via `sysmodule_efuse`.
     #[message]
     fn get_uid() -> [u8; 16];
+
+    /// Return the 16-byte session ID, generated once at boot from the
+    /// hardware TRNG via `sysmodule_rand`. Stable for the lifetime of
+    /// a single boot — lets consumers distinguish USB re-enumeration
+    /// from a real reboot. Returns all zeros if the TRNG was unavailable.
+    #[message]
+    fn get_session_id() -> [u8; 16];
+
+    /// Reset the MCU back to bootrom. Never returns.
+    #[message]
+    fn reset();
 }

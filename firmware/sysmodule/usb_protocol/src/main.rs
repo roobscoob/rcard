@@ -13,7 +13,27 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
 sysmodule_usb_api::bind_usb_bus!(UsbBus = SLOTS.sysmodule_usb);
-sysmodule_device_info_api::bind_device_info!(DeviceInfo = SLOTS.sysmodule_device_info);
+sysmodule_device_api::bind_device!(Device = SLOTS.sysmodule_device);
+
+fn rcard_identity_capability(
+    uid: &[u8; 16],
+    session_id: &[u8; 16],
+) -> [u8; rcard_usb_proto::messages::RCARD_IDENTITY_CAP_SIZE] {
+    use rcard_usb_proto::messages::{AWAKE_FIELD_SIZE, RCARD_IDENTITY_CAP_SIZE, RCARD_IDENTITY_UUID};
+    let build_id = generated::build_info::BUILD_ID_BYTES;
+    let mut buf = [0u8; RCARD_IDENTITY_CAP_SIZE];
+    let mut i = 0;
+    buf[i] = 0x00; // bReserved
+    i += 1;
+    buf[i..i + 16].copy_from_slice(&RCARD_IDENTITY_UUID);
+    i += 16;
+    buf[i..i + AWAKE_FIELD_SIZE].copy_from_slice(uid);
+    i += AWAKE_FIELD_SIZE;
+    buf[i..i + AWAKE_FIELD_SIZE].copy_from_slice(&build_id);
+    i += AWAKE_FIELD_SIZE;
+    buf[i..i + AWAKE_FIELD_SIZE].copy_from_slice(session_id);
+    buf
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -46,13 +66,13 @@ static BUS: GlobalState<Option<UsbBus>> = GlobalState::new(None);
 /// without overflowing the 4 KiB task stack.
 struct SetupBufs {
     msos: [u8; 256],
-    serial: [u8; sysmodule_device_info_api::UID_HEX_LEN],
+    serial: [u8; sysmodule_device_api::UID_HEX_LEN],
     identity: [u8; 512],
 }
 
 static SETUP_BUFS: GlobalState<SetupBufs> = GlobalState::new(SetupBufs {
     msos: [0u8; 256],
-    serial: [0u8; sysmodule_device_info_api::UID_HEX_LEN],
+    serial: [0u8; sysmodule_device_api::UID_HEX_LEN],
     identity: [0u8; 512],
 });
 
@@ -67,36 +87,54 @@ static SETUP_BUFS: GlobalState<SetupBufs> = GlobalState::new(SetupBufs {
 fn setup_usb() {
     info!("Setting up USB bus");
 
-    let bus = SETUP_BUFS.with(|bufs| {
-        const MSOS_VENDOR_CODE: u8 = 0x01;
-        let msos_set = Msos20DescriptorSet::new(&mut bufs.msos)
-            .compatible_id("WINUSB", "")
-            .build()
-            .log_unwrap();
-        let msos_platform = msos_platform_capability(msos_set.len() as u16, MSOS_VENDOR_CODE);
+    let bus = SETUP_BUFS
+        .with(|bufs| {
+            const MSOS_VENDOR_CODE: u8 = 0x01;
+            let msos_set = Msos20DescriptorSet::new(&mut bufs.msos)
+                .compatible_id("WINUSB", "")
+                .build()
+                .log_unwrap();
 
-        let uid = DeviceInfo::get_uid().log_unwrap();
-        let serial = sysmodule_device_info_api::uid_to_hex(&uid, &mut bufs.serial);
+            let msos_platform = msos_platform_capability(msos_set.len() as u16, MSOS_VENDOR_CODE);
 
-        let identity = DeviceIdentity::builder(&mut bufs.identity, 0x16D0, 0x14EF)
-            .device_class(0xFF, 0x01, 0x00)
-            .manufacturer("Rose Kodsi-Hall")
-            .product("Charm")
-            .serial(serial)
-            .bos_capability(0x05, &msos_platform)
-            .vendor_request(MSOS_VENDOR_CODE, MSOS_DESCRIPTOR_INDEX, msos_set)
-            .build()
-            .log_unwrap();
+            let uid = Device::get_uid().log_unwrap();
+            let session_id = Device::get_session_id().log_unwrap();
+            let serial = sysmodule_device_api::uid_to_hex(&uid, &mut bufs.serial);
+            let rcard_cap = rcard_identity_capability(&uid, &session_id);
 
-        UsbBus::take(identity.config(), identity.blob(), 4)
-            .log_unwrap()
-            .log_unwrap()
-    }).log_unwrap();
+            let identity = DeviceIdentity::builder(&mut bufs.identity, 0x16D0, 0x14EF)
+                .device_class(0xFF, 0x01, 0x00)
+                .manufacturer("Rose Kodsi-Hall")
+                .product("Charm")
+                .serial(serial)
+                .bos_capability(0x05, &msos_platform)
+                .bos_capability(0x05, &rcard_cap)
+                .vendor_request(MSOS_VENDOR_CODE, MSOS_DESCRIPTOR_INDEX, msos_set)
+                .build()
+                .log_unwrap();
 
-    let h_host_out = bus.take_endpoint_handle().log_unwrap().log_expect("no handle");
-    let h_host_in = bus.take_endpoint_handle().log_unwrap().log_expect("no handle");
-    let h_fob_out = bus.take_endpoint_handle().log_unwrap().log_expect("no handle");
-    let h_fob_in = bus.take_endpoint_handle().log_unwrap().log_expect("no handle");
+            UsbBus::take(identity.config(), identity.blob(), 4)
+                .log_unwrap()
+                .log_unwrap()
+        })
+        .log_unwrap();
+
+    let h_host_out = bus
+        .take_endpoint_handle()
+        .log_unwrap()
+        .log_expect("no handle");
+    let h_host_in = bus
+        .take_endpoint_handle()
+        .log_unwrap()
+        .log_expect("no handle");
+    let h_fob_out = bus
+        .take_endpoint_handle()
+        .log_unwrap()
+        .log_expect("no handle");
+    let h_fob_in = bus
+        .take_endpoint_handle()
+        .log_unwrap()
+        .log_expect("no handle");
 
     let gen = sys_refresh_task_id(SLOTS.sysmodule_usb).generation();
 
@@ -116,16 +154,17 @@ fn setup_usb() {
 
     // Store the bus so bus_state() can poll it.
     // Replaces any stale handle from a previous sysmodule_usb generation.
-    BUS.with(|b| { *b = Some(bus); }).log_unwrap();
+    BUS.with(|b| {
+        *b = Some(bus);
+    })
+    .log_unwrap();
 }
 
 /// If `sysmodule_usb` has restarted since we last created handles,
 /// re-run the full USB setup to get fresh ones.
 fn ensure_handles_fresh() {
     let current_gen = sys_refresh_task_id(SLOTS.sysmodule_usb).generation();
-    let stale = HANDLES
-        .with(|s| s.usb_gen != current_gen)
-        .unwrap_or(true);
+    let stale = HANDLES.with(|s| s.usb_gen != current_gen).unwrap_or(true);
     if stale {
         setup_usb();
     }

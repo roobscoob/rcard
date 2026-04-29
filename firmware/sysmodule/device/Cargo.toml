@@ -1,0 +1,22 @@
+[package]
+name = "sysmodule_device"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+generated = { path = "../../modules/generated" }
+ipc = { path = "../../modules/ipc", features = ["bare-panics"] }
+kipc.workspace = true
+once-cell = { path = "../../modules/once_cell" }
+sysmodule_efuse_api = { path = "../efuse/api", features = ["bare-panics"] }
+sysmodule_rand_api = { path = "../rand/api", features = ["bare-panics"] }
+sysmodule_device_api = { path = "api", features = ["bare-panics"] }
+userlib.workspace = true
+
+[[bin]]
+name = "sysmodule_device"
+test = false
+bench = false
+
+[lints]
+workspace = true

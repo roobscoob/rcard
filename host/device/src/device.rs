@@ -61,7 +61,7 @@ impl LogSink {
     pub fn structured_at(&self, entry: LogEntry, received_at: Instant) {
         let device_tick = Some(entry.timestamp);
         let _ = self.tx.send(DeviceEvent::Log(Log {
-            adapter: self.adapter,
+            adapters: vec![self.adapter],
             contents: LogContents::Structured(entry),
             received_at,
             device_tick,
@@ -78,7 +78,7 @@ impl LogSink {
     pub fn usart1_raw_at(&self, raw_line: &str, received_at: Instant) {
         let (device_tick, text) = crate::logs::parse_tick_prefix(raw_line);
         let _ = self.tx.send(DeviceEvent::Log(Log {
-            adapter: self.adapter,
+            adapters: vec![self.adapter],
             contents: LogContents::Text(text),
             received_at,
             device_tick,
@@ -93,7 +93,7 @@ impl LogSink {
     /// Send a text log line with an explicit `received_at` stamp.
     pub fn text_at(&self, text: String, received_at: Instant) {
         let _ = self.tx.send(DeviceEvent::Log(Log {
-            adapter: self.adapter,
+            adapters: vec![self.adapter],
             contents: LogContents::Text(text),
             received_at,
             device_tick: None,
@@ -108,7 +108,7 @@ impl LogSink {
     /// Send a named auxiliary text log with an explicit `received_at` stamp.
     pub fn auxiliary_at(&self, name: String, text: String, received_at: Instant) {
         let _ = self.tx.send(DeviceEvent::Log(Log {
-            adapter: self.adapter,
+            adapters: vec![self.adapter],
             contents: LogContents::Auxiliary { name, text },
             received_at,
             device_tick: None,
@@ -123,7 +123,7 @@ impl LogSink {
     /// Send a Renode emulator log with an explicit `received_at` stamp.
     pub fn renode_at(&self, level: rcard_log::LogLevel, message: String, received_at: Instant) {
         let _ = self.tx.send(DeviceEvent::Log(Log {
-            adapter: self.adapter,
+            adapters: vec![self.adapter],
             contents: LogContents::Renode { level, message },
             received_at,
             device_tick: None,

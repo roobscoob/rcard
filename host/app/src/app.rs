@@ -706,7 +706,7 @@ fn activity_button(
 /// Render the flash progress steps inside the modal.
 fn flash_modal_steps(ui: &mut egui::Ui, phase: &FlashPhase) {
     let (step, failed) = match phase {
-        FlashPhase::Resetting | FlashPhase::WaitingForReset => (0, false),
+        FlashPhase::Resetting | FlashPhase::ResettingViaIpc | FlashPhase::WaitingForReset => (0, false),
         FlashPhase::WritingStub { .. } => (1, false),
         FlashPhase::VerifyingStub { .. } => (2, false),
         FlashPhase::BootingStub | FlashPhase::StubBooted => (3, false),

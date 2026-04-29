@@ -48,6 +48,8 @@ fun args =>
       args.tasks.idle,
       args.tasks.fob,
 
+      ## You can think of the following as 'host dependencies'
+
       # Enable the host proxy, so the host can drive the stub firmware.
       args.tasks.sysmodule_host_proxy,
 
@@ -57,6 +59,10 @@ fun args =>
       args.tasks.sysmodule_usb_protocol,
       args.tasks.sysmodule_usb_protocol_host,
       args.tasks.sysmodule_usb_protocol_fob,
+
+      # Include the USB log sink sysmodule so that the host can receive
+      # logs from the stub firmware over USB.
+      args.tasks.sysmodule_log_sink_usb,
 
       # We want to include the storage sysmodule in the stub firmware so 
       # that we can flash the main firmware to the device

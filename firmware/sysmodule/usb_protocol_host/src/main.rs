@@ -372,6 +372,12 @@ fn handle_usb_event(_sender: u16, _code: u32) {
                     !USB_DISCONNECTED.swap(true, core::sync::atomic::Ordering::Relaxed);
                 if was_connected {
                     warn!("USB disconnected");
+                    let _ = Reactor::push(
+                        notifications::GROUP_ID_HOST_REQUEST,
+                        0xFFFF_FFFF,
+                        20,
+                        OverflowStrategy::Reject,
+                    );
                     ACCUM
                         .with(|a| {
                             if a.state != UsbTunnelState::Idle {

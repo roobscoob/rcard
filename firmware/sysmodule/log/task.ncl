@@ -7,6 +7,7 @@ fun ctx => {
     ctx.tasks.sysmodule_usart,
     ctx.tasks.sysmodule_reactor,
     ctx.tasks.sysmodule_efuse,
+    ctx.tasks.sysmodule_device,
   ],
   pushes_notifications = ["logs", "host_request"],
   uses_notifications = ["usart_event"],

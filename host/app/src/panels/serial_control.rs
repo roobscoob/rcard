@@ -74,11 +74,17 @@ fn row_content(event: &ControlEvent) -> (egui::Color32, String, String, String) 
             seq,
             uid,
             firmware_id,
+            session_id,
         } => (
             theme::INFO,
             format!("{} AWAKE", icon::SUN),
             format!("{seq}"),
-            format!("uid={} fw={}", hex16(uid), hex16(firmware_id)),
+            format!(
+                "uid={} fw={} session={}",
+                hex16(uid),
+                hex16(firmware_id),
+                hex16(session_id)
+            ),
         ),
         ControlEvent::TunnelError { code, seq } => (
             theme::ERROR,

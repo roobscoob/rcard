@@ -56,13 +56,15 @@ pub fn show(ui: &mut egui::Ui, dev: &DeviceHandle, state: &AppState) {
 
                 // Adapter column.
                 row.col(|ui| {
-                    let name = state.adapters
-                        .get(&log.adapter)
-                        .map(|a| a.display_name.as_str())
-                        .unwrap_or("?");
+                    let names: Vec<&str> = log.adapters.iter()
+                        .map(|id| state.adapters
+                            .get(id)
+                            .map(|a| a.display_name.as_str())
+                            .unwrap_or("?"))
+                        .collect();
                     ui.colored_label(
                         egui::Color32::from_rgb(0x60, 0x65, 0x80),
-                        name,
+                        names.join(", "),
                     );
                 });
 

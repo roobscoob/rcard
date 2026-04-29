@@ -6,6 +6,7 @@ fun ctx => {
   depends_on = [
     ctx.tasks.sysmodule_log,
     ctx.tasks.sysmodule_usb_protocol_fob,
+    ctx.tasks.sysmodule_reactor,
   ],
   uses_notifications = ["logs"],
   regions = {

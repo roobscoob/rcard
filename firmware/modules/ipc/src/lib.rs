@@ -84,7 +84,7 @@ pub use arena::{AllocError, Arena, CloneError, SharedArena};
 pub use dyn_handle::DynHandle;
 pub use handle::{
     ACQUIRE_METHOD, CANCEL_TRANSFER_METHOD, CLONE_METHOD, IMPLICIT_DESTROY_METHOD,
-    NOTIFY_DEAD_METHOD, PREPARE_TRANSFER_METHOD, TRY_DROP_METHOD,
+    NOTIFY_DEAD_METHOD, PREPARE_TRANSFER_METHOD, REVOKE_ALL_METHOD, TRY_DROP_METHOD,
     RawHandle, opcode, split_opcode,
 };
 // `Meta` requires `kern::TaskId`, firmware-only.
