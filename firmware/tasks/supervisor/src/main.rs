@@ -362,7 +362,7 @@ fn handle_faults() {
                 if len > 0 {
                     usart_write_tick_prefix();
                     usart_write_bytes(b"supervisor:   panic message: ");
-                    usart_write_bytes(&pbuf[..len]);
+                    usart_write_bytes(&pbuf[..core::cmp::min(len, 128)]);
                     usart_write_bytes(b"\r\n");
                 }
             }
