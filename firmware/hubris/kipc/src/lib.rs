@@ -58,6 +58,25 @@ pub enum NewState {
     Runnable = 1,
 }
 
+/// Reads the panic message from a faulted task into `buf`.
+///
+/// Returns `Ok(len)` with the number of bytes written,
+/// or `Err(rc)` if the task hasn't panicked or its panic buffer is invalid.
+pub fn read_panic_message(task_index: usize, buf: &mut [u8]) -> Result<usize, u32> {
+    buf[..4].copy_from_slice(&(task_index as u32).to_le_bytes());
+    let (rc, len) = userlib::sys_send_to_kernel(
+        Kipcnum::ReadPanicMessage as u16,
+        buf,
+        4,
+        &mut [],
+    );
+    if rc == userlib::ResponseCode::SUCCESS {
+        Ok(len)
+    } else {
+        Err(rc.0)
+    }
+}
+
 pub fn reset() -> ! {
     userlib::sys_send_to_kernel(Kipcnum::Reset as u16, &mut [], 0, &mut []);
     loop {

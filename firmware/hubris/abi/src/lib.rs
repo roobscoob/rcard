@@ -46,10 +46,7 @@ impl TaskId {
 
     /// Fabricates a `TaskId` for a known index and generation number.
     pub const fn for_index_and_gen(index: usize, gen: Generation) -> Self {
-        TaskId(
-            (index as u16 & Self::INDEX_MASK)
-                | (gen.0 as u16) << Self::INDEX_BITS,
-        )
+        TaskId((index as u16 & Self::INDEX_MASK) | (gen.0 as u16) << Self::INDEX_BITS)
     }
 
     /// Extracts the index part of this ID.
@@ -174,9 +171,7 @@ impl InterruptOwner {
 }
 
 /// Description of one interrupt response.
-#[derive(
-    Clone, Debug, FromBytes, Immutable, KnownLayout, Serialize, Deserialize,
-)]
+#[derive(Clone, Debug, FromBytes, Immutable, KnownLayout, Serialize, Deserialize)]
 pub struct Interrupt {
     /// Which interrupt number is being hooked.
     pub irq: InterruptNum,
@@ -201,9 +196,7 @@ pub struct ULease {
     pub length: u32,
 }
 
-#[derive(
-    Copy, Clone, Debug, FromBytes, Immutable, KnownLayout, PartialEq, Eq,
-)]
+#[derive(Copy, Clone, Debug, FromBytes, Immutable, KnownLayout, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct LeaseAttributes(u32);
 

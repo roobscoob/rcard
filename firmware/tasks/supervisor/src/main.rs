@@ -343,11 +343,30 @@ fn handle_faults() {
         usart_write_bytes(b" (");
         usart_write_bytes(name.as_bytes());
         usart_write_bytes(b") ");
-        match state {
-            Ok((ref s, _)) => usart_write_task_state(s),
-            Err(_) => usart_write_bytes(b"faulted (unknown state)"),
-        }
+        let is_panic = match state {
+            Ok((ref s, _)) => {
+                usart_write_task_state(s);
+                matches!(s, TaskState::Faulted { fault: FaultInfo::Panic, .. })
+            }
+            Err(_) => {
+                usart_write_bytes(b"faulted (unknown state)");
+                false
+            }
+        };
         usart_write_bytes(b"\r\n");
+
+        if is_panic {
+            static mut PANIC_BUF: [u8; 128] = [0; 128];
+            let pbuf = unsafe { &mut *(&raw mut PANIC_BUF) };
+            if let Ok(len) = kipc::read_panic_message(fault_index, pbuf) {
+                if len > 0 {
+                    usart_write_tick_prefix();
+                    usart_write_bytes(b"supervisor:   panic message: ");
+                    usart_write_bytes(&pbuf[..len]);
+                    usart_write_bytes(b"\r\n");
+                }
+            }
+        }
 
         kipc::reinitialize_task(fault_index, kipc::NewState::Runnable);
         next_task = fault_index.wrapping_add(1);
