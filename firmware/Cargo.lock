@@ -284,6 +284,7 @@ dependencies = [
  "ipc",
  "rcard-log",
  "rcard-log-macros",
+ "sysmodule_boilerplate_api",
  "sysmodule_display_api",
  "sysmodule_log_api",
  "userlib",
@@ -914,6 +915,35 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sysmodule_boilerplate"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "once-cell",
+ "rcard-log",
+ "rcard-log-macros",
+ "rcard-places",
+ "serde_json",
+ "sysmodule_boilerplate_api",
+ "sysmodule_log_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_boilerplate_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "serde",
+ "serde_json",
+ "userlib",
+ "zerocopy",
 ]
 
 [[package]]

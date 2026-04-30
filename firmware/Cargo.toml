@@ -23,6 +23,8 @@ members = [
     "sysmodule/storage/api",
     "sysmodule/compositor",
     "sysmodule/compositor/api",
+    "sysmodule/boilerplate/api",
+    "sysmodule/boilerplate",
     "sysmodule/mpi",
     "sysmodule/mpi/api",
     "sysmodule/log_sink_storage",

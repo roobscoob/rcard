@@ -1,0 +1,28 @@
+[package]
+name = "sysmodule_boilerplate_api"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bare-panics = []
+host = ["ipc/host"]
+
+[dependencies]
+ipc = { path = "../../../modules/ipc" }
+rcard-log = { path = "../../../../shared/log" }
+zerocopy = "0.8"
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard-schema = { version = "0.2", default-features = false, features = ["derive"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+userlib.workspace = true
+
+[build-dependencies]
+serde_json = "1"
+
+[lib]
+test = false
+bench = false
+
+[lints]
+workspace = true

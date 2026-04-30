@@ -1,5 +1,5 @@
 [package]
-name = "fob"
+name = "sysmodule_boilerplate"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,13 +12,17 @@ generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc" }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
-sysmodule_display_api = { path = "../../sysmodule/display/api" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
-sysmodule_boilerplate_api = { path = "../../sysmodule/boilerplate/api" }
+sysmodule_boilerplate_api = { path = "api" }
+once-cell = { path = "../../modules/once_cell" }
 userlib.workspace = true
 
+[build-dependencies]
+serde_json = "1"
+rcard-places = { path = "../../../shared/places" }
+
 [[bin]]
-name = "fob"
+name = "sysmodule_boilerplate"
 test = false
 bench = false
 

@@ -2,7 +2,7 @@
 #![no_main]
 
 use generated::slots::SLOTS;
-use rcard_log::info;
+use rcard_log::{info, ResultExt};
 use sysmodule_display_api::DisplayConfiguration;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -10,6 +10,8 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
 sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
+
+sysmodule_boilerplate_api::bind_demo!(Demo = SLOTS.sysmodule_boilerplate);
 
 const WIDTH: usize = 128;
 const HEIGHT: usize = 64;
@@ -113,7 +115,9 @@ const FONT_3X5: [[u8; 3]; 10] = [
 ];
 
 fn draw_digit(fb: &mut [u8; FB_SIZE], x: usize, y: usize, digit: u8) {
-    if digit > 9 { return; }
+    if digit > 9 {
+        return;
+    }
     let glyph = &FONT_3X5[digit as usize];
     for col in 0..3 {
         let bits = glyph[col];
@@ -193,6 +197,8 @@ fn main() -> ! {
 
     let display = config.open::<DisplayServer>().unwrap().unwrap();
 
+    Demo::hello().log_unwrap();
+
     let mut rng = Xorshift32(0xDEAD_BEEF);
 
     let mut stars = [Star { x: CX, y: CY }; NUM_STARS];
@@ -236,10 +242,15 @@ fn main() -> ! {
 
         blit_charm(&mut fb);
 
-        let fps_digits = if fps == 0 { 1usize } else {
+        let fps_digits = if fps == 0 {
+            1usize
+        } else {
             let mut n = fps;
             let mut d = 0usize;
-            while n > 0 { d += 1; n /= 10; }
+            while n > 0 {
+                d += 1;
+                n /= 10;
+            }
             d
         };
         draw_number(&mut fb, WIDTH - fps_digits * 4, 1, fps);
@@ -254,6 +265,5 @@ fn main() -> ! {
             fps_last = now;
             info!("fps: {}", fps);
         }
-
     }
 }
