@@ -62,7 +62,6 @@ declare_interior_mutable_const = "allow"
 
 [workspace.dependencies]
 userlib = { path = "hubris/userlib" }
-abi = { path = "hubris/abi" }
 kipc = { path = "hubris/kipc" }
 rcard_log = { path = "../shared/log", package = "rcard-log" }
 

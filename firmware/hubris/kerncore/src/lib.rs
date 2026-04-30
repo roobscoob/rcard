@@ -81,7 +81,9 @@ impl<T: UserSlice> UserSlice for &T {
 ///
 /// An empty region is weird but not impossible.
 pub trait MemoryRegion {
-    fn contains(&self, addr: usize) -> bool;
+    fn contains(&self, addr: usize) -> bool {
+        addr >= self.base_addr() && addr < self.end_addr()
+    }
     fn base_addr(&self) -> usize;
     fn end_addr(&self) -> usize;
 }
@@ -93,7 +95,7 @@ pub trait MemoryRegion {
 /// if the address is lower, `Less` if the address is higher. i.e. it returns
 /// the status of the region relative to the address, not vice versa.
 #[inline(always)]
-fn region_compare(region: &impl MemoryRegion, addr: usize) -> Ordering {
+pub fn region_compare(region: &impl MemoryRegion, addr: usize) -> Ordering {
     if addr < region.base_addr() {
         Ordering::Greater
     } else if addr >= region.end_addr() {
@@ -105,11 +107,6 @@ fn region_compare(region: &impl MemoryRegion, addr: usize) -> Ordering {
 
 impl<T: MemoryRegion> MemoryRegion for &T {
     #[inline(always)]
-    fn contains(&self, addr: usize) -> bool {
-        (**self).contains(addr)
-    }
-
-    #[inline(always)]
     fn base_addr(&self) -> usize {
         (**self).base_addr()
     }
@@ -120,12 +117,22 @@ impl<T: MemoryRegion> MemoryRegion for &T {
     }
 }
 
+pub enum AccessCheckError {
+    /// The slice is not fully contained within the task's memory regions.
+    NotCovered,
+    /// The slice is covered, but at least one of the regions covering it does
+    /// not meet the `region_ok` condition.
+    BadRegion,
+    /// The slice is blacklisted by at least one region in the blacklist.
+    Blacklisted,
+}
+
 /// Generic version of the kernel slice access checking code.
 ///
 /// The purpose of this routine is to determine whether a task can access some
 /// memory. The memory is described by `slice` and consists of a single
 /// contiguous region. The task's memory access permissions are described by
-/// `table`, which is an array of region descriptors.
+/// `whitelist`, which is an array of region descriptors.
 ///
 /// The exact implementation of both the slice type `S` and the region type `R`
 /// are left unspecified here, to avoid needing to rely on kernel-internal
@@ -140,28 +147,33 @@ impl<T: MemoryRegion> MemoryRegion for &T {
 ///
 /// # Preconditions
 ///
-/// `table` must be sorted by region base address, and the regions in the table
-/// must not overlap.
+/// `whitelist` must be sorted by region base address, and the regions in the
+/// table must not overlap.
 ///
-/// Both `slice` and each element of `table` must meet the properties described
-/// on [`UserSlice`] and [`MemoryRegion`], respectively.
+/// `blacklist` must be sorted by region base address, and the regions in the
+/// table must not overlap.
+///
+/// Both `slice`, each element of `whitelist` and each element of `blacklist` must
+/// meet the properties described on [`UserSlice`] and [`MemoryRegion`],
+/// respectively.
 ///
 /// # Returns
 ///
-/// `true` if `slice` is completely covered by one or more regions in `table`
-/// that meet the `region_ok` condition.
-///
-/// `false` otherwise.
-#[must_use]
+/// `Ok(())` if the slice is fully contained within regions in the whitelist, and
+/// each of those regions meets the `region_ok` condition, and the slice does not
+/// intersect with any region in the blacklist. Otherwise, returns an appropriate
+/// `AccessCheckError`.
 #[inline(always)]
-pub fn can_access<S, R>(
+pub fn can_access<S, R1, R2>(
     slice: S,
-    table: &[R],
-    region_ok: impl Fn(&R) -> bool,
-) -> bool
+    whitelist: &[R1],
+    blacklist: &[R2],
+    region_ok: impl Fn(&R1) -> bool,
+) -> Result<(), AccessCheckError>
 where
     S: UserSlice,
-    R: MemoryRegion,
+    R1: MemoryRegion,
+    R2: MemoryRegion,
 {
     if slice.is_empty() {
         // We deliberately omit tests for empty slices, as they confer no
@@ -169,7 +181,7 @@ where
         // important because a literal like `&[]` tends to produce a base
         // address of `0 + sizeof::<T>()`, which is almost certainly invalid
         // according to the task's region map... but fine with us.
-        return true;
+        return Ok(());
     }
 
     // We need to be convinced that this slice is _entirely covered_ by regions
@@ -184,41 +196,50 @@ where
     let mut scan_addr = slice.base_addr();
     let end_addr = slice.end_addr();
 
-    let Ok(index) =
-        table.binary_search_by(|reg| region_compare(reg, scan_addr))
-    else {
+    // Reject if any part of the slice falls within a blacklisted region.
+    let idx = match blacklist.binary_search_by(|reg| region_compare(reg, scan_addr)) {
+        Ok(_) => return Err(AccessCheckError::Blacklisted),
+        Err(idx) => idx,
+    };
+
+    // Since the blacklist is sorted and non-overlapping, if our base address is
+    // not in a blacklisted region, but the next blacklisted region starts before
+    // our slice ends, then we know that part of our slice is blacklisted.
+    if blacklist.get(idx).is_some_and(|r| r.base_addr() < end_addr) {
+        return Err(AccessCheckError::Blacklisted);
+    }
+
+    let Ok(index) = whitelist.binary_search_by(|reg| region_compare(reg, scan_addr)) else {
         // No region contained the start address.
-        return false;
+        return Err(AccessCheckError::NotCovered);
     };
 
     // Perform fast checks on the initial region. In practical testing this
     // provides a ~1% performance improvement over only using the loop below.
-    let first_region = &table[index];
+    let first_region = &whitelist[index];
     if !region_ok(first_region) {
-        return false;
+        return Err(AccessCheckError::BadRegion);
     }
     // Advance to the end of the first region
     scan_addr = first_region.end_addr();
     if scan_addr >= end_addr {
         // That was easy
-        return true;
+        return Ok(());
     }
 
     // Scan adjacent regions.
-    for region in &table[index + 1..] {
+    for region in &whitelist[index + 1..] {
         if !region.contains(scan_addr) {
-            // We've hit a hole without finishing our scan.
-            break;
+            return Err(AccessCheckError::NotCovered);
         }
         // Make sure the region is permissible!
         if !region_ok(region) {
-            // bail to the fail handling code at the end.
-            break;
+            return Err(AccessCheckError::BadRegion);
         }
 
         if end_addr <= region.end_addr() {
             // This region contains the end of our slice! We made it!
-            return true;
+            return Ok(());
         }
 
         // Continue scanning at the end of this region.
@@ -227,7 +248,7 @@ where
 
     // We reach this point by exhausting the region table without reaching the
     // end of the slice, or hitting a hole.
-    false
+    Err(AccessCheckError::NotCovered)
 }
 
 #[cfg(test)]
@@ -260,10 +281,6 @@ mod tests {
     }
 
     impl MemoryRegion for TestRegion {
-        fn contains(&self, addr: usize) -> bool {
-            addr >= self.base && addr < self.end_addr()
-        }
-
         fn base_addr(&self) -> usize {
             self.base
         }
@@ -431,11 +448,7 @@ mod tests {
 
         assert!(
             // Load-bearing tiny punctuation character:
-            !can_access(
-                slice,
-                &region_table,
-                accept_only_good_regions,
-            ),
+            !can_access(slice, &region_table, accept_only_good_regions,),
             "should NOT be able to access slice that spans adjacent bad ranges, but can",
         );
     }

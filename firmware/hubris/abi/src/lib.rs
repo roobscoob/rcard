@@ -247,6 +247,14 @@ pub enum TaskState {
         /// taken.
         original_state: SchedState,
     },
+    /// Task has been stopped due to a part of its address space being
+    /// inaccessible.
+    Hibernated {
+        /// Record the previous healthy state at the time the task was hibernated.
+        original_state: SchedState,
+        /// Record the previous fault information if the task was faulted at the time it was hibernated
+        previous_fault: Option<FaultInfo>,
+    },
 }
 
 impl TaskState {
@@ -255,10 +263,10 @@ impl TaskState {
     /// closed receive naming the caller specifically; otherwise, it will return
     /// `false`.
     pub fn can_accept_message_from(&self, caller: TaskId) -> bool {
-        if let TaskState::Healthy(SchedState::InRecv(peer)) = self {
-            peer.is_none() || peer == &Some(caller)
-        } else {
-            false
+        match self {
+            TaskState::Healthy(SchedState::InRecv(None)) => true,
+            TaskState::Healthy(SchedState::InRecv(Some(peer))) => *peer == caller,
+            _ => false,
         }
     }
 
@@ -273,7 +281,10 @@ impl TaskState {
 
     /// Checks if a task in this state can be unblocked with a notification.
     pub fn can_accept_notification(&self) -> bool {
-        matches!(self, TaskState::Healthy(SchedState::InRecv(_)))
+        match self {
+            TaskState::Healthy(SchedState::InRecv(_)) => true,
+            _ => false,
+        }
     }
 }
 
@@ -352,6 +363,13 @@ pub enum FaultInfo {
     Injected(TaskId),
     /// A fault has been delivered by a server task.
     FromServer(TaskId, ReplyFaultReason),
+    /// A task lost it's backing memory during hibernation.
+    LostRegion,
+    /// You tried to read memory currently hibernated.
+    HibernatedMemoryAccess {
+        /// The address you tried to read.
+        address: u32,
+    },
 }
 
 /// We're using an explicit `TryFrom` impl for `Sysnum` instead of
@@ -512,6 +530,12 @@ pub enum Kipcnum {
     SoftwareIrq = 8,
     FindFaultedTask = 9,
     ReadPanicMessage = 10,
+
+    // "Extension" kipcnums, used by rose's fork
+    HibernateRegion = 0x80 + 1,
+    ReadHibernatedRegion = 0x80 + 2,
+    WriteHibernatedRegion = 0x80 + 3,
+    RestoreRegion = 0x80 + 4,
 }
 
 impl core::convert::TryFrom<u16> for Kipcnum {
@@ -529,6 +553,11 @@ impl core::convert::TryFrom<u16> for Kipcnum {
             8 => Ok(Self::SoftwareIrq),
             9 => Ok(Self::FindFaultedTask),
             10 => Ok(Self::ReadPanicMessage),
+
+            0x81 => Ok(Self::HibernateRegion),
+            0x82 => Ok(Self::ReadHibernatedRegion),
+            0x83 => Ok(Self::WriteHibernatedRegion),
+            0x84 => Ok(Self::RestoreRegion),
             _ => Err(()),
         }
     }
@@ -599,6 +628,9 @@ pub enum ReadPanicMessageError {
     /// But, since the panicked task could be any arbitrary binary...anything is
     /// possible.
     BadPanicBuffer = 2,
+    /// The task has panicked, but its panic message buffer is currently
+    /// hibernated, so we can't read it.
+    PanicBufferHibernated = 3,
 }
 
 /// We're using an explicit `TryFrom` impl for `ReadPanicMessageError` instead of
@@ -611,7 +643,104 @@ impl core::convert::TryFrom<u32> for ReadPanicMessageError {
         match x {
             1 => Ok(Self::TaskNotPanicked),
             2 => Ok(Self::BadPanicBuffer),
+            3 => Ok(Self::PanicBufferHibernated),
             _ => Err(()),
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct HibernationEventId(pub u32);
+
+impl HibernationEventId {
+    /// Fabricates a `HibernationEventId` for a known index and generation number.
+    pub fn from_parts(index: u8, generation: u32) -> Self {
+        HibernationEventId((generation << 5) | index as u32)
+    }
+
+    /// The index is in the lower 5 bits of the ID, and identifies which
+    /// hibernation event this is referring to.
+    pub fn index(&self) -> u8 {
+        (self.0 & 0x1F) as u8
+    }
+
+    /// The generation is in the upper 27 bits of the ID, and is incremented on each
+    /// hibernation event for a given index.
+    pub fn generation(&self) -> u32 {
+        self.0 >> 5
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[repr(u32)]
+pub enum RestoreMode {
+    /// Restore the hibernated region, and attempt to restore the task to its
+    /// original healthy state. If the task was faulted at the time of hibernation,
+    /// attempt to restore the fault as well.
+    Restored = 0,
+
+    /// Fault the hibernated task with `FaultInfo::LostRegion`. This is intended to
+    /// be used when the hibernated region contents cannot be restored,
+    /// but a fault and reset of the task would allow it to function correctly.
+    Lost = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AllocateError {
+    /// All slots are currently in use.
+    Full = 0,
+    /// `[pointer, pointer + length)` overlaps an existing hibernation region.
+    Overlap = 1,
+    /// `length == 0` or `pointer + length` overflows.
+    InvalidRegion = 2,
+}
+
+/// Errors returned by [`Kipcnum::HibernateRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum HibernateRegionMessageError {
+    /// All hibernation event slots are currently in use.
+    NoSlots = 0,
+    /// The region specified by the caller overlaps with an existing hibernation region.
+    Overlap = 1,
+    /// The region specified by the caller is invalid (length is zero or pointer + length overflows).
+    InvalidRegion = 2,
+    /// The caller attempted to hibernate a region in use by the kernel.
+    KernelRegion = 3,
+    /// The caller attempted to hibernate a region in use by the supervisor.
+    PrivilegedRegion = 4,
+}
+
+/// Errors returned by [`Kipcnum::ReadHibernatedRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ReadHibernatedRegionMessageError {
+    /// The (address, length) specified by the caller is not hibernated.
+    NotHibernated = 0,
+    /// Missing a lease to write back the data.
+    MissingWritebackLease = 1,
+    /// Writeback lease is missing LeaseAttributes::WRITE.
+    WritebackLeaseNotWritable = 2,
+}
+
+/// Errors returned by [`Kipcnum::WriteHibernatedRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum WriteHibernatedRegionMessageError {
+    /// The (address, length) specified by the caller is not hibernated.
+    NotHibernated = 0,
+    /// Missing a lease to read the source data from.
+    MissingSourceLease = 1,
+    /// Source lease is missing LeaseAttributes::READ.
+    SourceLeaseNotReadable = 2,
+}
+
+/// Errors returned by [`Kipcnum::RestoreRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RestoreRegionMessageError {
+    /// The event id is stale, out of range, or was never issued.
+    InvalidEventId = 0,
 }

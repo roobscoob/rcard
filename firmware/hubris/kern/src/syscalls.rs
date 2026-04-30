@@ -38,6 +38,7 @@ use unwrap_lite::UnwrapLite;
 
 use crate::arch;
 use crate::err::{InteractFault, UserError};
+use crate::hibernate::HibernationTable;
 use crate::startup::with_task_table;
 use crate::task::{self, current_id, ArchState, NextTask, Task};
 use crate::time::Timestamp;
@@ -380,6 +381,20 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
 
     match tasks[callee].state() {
         TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => (),
+
+        // In the case that the callee hibernated before we could reply,
+        // we don't want to block the caller. This could result in
+        // 'servers' getting transiently hibernated if a hibernating
+        // client called into them and then hibernated before the server
+        // could reply.
+        //
+        // We can solve this by buffering the reply until the client
+        // wakes up and checks for it.
+        TaskState::Hibernated {
+            previous_fault: None,
+            original_state: SchedState::InReply(x),
+        } if *x == caller_id => (),
+
         _ => {
             // Huh. The target task is off doing something else. This can happen
             // if application-specific supervisory logic unblocks it before
@@ -430,7 +445,30 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
     }
 
     // Okay, ready to attempt the copy.
-    let amount_copied = safe_copy(tasks, caller, src_slice, callee, dest_slice);
+    let amount_copied = match tasks[callee].state() {
+        TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => {
+            // Normal case: callee is waiting for our reply. Do the copy and
+            // wake it up.
+            safe_copy(tasks, caller, src_slice, callee, dest_slice)
+        }
+
+        TaskState::Hibernated {
+            previous_fault: None,
+            original_state: SchedState::InReply(x),
+        } if *x == caller_id => {
+            // The callee hibernated before we could reply. Buffer the reply
+            // until it wakes up and checks for it.
+            set_hibernation_reply(tasks, caller, src_slice, callee, dest_slice)
+        }
+
+        _ => {
+            // We should never have gotten here, because we checked the callee's state
+            // above.
+
+            unreachable!("invalid callee state in reply")
+        }
+    };
+
     let amount_copied = match amount_copied {
         Ok(n) => n,
         Err(interact) => {
@@ -596,6 +634,14 @@ fn borrow_lease(
     // Check state of lender and range of lease table.
     match tasks[lender].state() {
         TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => (),
+
+        // we also want to allow borrowing from a hibernated lender, so long as
+        // the underlying memory region is not itself hibernated.
+        TaskState::Hibernated {
+            previous_fault: None,
+            original_state: SchedState::InReply(x),
+        } if *x == caller_id => (),
+
         _ => {
             // The alleged lender isn't lending anything at all.
             // Let's assume this is a defecting lender.
@@ -620,6 +666,14 @@ fn borrow_lease(
     let leases = match tasks[lender].try_read(&leases) {
         Ok(slice) => Ok(slice),
         Err(fault) => {
+            // if the region was lost, this is not actually the lender's fault.
+            if matches!(fault, FaultInfo::LostRegion) {
+                return Err(UserError::Recoverable(
+                    abi::DEFECT,
+                    NextTask::Same,
+                ));
+            }
+
             let wake_hint = task::force_fault(tasks, lender, fault);
             Err(UserError::Recoverable(abi::DEFECT, wake_hint))
         }
@@ -630,7 +684,7 @@ fn borrow_lease(
     // we can do this safely.
     let lease = leases.get(lease_number).cloned();
     // Is the lease number provided by the borrower legitimate?
-    if let Some(mut lease) = lease {
+    let lease = if let Some(mut lease) = lease {
         // Attempt to offset the lease. Handle cases where the offset is bogus.
         // First, we must convert to u32, which _should be_ a no-op but we'll do
         // it the careful way:
@@ -653,7 +707,17 @@ fn borrow_lease(
         // if the lender's lease table changed shape, this will fault the
         // borrower, which might be bad.)
         Err(FaultInfo::SyscallUsage(UsageError::LeaseOutOfRange).into())
-    }
+    };
+
+    HibernationTable::with_borrow(|table| {
+        // If the lender hibernated while we were trying to borrow, this is not
+        // actually the borrower's fault.
+        if lease.is_ok_and(|l| table.is_partially_hibernated(&l)) {
+            return Err(UserError::Recoverable(abi::DEFECT, NextTask::Same));
+        }
+
+        lease
+    })
 }
 
 /// Performs the architecture-specific bookkeeping to activate `task` on next
@@ -873,6 +937,10 @@ fn reply_fault(
 
     match tasks[callee].state() {
         TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => (),
+        TaskState::Hibernated {
+            previous_fault: None,
+            original_state: SchedState::InReply(x),
+        } if *x == caller_id => (),
         _ => {
             // Huh. The target task is off doing something else. This can happen
             // if application-specific supervisory logic unblocks it before

@@ -83,7 +83,70 @@ use crate::task;
 extern "C" {
     fn kernel_debug_print(ptr: *const u8, len: usize);
     fn kernel_debug_hex(ptr: *const u8, len: usize, val: u32);
+
+    static __vector_table: u32;
+    static __stext: u32;
+    static __etext: u32;
+    static __srodata: u32;
+    static __erodata: u32;
+    static __sidata: u32;
+    static __sdata: u32;
+    static __edata: u32;
+    static __sbss: u32;
+    static __ebss: u32;
+    static __suninit: u32;
+    static __euninit: u32;
+    static _stack_end: u32;
+    static _stack_start: u32;
 }
+
+macro_rules! kernel_region {
+    ($name:ident, $start:ident, $end:ident) => {
+        pub struct $name;
+
+        impl kerncore::MemoryRegion for $name {
+            fn base_addr(&self) -> usize {
+                unsafe { core::ptr::addr_of!($start) as usize }
+            }
+
+            fn end_addr(&self) -> usize {
+                unsafe { core::ptr::addr_of!($end) as usize }
+            }
+        }
+    };
+}
+
+kernel_region!(KernelVectorTable, __vector_table, __stext);
+kernel_region!(KernelText, __stext, __etext);
+kernel_region!(KernelRoData, __srodata, __erodata);
+kernel_region!(KernelData, __sdata, __edata);
+kernel_region!(KernelBss, __sbss, __ebss);
+kernel_region!(KernelUninit, __suninit, __euninit);
+kernel_region!(KernelStack, _stack_end, _stack_start);
+
+pub struct KernelDataFlash;
+
+impl kerncore::MemoryRegion for KernelDataFlash {
+    fn base_addr(&self) -> usize {
+        unsafe { core::ptr::addr_of!(__sidata) as usize }
+    }
+
+    fn end_addr(&self) -> usize {
+        let data_size = KernelData.end_addr() - KernelData.base_addr();
+        self.base_addr() + data_size
+    }
+}
+
+pub const KERNEL_REGIONS: &[&dyn kerncore::MemoryRegion] = &[
+    &KernelVectorTable,
+    &KernelText,
+    &KernelRoData,
+    &KernelDataFlash,
+    &KernelData,
+    &KernelBss,
+    &KernelUninit,
+    &KernelStack,
+];
 
 fn klog(msg: &str) {
     unsafe { kernel_debug_print(msg.as_ptr(), msg.len()) }

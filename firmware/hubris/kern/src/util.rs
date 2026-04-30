@@ -4,6 +4,8 @@
 
 //! Common utility functions used in various places in the kernel.
 
+use kerncore::MemoryRegion;
+
 /// Utility routine for getting `&mut` to _two_ elements of a slice, at indexes
 /// `i` and `j`. `i` and `j` must be distinct, or this will panic.
 #[inline(always)]
@@ -28,4 +30,25 @@ pub fn index2_distinct<T>(
     } else {
         panic!()
     }
+}
+
+pub fn regions_overlap(
+    offset: u32,
+    length: u32,
+    region: impl MemoryRegion,
+) -> bool {
+    let input_end = offset.saturating_add(length);
+
+    if offset >= input_end {
+        return false; // empty
+    }
+
+    let region_base = region.base_addr() as u32;
+    let region_end = region.end_addr() as u32;
+
+    if region_base == region_end {
+        return false;
+    }
+
+    offset < region_end && region_base < input_end
 }

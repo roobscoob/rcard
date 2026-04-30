@@ -4,14 +4,22 @@
 
 //! Implementation of IPC operations on the virtual kernel task.
 
-use abi::{FaultInfo, Kipcnum, SchedState, TaskState, UsageError};
+use abi::{
+    AllocateError, FaultInfo, HibernateRegionMessageError, HibernationEventId,
+    Kipcnum, LeaseAttributes, ReadHibernatedRegionMessageError,
+    RestoreRegionMessageError, SchedState, TaskState, ULease, UsageError,
+    WriteHibernatedRegionMessageError,
+};
 use core::mem::size_of;
+use kerncore::MemoryRegion;
 use unwrap_lite::UnwrapLite;
 
 use crate::arch;
 use crate::err::UserError;
+use crate::hibernate::HibernationTable;
 use crate::task::{current_id, ArchState, NextTask, Task};
 use crate::umem::{safe_copy, USlice};
+use crate::util::regions_overlap;
 
 /// Message dispatcher.
 pub fn handle_kernel_message(
@@ -45,6 +53,21 @@ pub fn handle_kernel_message(
         }
         Ok(Kipcnum::ReadPanicMessage) => {
             read_panic_message(tasks, caller, args.message?, args.response?)
+        }
+        Ok(Kipcnum::HibernateRegion) => {
+            hibernate_region(tasks, caller, args.message?, args.response?)
+        }
+        Ok(Kipcnum::ReadHibernatedRegion) => {
+            read_hibernated_region(tasks, caller, args.message?, args.response?)
+        }
+        Ok(Kipcnum::WriteHibernatedRegion) => write_hibernated_region(
+            tasks,
+            caller,
+            args.message?,
+            args.response?,
+        ),
+        Ok(Kipcnum::RestoreRegion) => {
+            restore_region(tasks, caller, args.message?, args.response?)
         }
 
         _ => {
@@ -519,17 +542,22 @@ fn read_panic_message(
         )));
     };
 
-    // Make sure the task is actually panicked.
-    let TaskState::Faulted {
-        fault: FaultInfo::Panic,
-        ..
-    } = task.state()
-    else {
-        return Err(UserError::Recoverable(
-            abi::ReadPanicMessageError::TaskNotPanicked as u32,
-            NextTask::Same,
-        ));
-    };
+    match task.state() {
+        TaskState::Faulted {
+            fault: FaultInfo::Panic,
+            ..
+        } => (),
+        TaskState::Hibernated {
+            previous_fault: Some(FaultInfo::Panic),
+            ..
+        } => (),
+        _ => {
+            return Err(UserError::Recoverable(
+                abi::ReadPanicMessageError::TaskNotPanicked as u32,
+                NextTask::Same,
+            ))
+        }
+    }
 
     let Ok(message) = task.save().as_panic_args().message else {
         // There's really only one reason that `as_panic_args().message` would
@@ -566,6 +594,17 @@ fn read_panic_message(
             // If the caller's buffer was invalid, they take a fault.
             Err(UserError::Unrecoverable(fault))
         }
+        Err(crate::err::InteractFault {
+            src: Some(FaultInfo::HibernatedMemoryAccess { .. }),
+            ..
+        }) => {
+            // If the source region was hibernated, that's not the caller's
+            // fault; give them a recoverable error.
+            Err(UserError::Recoverable(
+                abi::ReadPanicMessageError::PanicBufferHibernated as u32,
+                NextTask::Same,
+            ))
+        }
         Err(_) => {
             // Source region was bad, but it's not the caller's fault; give them
             // a recoverable error.
@@ -575,4 +614,263 @@ fn read_panic_message(
             ))
         }
     }
+}
+
+fn hibernate_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+    response: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let (address, length): (u32, u32) =
+        deserialize_message(&tasks[caller], message)?;
+
+    // before we allocate the hibernation region, we need to make sure
+    // that this region doesn't overlap with any critical kernel or supervisor memory.
+    for region in arch::KERNEL_REGIONS {
+        if regions_overlap(address, length, region) {
+            return Err(UserError::Recoverable(
+                HibernateRegionMessageError::KernelRegion as u32,
+                NextTask::Same,
+            ));
+        }
+    }
+
+    for region in tasks[0].region_table() {
+        if regions_overlap(address, length, region) {
+            return Err(UserError::Recoverable(
+                HibernateRegionMessageError::PrivilegedRegion as u32,
+                NextTask::Same,
+            ));
+        }
+    }
+
+    let (hibernation_region_id, hibernation_region) =
+        HibernationTable::with_borrow(|hibernation_table| {
+            hibernation_table.allocate(address, length)
+        })
+        .map_err(|e| {
+            UserError::Recoverable(
+                match e {
+                    AllocateError::Full => HibernateRegionMessageError::NoSlots,
+                    AllocateError::Overlap => {
+                        HibernateRegionMessageError::Overlap
+                    }
+                    AllocateError::InvalidRegion => {
+                        HibernateRegionMessageError::InvalidRegion
+                    }
+                } as u32,
+                NextTask::Same,
+            )
+        })?;
+
+    // now we've successfully allocated a hibernation region
+    // so we need to go through all the tasks that overlap with that region
+    // and mark them as hibernated.
+
+    for task in tasks.iter_mut() {
+        if task.uses_region(&hibernation_region) {
+            task.mark_hibernated();
+        }
+    }
+
+    let response_len = serialize_response(
+        &mut tasks[caller],
+        response,
+        &hibernation_region_id,
+    )?;
+
+    tasks[caller]
+        .save_mut()
+        .set_send_response_and_length(0, response_len);
+
+    Ok(NextTask::Same)
+}
+
+fn read_hibernated_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+    response: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let address: u32 = deserialize_message(&tasks[caller], message)?;
+
+    let lease = caller_lease(
+        tasks,
+        caller,
+        0,
+        ReadHibernatedRegionMessageError::MissingWritebackLease as u32,
+    )?;
+
+    let is_fully_hibernated =
+        HibernationTable::with_borrow(|hibernation_table| {
+            hibernation_table.is_fully_hibernated(address, lease.length)
+        });
+
+    if !is_fully_hibernated {
+        return Err(UserError::Recoverable(
+            ReadHibernatedRegionMessageError::NotHibernated as u32,
+            NextTask::Same,
+        ));
+    }
+
+    if !lease.attributes.contains(LeaseAttributes::WRITE) {
+        return Err(UserError::Recoverable(
+            ReadHibernatedRegionMessageError::WritebackLeaseNotWritable as u32,
+            NextTask::Same,
+        ));
+    }
+
+    let mut leased_area = USlice::from(&lease);
+    let dest = tasks[caller]
+        .try_write(&mut leased_area)
+        .map_err(UserError::Unrecoverable)?;
+
+    // Safety: the is_fully_hibernated check above guarantees this address
+    // range is covered by hibernation descriptors, so no task has MPU access.
+    // The kernel is non-preemptive, so no concurrent writes. The bytes
+    // themselves may be uninitialized or stale if the backing device was
+    // removed; the supervisor is responsible for knowing that hasn't happened.
+    let src = unsafe {
+        core::slice::from_raw_parts(address as *const u8, dest.len())
+    };
+    dest.copy_from_slice(src);
+
+    tasks[caller].save_mut().set_send_response_and_length(0, 0);
+    Ok(NextTask::Same)
+}
+
+fn write_hibernated_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+    response: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let address: u32 = deserialize_message(&tasks[caller], message)?;
+
+    let lease = caller_lease(
+        tasks,
+        caller,
+        0,
+        WriteHibernatedRegionMessageError::MissingSourceLease as u32,
+    )?;
+
+    let is_fully_hibernated =
+        HibernationTable::with_borrow(|hibernation_table| {
+            hibernation_table.is_fully_hibernated(address, lease.length)
+        });
+
+    if !is_fully_hibernated {
+        return Err(UserError::Recoverable(
+            WriteHibernatedRegionMessageError::NotHibernated as u32,
+            NextTask::Same,
+        ));
+    }
+
+    if !lease.attributes.contains(LeaseAttributes::READ) {
+        return Err(UserError::Recoverable(
+            WriteHibernatedRegionMessageError::SourceLeaseNotReadable as u32,
+            NextTask::Same,
+        ));
+    }
+
+    let leased_area = USlice::from(&lease);
+    let src = tasks[caller]
+        .try_read(&leased_area)
+        .map_err(UserError::Unrecoverable)?;
+
+    // Safety: is_fully_hibernated guarantees this range is covered by
+    // hibernation descriptors, so no task has MPU access. The kernel is
+    // non-preemptive, so no concurrent reads or writes. The supervisor is
+    // responsible for knowing the backing device is still present.
+    let dest = unsafe {
+        core::slice::from_raw_parts_mut(address as *mut u8, src.len())
+    };
+    dest.copy_from_slice(src);
+
+    tasks[caller].save_mut().set_send_response_and_length(0, 0);
+    Ok(NextTask::Same)
+}
+
+fn restore_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+    _response: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let event_id: HibernationEventId =
+        deserialize_message(&tasks[caller], message)?;
+
+    HibernationTable::with_borrow(|table| table.restore(event_id)).map_err(
+        |()| {
+            UserError::Recoverable(
+                RestoreRegionMessageError::InvalidEventId as u32,
+                NextTask::Same,
+            )
+        },
+    )?;
+
+    // Un-hibernate tasks that no longer overlap any remaining region.
+    HibernationTable::with_borrow(|table| {
+        for task in tasks.iter_mut() {
+            if let TaskState::Hibernated { .. } = task.state() {
+                let still_hibernated = task
+                    .region_table()
+                    .iter()
+                    .any(|r| table.is_partially_hibernated(r));
+
+                if !still_hibernated {
+                    task.restore();
+                }
+            }
+        }
+    });
+
+    tasks[caller].save_mut().set_send_response_and_length(0, 0);
+    Ok(NextTask::Same)
+}
+
+fn caller_lease(
+    tasks: &[Task],
+    caller: usize,
+    lease_number: usize,
+    error: u32,
+) -> Result<ULease, UserError> {
+    let largs = tasks[caller].save().as_send_args();
+    let leases = largs
+        .lease_table
+        .map_err(|e| UserError::Unrecoverable(FaultInfo::SyscallUsage(e)))?;
+
+    let leases = tasks[caller]
+        .try_read(&leases)
+        .map_err(UserError::Unrecoverable)?;
+
+    leases
+        .get(lease_number)
+        .cloned()
+        .ok_or(UserError::Recoverable(error, NextTask::Same))
 }

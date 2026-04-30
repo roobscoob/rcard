@@ -10,16 +10,20 @@ use abi::{
     FaultInfo, FaultSource, Generation, ReplyFaultReason, SchedState, TaskId,
     TaskState, ULease, UsageError,
 };
+use kerncore::AccessCheckError;
+use unwrap_lite::UnwrapLite;
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 use crate::descs::{
     Priority, RegionAttributes, RegionDesc, TaskDesc, TaskFlags,
     REGIONS_PER_TASK,
 };
-use crate::err::UserError;
+use crate::err::{InteractFault, UserError};
+use crate::hibernate::{self, HibernateBuffer};
 use crate::startup::HUBRIS_FAULT_NOTIFICATION;
 use crate::time::Timestamp;
 use crate::umem::USlice;
+use crate::util::regions_overlap;
 
 /// Internal representation of a task.
 ///
@@ -49,6 +53,9 @@ pub struct Task {
     /// Pointer to the ROM descriptor used to create this task, so it can be
     /// restarted.
     descriptor: &'static TaskDesc,
+
+    /// Reply buffer used for hibernation
+    hibernate_buffer: Option<HibernateBuffer>,
 }
 
 impl Task {
@@ -69,6 +76,7 @@ impl Task {
             notifications: 0,
             save: crate::arch::SavedState::default(),
             timer: crate::task::TimerState::default(),
+            hibernate_buffer: None,
         }
     }
 
@@ -80,7 +88,10 @@ impl Task {
     /// This function is `must_use` because calling it without checking its
     /// return value is incredibly suspicious.
     #[must_use]
-    fn can_read<T>(&self, slice: &USlice<T>) -> bool {
+    fn can_read<T>(
+        &self,
+        slice: &USlice<T>,
+    ) -> Result<(), kerncore::AccessCheckError> {
         self.can_access(slice, RegionAttributes::READ, RegionAttributes::DMA)
     }
 
@@ -97,16 +108,22 @@ impl Task {
     where
         T: FromBytes + Immutable + KnownLayout,
     {
-        if self.can_read(slice) {
-            // Safety: assume_readable requires us to have validated that the
-            // slice refers to normal task memory, which we did on the previous
-            // line.
-            unsafe { Ok(slice.assume_readable()) }
-        } else {
-            Err(FaultInfo::MemoryAccess {
-                address: Some(slice.base_addr() as u32),
-                source: FaultSource::Kernel,
-            })
+        match self.can_read(slice) {
+            // Safety: assume_readable requires us to have validated that
+            // the slice refers to normal task memory, which we did on the
+            // previous line.
+            Ok(()) => unsafe { Ok(slice.assume_readable()) },
+            Err(AccessCheckError::BadRegion | AccessCheckError::NotCovered) => {
+                Err(FaultInfo::MemoryAccess {
+                    address: Some(slice.base_addr() as u32),
+                    source: FaultSource::Kernel,
+                })
+            }
+            Err(AccessCheckError::Blacklisted) => {
+                Err(FaultInfo::HibernatedMemoryAccess {
+                    address: slice.base_addr() as u32,
+                })
+            }
         }
     }
 
@@ -129,7 +146,7 @@ impl Task {
     where
         T: FromBytes + Immutable + KnownLayout,
     {
-        if self.can_access(
+        match self.can_access(
             slice,
             RegionAttributes::READ,
             RegionAttributes::empty(),
@@ -137,12 +154,18 @@ impl Task {
             // Safety: assume_readable_raw requires us to have validated that
             // the slice refers to normal task memory, which we did on the
             // previous line.
-            unsafe { Ok(slice.assume_readable_raw()) }
-        } else {
-            Err(FaultInfo::MemoryAccess {
-                address: Some(slice.base_addr() as u32),
-                source: FaultSource::Kernel,
-            })
+            Ok(()) => unsafe { Ok(slice.assume_readable_raw()) },
+            Err(AccessCheckError::BadRegion | AccessCheckError::NotCovered) => {
+                Err(FaultInfo::MemoryAccess {
+                    address: Some(slice.base_addr() as u32),
+                    source: FaultSource::Kernel,
+                })
+            }
+            Err(AccessCheckError::Blacklisted) => {
+                Err(FaultInfo::HibernatedMemoryAccess {
+                    address: slice.base_addr() as u32,
+                })
+            }
         }
     }
 
@@ -154,7 +177,10 @@ impl Task {
     /// This function is `must_use` because calling it without checking its
     /// return value is incredibly suspicious.
     #[must_use]
-    fn can_write<T>(&self, slice: &USlice<T>) -> bool {
+    fn can_write<T>(
+        &self,
+        slice: &USlice<T>,
+    ) -> Result<(), kerncore::AccessCheckError> {
         self.can_access(slice, RegionAttributes::WRITE, RegionAttributes::DMA)
     }
 
@@ -171,16 +197,22 @@ impl Task {
     where
         T: FromBytes + Immutable + KnownLayout,
     {
-        if self.can_write(slice) {
-            // Safety: assume_writable requires us to have validated that the
-            // slice refers to normal task memory, which we did on the previous
-            // line.
-            unsafe { Ok(slice.assume_writable()) }
-        } else {
-            Err(FaultInfo::MemoryAccess {
-                address: Some(slice.base_addr() as u32),
-                source: FaultSource::Kernel,
-            })
+        match self.can_write(slice) {
+            // Safety: assume_writable requires us to have validated that
+            // the slice refers to normal task memory, which we did on the
+            // previous line.
+            Ok(()) => unsafe { Ok(slice.assume_writable()) },
+            Err(AccessCheckError::BadRegion | AccessCheckError::NotCovered) => {
+                Err(FaultInfo::MemoryAccess {
+                    address: Some(slice.base_addr() as u32),
+                    source: FaultSource::Kernel,
+                })
+            }
+            Err(AccessCheckError::Blacklisted) => {
+                Err(FaultInfo::HibernatedMemoryAccess {
+                    address: slice.base_addr() as u32,
+                })
+            }
         }
     }
 
@@ -211,16 +243,23 @@ impl Task {
         slice: &USlice<T>,
         desired: RegionAttributes,
         forbidden: RegionAttributes,
-    ) -> bool {
+    ) -> Result<(), kerncore::AccessCheckError> {
         // Forceably include DEVICE in the forbidden set, whether or not the
         // caller thought about it.
         let forbidden = forbidden | RegionAttributes::DEVICE;
 
-        // Delegate the actual tests to the kerncore crate, but with our
-        // attribute-sensing customization:
-        kerncore::can_access(slice, self.region_table(), |region| {
-            region.attributes.contains(desired)
-                && !region.attributes.intersects(forbidden)
+        hibernate::HibernationTable::with_borrow(|hibernation_table| {
+            // Delegate the actual tests to the kerncore crate, but with our
+            // attribute-sensing customization:
+            kerncore::can_access(
+                slice,
+                self.region_table(),
+                hibernation_table,
+                |region| {
+                    region.attributes.contains(desired)
+                        && !region.attributes.intersects(forbidden)
+                },
+            )
         })
     }
 
@@ -315,13 +354,24 @@ impl Task {
     /// This does not honor the `START_AT_BOOT` task flag, because this is not a
     /// system reboot. The task will be left in `Stopped` state. If you would
     /// like to run the task after reinitializing it, you must do so explicitly.
+    ///
+    /// This cannot be used to bring a task out of hibernation.
     pub fn reinitialize(&mut self) {
+        let old_state = self.state;
+
         self.generation = self.generation.wrapping_add(1);
         self.timer = TimerState::default();
         self.notifications = 0;
         self.state = TaskState::default();
 
-        crate::arch::reinitialize(self);
+        match old_state {
+            TaskState::Hibernated { .. } => {
+                self.hibernate_buffer = Some(HibernateBuffer::reinitialize())
+            }
+            TaskState::Faulted { .. } | TaskState::Healthy(..) => {
+                crate::arch::reinitialize(self);
+            }
+        }
     }
 
     /// Returns a reference to the `TaskDesc` that was used to initially create
@@ -364,9 +414,22 @@ impl Task {
     ///
     /// If you attempt to use this to bring a task out of fault state.
     pub fn set_healthy_state(&mut self, s: SchedState) {
-        let last = core::mem::replace(&mut self.state, s.into());
-        if let TaskState::Faulted { .. } = last {
-            panic!();
+        match &mut self.state {
+            TaskState::Healthy(state) => {
+                *state = s;
+            }
+            TaskState::Hibernated {
+                previous_fault: None,
+                original_state,
+            } => {
+                *original_state = s;
+            }
+            TaskState::Hibernated { .. } => {
+                panic!("cannot use set_healthy_state to bring a hibernated task out of fault state");
+            }
+            TaskState::Faulted { .. } => {
+                panic!("cannot use set_healthy_state to bring a task out of fault state");
+            }
         }
     }
 
@@ -379,6 +442,124 @@ impl Task {
     pub fn save_mut(&mut self) -> &mut crate::arch::SavedState {
         &mut self.save
     }
+
+    pub fn uses_region<R>(&self, region: &R) -> bool
+    where
+        R: MemoryRegion,
+    {
+        self.region_table()
+            .iter()
+            .any(|&r| regions_overlap(r.base, r.size, region))
+    }
+
+    pub fn mark_hibernated(&mut self) {
+        match self.state() {
+            TaskState::Healthy(sched_state) => {
+                self.state = TaskState::Hibernated {
+                    previous_fault: None,
+                    original_state: *sched_state,
+                }
+            }
+            TaskState::Faulted {
+                fault,
+                original_state,
+            } => {
+                self.state = TaskState::Hibernated {
+                    previous_fault: Some(*fault),
+                    original_state: *original_state,
+                }
+            }
+            TaskState::Hibernated { .. } => {}
+        }
+    }
+
+    pub fn restore(&mut self) {
+        let (original_state, previous_fault) = match self.state {
+            TaskState::Hibernated {
+                original_state,
+                previous_fault,
+            } => (original_state, previous_fault),
+            _ => return,
+        };
+
+        match (original_state, self.hibernate_buffer.take()) {
+            (_, Some(HibernateBuffer::Reinitialize)) => {
+                self.reinitialize();
+            }
+            (
+                SchedState::InReply(_),
+                Some(HibernateBuffer::Ok { data, length }),
+            ) => {
+                let len = length as usize;
+                match self.save().as_send_args().response {
+                    Ok(mut dest_slice) => match self.try_write(&mut dest_slice)
+                    {
+                        Ok(dest) => {
+                            dest[..len].copy_from_slice(&data[..len]);
+                            self.save_mut()
+                                .set_send_response_and_length(0, len);
+                            self.state =
+                                TaskState::Healthy(SchedState::Runnable);
+                        }
+                        Err(fault) => {
+                            self.state = TaskState::Faulted {
+                                fault,
+                                original_state,
+                            };
+                        }
+                    },
+                    Err(e) => {
+                        self.state = TaskState::Faulted {
+                            fault: FaultInfo::SyscallUsage(e),
+                            original_state,
+                        };
+                    }
+                }
+            }
+            (_, _) => match previous_fault {
+                Some(fault) => {
+                    self.state = TaskState::Faulted {
+                        fault,
+                        original_state,
+                    };
+                }
+                None => {
+                    self.state = TaskState::Healthy(original_state);
+                }
+            },
+        }
+    }
+}
+
+/// Buffers a reply for this task to be used when it wakes from hibernation.
+pub fn set_hibernation_reply(
+    tasks: &mut [Task],
+    from: usize,
+    mut src_slice: USlice<u8>,
+    to: usize,
+    mut dest_slice: USlice<u8>,
+) -> Result<usize, InteractFault> {
+    let copy_len = USlice::shorten_to_match(&mut src_slice, &mut dest_slice);
+
+    if copy_len == 0 {
+        // try_read and try_write both accept _any_ empty slice, which then
+        // results in a zero-byte copy. We can skip some steps.
+        tasks[to].hibernate_buffer =
+            Some(HibernateBuffer::ok(&[]).unwrap_lite());
+        return Ok(0);
+    }
+
+    let data = tasks[from]
+        .try_read(&src_slice)
+        .map_err(InteractFault::in_src)?;
+
+    let reply_buffer = HibernateBuffer::ok(data)
+        .map_err(|_| FaultInfo::SyscallUsage(UsageError::ReplyTooBig))
+        .map_err(InteractFault::in_src)?;
+
+    tasks[to].hibernate_buffer = Some(reply_buffer);
+
+    Ok(copy_len)
 }
 
 /// Interface that must be implemented by the `arch::SavedState` type. This
@@ -905,6 +1086,15 @@ pub fn force_fault(
             TaskState::Faulted {
                 fault,
                 original_state,
+            }
+        }
+        TaskState::Hibernated { original_state, .. } => {
+            // Fault while hibernated. This is a little weird.
+            TaskState::Hibernated {
+                original_state,
+                // if previous_fault was None => first fault while hibernated,
+                // if previous_fault was Some(_) => double fault while hibernated
+                previous_fault: Some(fault),
             }
         }
     };
