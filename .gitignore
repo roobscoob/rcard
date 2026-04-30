@@ -6,3 +6,4 @@ build/
 .state
 __pycache__/
 .app_build.log
+.nickel_shim_debug.ncl

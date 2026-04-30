@@ -1076,6 +1076,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_lcpu"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "sifli-pac",
+ "sysmodule_lcpu_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_lcpu_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
 name = "sysmodule_log"
 version = "0.1.0"
 dependencies = [
