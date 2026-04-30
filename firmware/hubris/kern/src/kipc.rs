@@ -172,15 +172,22 @@ fn reinit_task(
 
         // We'll skip processing faulted tasks, because we don't want to lose
         // information in their fault records by changing their states.
-        if let TaskState::Healthy(sched) = task.state() {
+        let sched = match task.state() {
+            TaskState::Healthy(sched) => Some(sched),
+            TaskState::Hibernated {
+                previous_fault: None,
+                original_state,
+            } => Some(original_state),
+            _ => None,
+        };
+
+        if let Some(sched) = sched {
             match sched {
                 SchedState::InRecv(Some(peer))
                 | SchedState::InSend(peer)
                 | SchedState::InReply(peer)
                     if peer == &old_id =>
                 {
-                    // Please accept our sincere condolences on behalf of the
-                    // kernel.
                     let code = abi::dead_response_code(new_gen);
 
                     task.save_mut().set_error_response(code);
@@ -674,7 +681,7 @@ fn hibernate_region(
     // so we need to go through all the tasks that overlap with that region
     // and mark them as hibernated.
 
-    for task in tasks.iter_mut() {
+    for task in tasks.iter_mut().skip(1) {
         if task.uses_region(&hibernation_region) {
             task.mark_hibernated();
         }
@@ -834,21 +841,36 @@ fn restore_region(
         },
     )?;
 
-    // Un-hibernate tasks that no longer overlap any remaining region.
-    HibernationTable::with_borrow(|table| {
-        for task in tasks.iter_mut() {
-            if let TaskState::Hibernated { .. } = task.state() {
-                let still_hibernated = task
-                    .region_table()
-                    .iter()
-                    .any(|r| table.is_partially_hibernated(r));
+    // Collect which tasks to un-hibernate first: task.restore() calls
+    // try_write → can_access → with_borrow, so it cannot run inside
+    // a with_borrow block.
+    {
+        static mut RESTORE_SET: [bool; crate::startup::HUBRIS_TASK_COUNT] =
+            [false; crate::startup::HUBRIS_TASK_COUNT];
 
-                if !still_hibernated {
-                    task.restore();
+        // Safety: the kernel is non-preemptive and only the supervisor calls
+        // this, so no concurrent access.
+        let restore_set = unsafe { &mut *core::ptr::addr_of_mut!(RESTORE_SET) };
+        restore_set.fill(false);
+        HibernationTable::with_borrow(|table| {
+            for (i, task) in tasks.iter().enumerate() {
+                if let TaskState::Hibernated { .. } = task.state() {
+                    let still_hibernated = task
+                        .region_table()
+                        .iter()
+                        .any(|r| table.is_partially_hibernated(r));
+
+                    restore_set[i] = !still_hibernated;
                 }
             }
+        });
+
+        for (i, should_restore) in restore_set.iter().enumerate() {
+            if *should_restore {
+                tasks[i].restore();
+            }
         }
-    });
+    }
 
     tasks[caller].save_mut().set_send_response_and_length(0, 0);
     Ok(NextTask::Same)

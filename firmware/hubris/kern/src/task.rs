@@ -496,8 +496,6 @@ impl Task {
                     {
                         Ok(dest) => {
                             dest[..len].copy_from_slice(&data[..len]);
-                            self.save_mut()
-                                .set_send_response_and_length(0, len);
                             self.state =
                                 TaskState::Healthy(SchedState::Runnable);
                         }
