@@ -1081,8 +1081,11 @@ version = "0.1.0"
 dependencies = [
  "generated",
  "ipc",
+ "rcard-log",
+ "rcard-log-macros",
  "sifli-pac",
  "sysmodule_lcpu_api",
+ "sysmodule_log_api",
  "userlib",
 ]
 

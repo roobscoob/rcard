@@ -9,6 +9,9 @@ bare-panics = ["ipc/bare-panics"]
 
 [dependencies]
 ipc = { path = "../../modules/ipc" }
+sysmodule_log_api = { path = "../log/api" }
+rcard-log = { path = "../../../shared/log" }
+rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_lcpu_api = { path = "api", features = ["bare-panics"] }
 sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
 userlib.workspace = true

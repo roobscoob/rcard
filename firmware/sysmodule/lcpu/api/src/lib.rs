@@ -1,10 +1,10 @@
 #![no_std]
 
-#[ipc::resource(arena_size = 0, kind = 0x04)]
-pub trait Time {
-    #[message]
-    fn get_time() -> Option<SystemDateTime>;
+#[ipc::resource(arena_size = 1, kind = 0x17)]
+pub trait Lcpu {
+    #[constructor]
+    fn init() -> Result<Self, ()>;
 
     #[message]
-    fn set_time(dt: SystemDateTime);
+    fn send_data(#[lease] data: &[u8]);
 }
