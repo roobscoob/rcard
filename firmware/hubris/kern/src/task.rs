@@ -362,13 +362,17 @@ impl Task {
         self.generation = self.generation.wrapping_add(1);
         self.timer = TimerState::default();
         self.notifications = 0;
-        self.state = TaskState::default();
 
         match old_state {
             TaskState::Hibernated { .. } => {
+                self.state = TaskState::Hibernated {
+                    previous_fault: None,
+                    original_state: SchedState::Stopped,
+                };
                 self.hibernate_buffer = Some(HibernateBuffer::reinitialize())
             }
             TaskState::Faulted { .. } | TaskState::Healthy(..) => {
+                self.state = TaskState::Healthy(SchedState::Stopped);
                 crate::arch::reinitialize(self);
             }
         }
@@ -484,6 +488,7 @@ impl Task {
 
         match (original_state, self.hibernate_buffer.take()) {
             (_, Some(HibernateBuffer::Reinitialize)) => {
+                self.state = TaskState::Healthy(SchedState::Stopped);
                 self.reinitialize();
             }
             (

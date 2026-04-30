@@ -484,7 +484,10 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
     tasks[callee]
         .save_mut()
         .set_send_response_and_length(reply_args.response_code, amount_copied);
-    tasks[callee].set_healthy_state(SchedState::Runnable);
+
+    if !matches!(tasks[callee].state(), TaskState::Hibernated { .. }) {
+        tasks[callee].set_healthy_state(SchedState::Runnable);
+    }
 
     // KEY ASSUMPTION: sends go from less important tasks to more important
     // tasks. As a result, Reply doesn't have scheduling implications unless
