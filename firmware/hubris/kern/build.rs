@@ -343,6 +343,13 @@ fn process_config() -> Result<Generated> {
         panic!("Don't know the target {target}");
     };
 
+    if kconfig.hibernation_regions.len() >= 32 {
+        bail!(
+            "too many hibernation regions ({}), max 31",
+            kconfig.hibernation_regions.len()
+        );
+    }
+
     let hibernation_regions = kconfig
         .hibernation_regions
         .iter()
