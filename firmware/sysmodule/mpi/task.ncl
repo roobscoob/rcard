@@ -3,7 +3,7 @@ let lib = import "../../lib.ncl" in
 fun ctx => {
   crate_info = import "./Cargo.toml",
   priority = lib.workgroup.sysmodule,
-  uses_peripherals = ["mpi1", "mpi2", "pmuc_syscon", "rcc"],
+  uses_peripherals = ["mpi1", "mpi2", "pmuc", "hpsys_rcc"],
   depends_on = [
     ctx.tasks.sysmodule_log,
   ],

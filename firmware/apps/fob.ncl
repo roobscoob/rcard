@@ -64,7 +64,7 @@ fun args =>
       # logs from the stub firmware over USB.
       args.tasks.sysmodule_log_sink_usb,
 
-      # We want to include the storage sysmodule in the stub firmware so 
+      # We want to include the storage sysmodule in the stub firmware so
       # that we can flash the main firmware to the device
       args.tasks.sysmodule_storage,
     ],

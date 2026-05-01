@@ -7,7 +7,7 @@ fun ctx => {
     ctx.tasks.sysmodule_log,
     ctx.tasks.sysmodule_reactor,
   ],
-  uses_peripherals = ["pinctrl", "rcc", "syscon", "usbc"],
+  uses_peripherals = ["pinctrl", "hpsys_rcc", "hpsys_cfg", "usbc"],
   pushes_notifications = ["usb_event"],
   regions = {
     code  = { place = ctx.places.bulk },
