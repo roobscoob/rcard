@@ -6,7 +6,9 @@
 
 use crate::atomic::AtomicExt;
 #[allow(unused_imports)]
-use crate::descs::{RegionAttributes, RegionDesc, TaskDesc, TaskFlags};
+use crate::descs::{
+    RegionAttributes, RegionDesc, HibernationRegionDesc, TaskDesc, TaskFlags,
+};
 use crate::task::Task;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -133,6 +135,32 @@ pub(crate) fn with_task_table<R>(body: impl FnOnce(&mut [Task]) -> R) -> R {
     let r = body(task_table);
 
     TASK_TABLE_IN_USE.store(false, Ordering::Release);
+
+    r
+}
+
+static HIBERNATION_REGIONS_IN_USE: AtomicBool = AtomicBool::new(false);
+
+/// Runs `body` with a mutable reference to the hibernation region table.
+///
+/// To preserve uniqueness of the `&mut` reference passed into `body`, this
+/// function will detect any attempts to call it recursively and panic.
+pub(crate) fn with_hibernation_regions<R>(
+    body: impl FnOnce(&mut [HibernationRegionDesc]) -> R,
+) -> R {
+    if HIBERNATION_REGIONS_IN_USE.swap_polyfill(true, Ordering::Acquire) {
+        panic!(); // recursive use of with_hibernation_regions
+    }
+    // Safety: we have observed HIBERNATION_REGIONS_IN_USE being false, so no
+    // other &mut to the table exists. The table is initialized by the build
+    // system (no MaybeUninit needed).
+    let table = unsafe {
+        &mut *core::ptr::addr_of_mut!(HUBRIS_HIBERNATION_REGION_DESCS)
+    };
+
+    let r = body(table);
+
+    HIBERNATION_REGIONS_IN_USE.store(false, Ordering::Release);
 
     r
 }

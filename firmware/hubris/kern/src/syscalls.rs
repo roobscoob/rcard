@@ -39,7 +39,9 @@ use unwrap_lite::UnwrapLite;
 use crate::arch;
 use crate::err::{InteractFault, UserError};
 use crate::startup::with_task_table;
-use crate::task::{self, current_id, ArchState, NextTask, Task};
+use crate::task::{
+    self, current_id, set_suspension_reply, ArchState, NextTask, Task,
+};
 use crate::time::Timestamp;
 use crate::umem::{safe_copy, USlice};
 
@@ -378,15 +380,30 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
         Ok(x) => x,
     };
 
-    match tasks[callee].state() {
-        TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => (),
+    let is_suspended = match tasks[callee].state() {
+        TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => false,
+
+        // In the case that the callee suspended before we could reply,
+        // we don't want to block the caller. This could result in
+        // 'servers' getting transiently suspended if a suspending
+        // client called into them and then suspended before the server
+        // could reply.
+        //
+        // We can solve this by buffering the reply until the client
+        // wakes up and checks for it.
+        TaskState::Suspended {
+            original_fault_info: None,
+            original_healthy_state: SchedState::InReply(x),
+            ..
+        } if *x == caller_id => true,
+
         _ => {
             // Huh. The target task is off doing something else. This can happen
             // if application-specific supervisory logic unblocks it before
             // we've had a chance to reply (e.g. to implement timeouts).
             return Ok(NextTask::Same);
         }
-    }
+    };
 
     // Deliver the reply. Note that we can't use `deliver`, which is
     // specific to a pair of tasks that are sending and receiving,
@@ -429,8 +446,29 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
         return Err(FaultInfo::SyscallUsage(UsageError::ReplyTooBig));
     }
 
+    // The kernel must be able to buffer any reply during task suspension.
+    // This is simply enforcing an existing expectation:
+    // from the Hubris wiki:
+    //   # Message size limits
+    //   When a message transfer happens, the kernel diligently copies the
+    //   message data from one place to another. This operation is
+    //   uninterruptible, so it may delay processing of interrupts or timers.
+    //   To limit this, we impose a maximum length on messages, currently
+    //   256 bytes.
+
+    if src_slice.len() > 256 {
+        return Err(FaultInfo::SyscallUsage(UsageError::ReplyTooBig));
+    }
+
     // Okay, ready to attempt the copy.
-    let amount_copied = safe_copy(tasks, caller, src_slice, callee, dest_slice);
+    let amount_copied = if is_suspended {
+        // The callee suspended before we could reply. Buffer the reply
+        // until it wakes up and checks for it.
+        set_suspension_reply(tasks, caller, src_slice, callee, dest_slice)
+    } else {
+        safe_copy(tasks, caller, src_slice, callee, dest_slice)
+    };
+
     let amount_copied = match amount_copied {
         Ok(n) => n,
         Err(interact) => {
@@ -446,7 +484,13 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
     tasks[callee]
         .save_mut()
         .set_send_response_and_length(reply_args.response_code, amount_copied);
-    tasks[callee].set_healthy_state(SchedState::Runnable);
+
+    // If we're suspended, defer the reply until we wake up.
+    tasks[callee].set_healthy_state(if is_suspended {
+        SchedState::InSuspendedReply(caller_id)
+    } else {
+        SchedState::Runnable
+    });
 
     // KEY ASSUMPTION: sends go from less important tasks to more important
     // tasks. As a result, Reply doesn't have scheduling implications unless
@@ -517,6 +561,22 @@ fn borrow_read(
             Ok(NextTask::Same)
         }
         Err(interact) => {
+            // It's possible the lender put their lease in memory that
+            // was later hibernated. We can't proceed with the write
+            // even though nobody is misbehaving.
+            if matches!(
+                interact.src,
+                Some(FaultInfo::HibernatedMemoryAccess { .. })
+            ) {
+                if let Some(fault) = interact.dst {
+                    return Err(fault.into());
+                }
+                return Err(UserError::Recoverable(
+                    abi::HIBERNATED,
+                    NextTask::Same,
+                ));
+            }
+
             let wake_hint = interact.apply_to_src(tasks, lender)?;
             // Copy failed but not our side, report defecting lender.
             Err(UserError::Recoverable(abi::DEFECT, wake_hint))
@@ -539,7 +599,7 @@ fn borrow_write(
 
     // Does the lease grant us the ability to write to the memory?
     if !lease.attributes.contains(LeaseAttributes::WRITE) {
-        // Lease is not readable. Defecting lender.
+        // Lease is not writable. Defecting lender.
         return Err(UserError::Recoverable(abi::DEFECT, NextTask::Same));
     }
 
@@ -560,6 +620,22 @@ fn borrow_write(
             Ok(NextTask::Same)
         }
         Err(interact) => {
+            // It's possible the lender put their lease in memory that
+            // was later hibernated. We can't proceed with the write
+            // even though nobody is misbehaving.
+            if matches!(
+                interact.dst,
+                Some(FaultInfo::HibernatedMemoryAccess { .. })
+            ) {
+                if let Some(fault) = interact.src {
+                    return Err(fault.into());
+                }
+                return Err(UserError::Recoverable(
+                    abi::HIBERNATED,
+                    NextTask::Same,
+                ));
+            }
+
             let wake_hint = interact.apply_to_dst(tasks, lender)?;
             // Copy failed but not our side, report defecting lender.
             Err(UserError::Recoverable(abi::DEFECT, wake_hint))
@@ -581,6 +657,7 @@ fn borrow_info(
     tasks[caller]
         .save_mut()
         .set_borrow_info(lease.attributes.bits(), lease.length as usize);
+
     Ok(NextTask::Same)
 }
 
@@ -596,6 +673,19 @@ fn borrow_lease(
     // Check state of lender and range of lease table.
     match tasks[lender].state() {
         TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => (),
+
+        // we also want to allow borrowing from a suspended lender, so long as
+        // the underlying memory region is not itself hibernated.
+        TaskState::Suspended {
+            original_fault_info: None,
+            // Notably, we do NOT allow InSuspendedReply, as this indicates the
+            // lender was already replied to by the borrower. From the borrower's
+            // perspective, the lender has been replied to, and the exchange is
+            // complete.
+            original_healthy_state: SchedState::InReply(x),
+            ..
+        } if *x == caller_id => (),
+
         _ => {
             // The alleged lender isn't lending anything at all.
             // Let's assume this is a defecting lender.
@@ -618,12 +708,22 @@ fn borrow_lease(
 
     // Can the lender actually read the lease table, or are they being sneaky?
     let leases = match tasks[lender].try_read(&leases) {
-        Ok(slice) => Ok(slice),
+        Ok(slice) => slice,
         Err(fault) => {
+            // It's possible the lender put their lease table in memory
+            // that was later hibernated. We can't proceed with the borrow
+            // even though nobody is misbehaving.
+            if matches!(fault, FaultInfo::HibernatedMemoryAccess { .. }) {
+                return Err(UserError::Recoverable(
+                    abi::HIBERNATED,
+                    NextTask::Same,
+                ));
+            }
+
             let wake_hint = task::force_fault(tasks, lender, fault);
-            Err(UserError::Recoverable(abi::DEFECT, wake_hint))
+            return Err(UserError::Recoverable(abi::DEFECT, wake_hint));
         }
-    }?;
+    };
 
     // Try reading the lease. This is unsafe in the general case, but since
     // we've just convinced ourselves that the lease table is in task memory,
@@ -713,7 +813,7 @@ unsafe fn switch_to(task: &Task) {
 /// On success, updates the state of each task to finish delivery, and returns
 /// `Ok(())`. Task-switching is the caller's responsibility, because we don't
 /// have enough information here.
-fn deliver(
+pub(crate) fn deliver(
     tasks: &mut [Task],
     caller: usize,
     callee: usize,
@@ -873,6 +973,11 @@ fn reply_fault(
 
     match tasks[callee].state() {
         TaskState::Healthy(SchedState::InReply(x)) if *x == caller_id => (),
+        TaskState::Suspended {
+            original_fault_info: None,
+            original_healthy_state: SchedState::InReply(x),
+            ..
+        } if *x == caller_id => (),
         _ => {
             // Huh. The target task is off doing something else. This can happen
             // if application-specific supervisory logic unblocks it before

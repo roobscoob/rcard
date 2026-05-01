@@ -32,6 +32,7 @@ fn main() -> Result<()> {
 struct Generated {
     tasks: Vec<TokenStream>,
     regions: Vec<TokenStream>,
+    hibernation_regions: Vec<TokenStream>,
     irq_code: TokenStream,
 }
 
@@ -174,10 +175,25 @@ fn process_config() -> Result<Generated> {
 
         let index = u16::try_from(i).expect("over 2**16 tasks??");
         let priority = task.priority;
-        let flags = if task.start_at_boot {
-            quote::quote! { TaskFlags::START_AT_BOOT }
-        } else {
+        let mut flag_bits = vec![];
+        if task.start_at_boot {
+            flag_bits.push(quote::quote! { TaskFlags::START_AT_BOOT });
+        }
+        if i == 0 {
+            flag_bits.push(quote::quote! { TaskFlags::PROTECTED });
+        }
+        let flags = if flag_bits.is_empty() {
             quote::quote! { TaskFlags::empty() }
+        } else if flag_bits.len() == 1 {
+            flag_bits.pop().unwrap()
+        } else {
+            quote::quote! {
+                unsafe {
+                    TaskFlags::from_bits_unchecked(
+                        #(#flag_bits.bits())|*
+                    )
+                }
+            }
         };
         task_descs.push(quote::quote! {
             TaskDesc {
@@ -327,9 +343,34 @@ fn process_config() -> Result<Generated> {
         panic!("Don't know the target {target}");
     };
 
+    if kconfig.hibernation_regions.len() > 32 {
+        bail!(
+            "too many hibernation regions ({}), max 32",
+            kconfig.hibernation_regions.len()
+        );
+    }
+
+    let hibernation_regions = kconfig
+        .hibernation_regions
+        .iter()
+        .map(|sr| {
+            let base = sr.base;
+            let size = sr.size;
+            quote::quote! {
+                HibernationRegionDesc {
+                    base: #base,
+                    size: #size,
+                    next_generation: 0,
+                    active: false,
+                }
+            }
+        })
+        .collect();
+
     Ok(Generated {
         tasks: task_descs,
         regions: region_descs,
+        hibernation_regions,
         irq_code,
     })
 }
@@ -458,6 +499,24 @@ fn generate_statics(gen: &Generated) -> Result<()> {
             #[allow(dead_code)]
             static HUBRIS_REGION_DESCS: [RegionDesc; #region_count] = [
                 #(#regions,)*
+            ];
+        },
+    )?;
+
+    /////////////////////////////////////////////////////////
+    // Hibernation region descriptors
+
+    let hibernation_regions = &gen.hibernation_regions;
+    let hibernation_region_count = hibernation_regions.len();
+    writeln!(
+        file,
+        "{}",
+        quote::quote! {
+            pub const HUBRIS_HIBERNATION_REGION_COUNT: usize =
+                #hibernation_region_count;
+            pub static mut HUBRIS_HIBERNATION_REGION_DESCS:
+                [HibernationRegionDesc; HUBRIS_HIBERNATION_REGION_COUNT] = [
+                #(#hibernation_regions,)*
             ];
         },
     )?;
