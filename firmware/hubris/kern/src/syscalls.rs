@@ -568,6 +568,9 @@ fn borrow_read(
                 interact.src,
                 Some(FaultInfo::HibernatedMemoryAccess { .. })
             ) {
+                if let Some(fault) = interact.dst {
+                    return Err(fault.into());
+                }
                 return Err(UserError::Recoverable(
                     abi::HIBERNATED,
                     NextTask::Same,
@@ -624,6 +627,9 @@ fn borrow_write(
                 interact.dst,
                 Some(FaultInfo::HibernatedMemoryAccess { .. })
             ) {
+                if let Some(fault) = interact.src {
+                    return Err(fault.into());
+                }
                 return Err(UserError::Recoverable(
                     abi::HIBERNATED,
                     NextTask::Same,
