@@ -7,6 +7,7 @@ fun ctx => {
     ctx.tasks.sysmodule_display,
     ctx.tasks.sysmodule_log,
     ctx.tasks.sysmodule_lcpu,
+    ctx.tasks.sysmodule_lcpu,
   ],
   regions = {
     code  = { place = ctx.places.bulk },
