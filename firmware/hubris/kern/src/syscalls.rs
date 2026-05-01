@@ -39,7 +39,9 @@ use unwrap_lite::UnwrapLite;
 use crate::arch;
 use crate::err::{InteractFault, UserError};
 use crate::startup::with_task_table;
-use crate::task::{self, current_id, set_suspension_reply, ArchState, NextTask, Task};
+use crate::task::{
+    self, current_id, set_suspension_reply, ArchState, NextTask, Task,
+};
 use crate::time::Timestamp;
 use crate::umem::{safe_copy, USlice};
 
@@ -445,6 +447,15 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
     }
 
     // The kernel must be able to buffer any reply during task suspension.
+    // This is simply enforcing an existing expectation:
+    // from the hurbis wiki:
+    //   # Message size limits
+    //   When a message transfer happens, the kernel diligently copies the
+    //   message data from one place to another. This operation is
+    //   uninterruptible, so it may delay processing of interrupts or timers.
+    //   To limit this, we impose a maximum length on messages, currently
+    //   256 bytes.
+
     if src_slice.len() > 256 {
         return Err(FaultInfo::SyscallUsage(UsageError::ReplyTooBig));
     }
