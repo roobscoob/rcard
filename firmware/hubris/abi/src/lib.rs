@@ -373,7 +373,7 @@ pub enum TaskState {
         /// taken.
         original_state: SchedState,
     },
-    /// Task is in a frozen state due either to it's underlying memory being
+    /// Task is in a frozen state due either to its underlying memory being
     /// removed, or due to a debugger request.
     Suspended {
         /// Record the previous healthy state at the time the task was
