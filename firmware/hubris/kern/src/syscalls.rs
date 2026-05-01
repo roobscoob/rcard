@@ -448,7 +448,7 @@ fn reply(tasks: &mut [Task], caller: usize) -> Result<NextTask, FaultInfo> {
 
     // The kernel must be able to buffer any reply during task suspension.
     // This is simply enforcing an existing expectation:
-    // from the hurbis wiki:
+    // from the Hubris wiki:
     //   # Message size limits
     //   When a message transfer happens, the kernel diligently copies the
     //   message data from one place to another. This operation is
