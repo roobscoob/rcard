@@ -417,6 +417,7 @@ impl TaskState {
         match self {
             TaskState::Healthy(SchedState::InRecv(_)) => true,
             TaskState::Suspended {
+                original_fault_info: None,
                 original_healthy_state: SchedState::InRecv(_),
                 ..
             } => true,
