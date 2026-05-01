@@ -596,7 +596,7 @@ fn borrow_write(
 
     // Does the lease grant us the ability to write to the memory?
     if !lease.attributes.contains(LeaseAttributes::WRITE) {
-        // Lease is not readable. Defecting lender.
+        // Lease is not writable. Defecting lender.
         return Err(UserError::Recoverable(abi::DEFECT, NextTask::Same));
     }
 
