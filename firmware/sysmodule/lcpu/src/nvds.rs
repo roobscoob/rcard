@@ -1,13 +1,14 @@
-//! NVDS (Non-Volatile Data Store) shared memory initialization.
+//! NVDS (Non-Volatile Data Store) shared-memory init.
 //!
-//! Writes default BLE parameters (BD address, tracer config, etc.) to the
-//! LCPU shared memory region at `0x2040_FE00`. LCPU ROM reads this area
-//! during initialization to configure the BLE stack.
-//!
-//! SDK equivalent: `bt_stack_nvds_init()` in `bf0_bt_common.c:318`.
+//! Writes the default BLE TLV blob (BD address, scheduling, tracer) into
+//! `0x2040_FE00` so the LCPU ROM picks it up at boot. Mirrors
+//! `sifli-radio/src/bluetooth/nvds.rs::write_default()` and the SDK
+//! `bt_stack_nvds_init()`.
 
-const NVDS_BUFF_START: usize = crate::memory_map::shared::NVDS_BUFF_START;
-const NVDS_BUFF_SIZE: usize = crate::memory_map::shared::NVDS_BUFF_SIZE;
+use core::ptr;
+
+use crate::addr;
+
 const NVDS_PATTERN: u32 = 0x4E56_4453; // "NVDS"
 
 mod tag {
@@ -26,48 +27,48 @@ struct NvdsHeader {
     writing: u16,
 }
 
-/// Write default NVDS data to LCPU shared memory at `0x2040_FE00`.
+/// Write the default NVDS blob to `0x2040_FE00`. Must be called with LCPU
+/// held in reset (CPUWAIT high) so LCPU doesn't observe a partial write.
 ///
-/// SDK: `bt_stack_nvds_init()` → `sifli_nvds_get_default_vaule()` → memcpy to `NVDS_BUFF_START`.
-///
-/// Must be called before LCPU boot (before `power_on()`), with LCPU SRAM
-/// accessible (i.e. after `wake_lcpu()`).
-pub(crate) fn write_default(bd_addr: &[u8; 6], use_lxt: bool) {
+/// `use_lxt = true` skips the RC10K wake-up-timing tags. We default to
+/// LXT (32 kHz crystal) — the only mode the bentoboard wears — but the
+/// flag is exposed in case a future board uses RC10K.
+pub fn write_default(bd_addr: &[u8; 6], use_lxt: bool) {
     let mut buf = [0u8; 64];
-    let mut pos = 0;
+    let mut pos = 0usize;
 
-    // RC10K mode extra parameters (SDK: bf0_bt_nvds.c:119-125)
     if !use_lxt {
-        // Tag 0x0D: pre-wakeup time = 0x1964 (6500)
+        // Tag 0x0D: PRE_WAKEUP_TIME = 0x1964 (6500 µs) for RC10K mode.
         buf[pos..pos + 4].copy_from_slice(&[tag::PRE_WAKEUP_TIME, 0x02, 0x64, 0x19]);
         pos += 4;
-        // Tag 0x12: ext wakeup enable = 1
         buf[pos..pos + 3].copy_from_slice(&[tag::EXT_WAKEUP_ENABLE, 0x01, 0x01]);
         pos += 3;
     }
 
-    // Tag 0x2F: tracer config = [0x20, 0x00, 0x00, 0x00]
+    // Tag 0x2F: TRACER_CONFIG = 0x20 (4-byte payload).
     buf[pos..pos + 6].copy_from_slice(&[tag::TRACER_CONFIG, 0x04, 0x20, 0x00, 0x00, 0x00]);
     pos += 6;
 
-    // Tag 0x01: BD address (6 bytes)
+    // Tag 0x01: BD address (6 bytes, little-endian).
     buf[pos] = tag::BD_ADDRESS;
     buf[pos + 1] = 0x06;
     buf[pos + 2..pos + 8].copy_from_slice(bd_addr);
     pos += 8;
 
-    // Tag 0x15: scheduling = 1
+    // Tag 0x15: SCHEDULING = 1.
     buf[pos..pos + 3].copy_from_slice(&[tag::SCHEDULING, 0x01, 0x01]);
     pos += 3;
 
-    let nvds = sifli_hal::ram::RamSlice::new(NVDS_BUFF_START, NVDS_BUFF_SIZE);
-    nvds.write(
-        0,
-        NvdsHeader {
-            pattern: NVDS_PATTERN,
-            used_mem: pos as u16,
-            writing: 0,
-        },
-    );
-    nvds.copy_at(core::mem::size_of::<NvdsHeader>(), &buf[..pos]);
+    // Volatile writes — this region is shared with LCPU.
+    let header = NvdsHeader {
+        pattern: NVDS_PATTERN,
+        used_mem: pos as u16,
+        writing: 0,
+    };
+    unsafe {
+        ptr::write_volatile(addr::NVDS_BUFF_START as *mut NvdsHeader, header);
+        let payload_dst =
+            (addr::NVDS_BUFF_START + core::mem::size_of::<NvdsHeader>()) as *mut u8;
+        ptr::copy_nonoverlapping(buf.as_ptr(), payload_dst, pos);
+    }
 }

@@ -1,5 +1,5 @@
 let _board = import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/boards/bentoboard.ncl" in
-  let _layout = (import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/layouts/ramboot.ncl") _board.memory in
+  let _layout = (import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/layouts/prod.ncl") _board.memory in
   let task_fns = {
     fob = import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/tasks/fob/task.ncl",
     idle = import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/tasks/idle/task.ncl",
@@ -29,4 +29,4 @@ let _board = import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/bo
     tasks = std.record.map (fun _name f => f ctx) task_fns,
     places = _layout,
   } in
-  (import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/apps/stub.ncl") { board = _board, tasks = ctx.tasks, places = _layout }
+  (import "C:/Users/waltermin/projects/rc_charm/software_2/firmware/apps/fob.ncl") { board = _board, tasks = ctx.tasks, places = _layout }
