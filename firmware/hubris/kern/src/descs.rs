@@ -71,7 +71,8 @@ bitflags::bitflags! {
     #[repr(transparent)]
     pub struct TaskFlags: u8 {
         const START_AT_BOOT = 1 << 0;
-        const RESERVED = !1;
+        const PROTECTED = 1 << 1;
+        const RESERVED = !((1 << 2) - 1);
     }
 }
 
@@ -182,5 +183,107 @@ bitflags::bitflags! {
 impl RegionAttributes {
     pub const unsafe fn from_bits_unchecked(bits: u32) -> Self {
         Self(bits)
+    }
+}
+
+/// Description of a suspendable memory region, defined statically by the build
+/// system. When the supervisor hibernates a group, all `RegionDesc`s that
+/// overlap this range become inaccessible.
+///
+/// The `next_generation` and `active` fields are runtime state, initialized
+/// by the build system and mutated in place via `static mut`.
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub struct HibernationRegionDesc {
+    pub base: u32,
+    pub size: u32,
+    pub next_generation: u32,
+    pub active: bool,
+}
+
+impl HibernationRegionDesc {
+    pub fn end_addr(&self) -> u32 {
+        self.base.wrapping_add(self.size)
+    }
+
+    pub fn overlaps(&self, region: &(impl kerncore::MemoryRegion + ?Sized)) -> bool {
+        let s_end = self.end_addr() as usize;
+        let r_end = region.end_addr();
+        (self.base as usize) < r_end && region.base_addr() < s_end
+    }
+
+    pub fn overlaps_slice<T>(&self, slice: &crate::umem::USlice<T>) -> bool {
+        let s_end = self.end_addr() as usize;
+        let sl_end = slice.end_addr();
+        (self.base as usize) < sl_end && slice.base_addr() < s_end
+    }
+
+    pub fn contains_span(&self, offset: u32, length: u32) -> bool {
+        offset >= self.base
+            && length
+                .checked_add(offset)
+                .map_or(false, |end| end <= self.end_addr())
+    }
+
+    pub fn hibernate(
+        &mut self,
+        index: u8,
+    ) -> Result<abi::HibernationEventId, SuspendError> {
+        if self.active {
+            return Err(SuspendError::AlreadyActive);
+        }
+        let gen = self.next_generation;
+        let event_id = abi::HibernationEventId::from_parts(index, gen)
+            .ok_or(SuspendError::GenerationOverflow)?;
+        self.next_generation =
+            gen.checked_add(1).ok_or(SuspendError::GenerationOverflow)?;
+        self.active = true;
+        Ok(event_id)
+    }
+
+    pub fn restore(
+        &mut self,
+        event_id: abi::HibernationEventId,
+    ) -> Result<(), RestoreError> {
+        if !self.active {
+            return Err(RestoreError::NotActive);
+        }
+        let expected_gen = self
+            .next_generation
+            .checked_sub(1)
+            .ok_or(RestoreError::StaleEventId)?;
+        if event_id.generation() != expected_gen {
+            return Err(RestoreError::StaleEventId);
+        }
+        self.active = false;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum SuspendError {
+    AlreadyActive,
+    GenerationOverflow,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum RestoreError {
+    NotActive,
+    StaleEventId,
+}
+
+impl kerncore::MemoryRegion for HibernationRegionDesc {
+    fn contains(&self, addr: usize) -> bool {
+        let base = self.base as usize;
+        let end = self.end_addr() as usize;
+        addr >= base && addr < end
+    }
+
+    fn base_addr(&self) -> usize {
+        self.base as usize
+    }
+
+    fn end_addr(&self) -> usize {
+        self.end_addr() as usize
     }
 }

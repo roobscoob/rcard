@@ -24,6 +24,18 @@ pub struct KernelConfig {
 
     /// Interrupts hooked by the application, keyed by IRQ number.
     pub irqs: BTreeMap<u32, InterruptConfig>,
+
+    /// Memory regions that can be hibernated at runtime by the supervisor.
+    /// Each entry defines a contiguous address range; the index in this
+    /// Vec is the hibernation group number used in KIPC calls.
+    pub hibernation_regions: Vec<HibernationRegionConfig>,
+}
+
+/// A memory region that the supervisor can hibernate at runtime.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct HibernationRegionConfig {
+    pub base: u32,
+    pub size: u32,
 }
 
 /// Configuration for a single hooked interrupt.

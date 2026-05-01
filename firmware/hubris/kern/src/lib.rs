@@ -40,6 +40,7 @@ mod descs;
 pub mod err;
 pub mod fail;
 pub mod header;
+pub mod hibernate;
 pub mod kipc;
 pub mod profiling;
 pub mod startup;

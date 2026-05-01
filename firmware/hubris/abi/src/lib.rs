@@ -232,6 +232,132 @@ pub const fn extract_new_generation(code: u32) -> Option<Generation> {
 /// Response code returned by the kernel if a lender has defected.
 pub const DEFECT: u32 = 1;
 
+/// Response code returned by the kernel if a borrow target is in a
+/// hibernated memory region.
+pub const HIBERNATED: u32 = 2;
+
+/// A bitfield over suspension region indices. Bit 0 corresponds to
+/// suspension region 0, bit 1 to region 1, and so on up to bit 31.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[repr(transparent)]
+pub struct HibernatedRegionsBitfield(pub u32);
+
+impl HibernatedRegionsBitfield {
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn of_region(index: u32) -> Self {
+        Self(1 << index)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn insert(&mut self, index: u32) {
+        self.0 |= 1 << index;
+    }
+
+    pub const fn contains(self, index: u32) -> bool {
+        (self.0 & (1 << index)) != 0
+    }
+
+    pub const fn union(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+
+    pub const fn remove(&mut self, index: u32) {
+        self.0 &= !(1 << index);
+    }
+
+    pub const fn take(&mut self, index: u32) -> bool {
+        let mask = 1 << index;
+        let had_bit = (self.0 & mask) != 0;
+        self.0 &= !mask;
+        had_bit
+    }
+
+    /// Returns an iterator that yields `&R` for each set bit, indexing
+    /// into `slice`. Bits whose index is out of range are silently
+    /// skipped. Yields from least significant to most significant bit.
+    pub fn iter<'a, R>(self, slice: &'a [R]) -> BitSliceIter<'a, R> {
+        BitSliceIter {
+            mask: self.0,
+            slice,
+        }
+    }
+
+    /// Returns an iterator that yields `&mut R` for each set bit,
+    /// indexing into `slice`. Bits whose index is out of range are
+    /// silently skipped. Yields from least significant to most
+    /// significant bit.
+    pub fn iter_mut<'a, R>(self, slice: &'a mut [R]) -> BitSliceIterMut<'a, R> {
+        BitSliceIterMut {
+            mask: self.0,
+            slice,
+        }
+    }
+}
+
+/// Iterator that yields `&R` for each set bit in ascending order.
+pub struct BitSliceIter<'a, R> {
+    mask: u32,
+    slice: &'a [R],
+}
+
+impl<'a, R> BitSliceIter<'a, R> {
+    pub fn empty() -> Self {
+        Self {
+            mask: 0,
+            slice: &[],
+        }
+    }
+}
+
+impl<'a, R> Iterator for BitSliceIter<'a, R> {
+    type Item = &'a R;
+
+    fn next(&mut self) -> Option<&'a R> {
+        loop {
+            if self.mask == 0 {
+                return None;
+            }
+            let i = self.mask.trailing_zeros() as usize;
+            self.mask &= self.mask - 1;
+            if let Some(item) = self.slice.get(i) {
+                return Some(item);
+            }
+        }
+    }
+}
+
+/// Iterator that yields `&mut R` for each set bit in ascending order.
+pub struct BitSliceIterMut<'a, R> {
+    mask: u32,
+    slice: &'a mut [R],
+}
+
+impl<'a, R> Iterator for BitSliceIterMut<'a, R> {
+    type Item = &'a mut R;
+
+    fn next(&mut self) -> Option<&'a mut R> {
+        loop {
+            if self.mask == 0 {
+                return None;
+            }
+            let i = self.mask.trailing_zeros() as usize;
+            self.mask &= self.mask - 1;
+            if i < self.slice.len() {
+                // Safety: each bit index is yielded at most once (we
+                // clear it), so we never alias the same element twice.
+                let ptr = self.slice.as_mut_ptr();
+                return Some(unsafe { &mut *ptr.add(i) });
+            }
+        }
+    }
+}
+
 /// State used to make scheduling decisions.
 #[derive(Copy, Clone, Debug, Deserialize, Serialize)]
 pub enum TaskState {
@@ -247,6 +373,21 @@ pub enum TaskState {
         /// taken.
         original_state: SchedState,
     },
+    /// Task is in a frozen state due either to it's underlying memory being
+    /// removed, or due to a debugger request.
+    Suspended {
+        /// Record the previous healthy state at the time the task was
+        /// suspended.
+        original_healthy_state: SchedState,
+
+        /// Record the previous fault information if the task was
+        /// faulted at the time of suspension.
+        original_fault_info: Option<FaultInfo>,
+
+        /// What's keeping this task suspended?
+        hibernated_regions: HibernatedRegionsBitfield,
+        debug_request: bool,
+    },
 }
 
 impl TaskState {
@@ -255,10 +396,10 @@ impl TaskState {
     /// closed receive naming the caller specifically; otherwise, it will return
     /// `false`.
     pub fn can_accept_message_from(&self, caller: TaskId) -> bool {
-        if let TaskState::Healthy(SchedState::InRecv(peer)) = self {
-            peer.is_none() || peer == &Some(caller)
-        } else {
-            false
+        match self {
+            TaskState::Healthy(SchedState::InRecv(None)) => true,
+            TaskState::Healthy(SchedState::InRecv(Some(peer))) => *peer == caller,
+            _ => false,
         }
     }
 
@@ -273,7 +414,14 @@ impl TaskState {
 
     /// Checks if a task in this state can be unblocked with a notification.
     pub fn can_accept_notification(&self) -> bool {
-        matches!(self, TaskState::Healthy(SchedState::InRecv(_)))
+        match self {
+            TaskState::Healthy(SchedState::InRecv(_)) => true,
+            TaskState::Suspended {
+                original_healthy_state: SchedState::InRecv(_),
+                ..
+            } => true,
+            _ => false,
+        }
     }
 }
 
@@ -294,6 +442,10 @@ pub enum SchedState {
     InSend(TaskId),
     /// This task is blocked waiting for a reply from the given task.
     InReply(TaskId),
+    /// This task was replied to in a suspended state, and is blocked
+    /// waiting for the hibernation region to be restored so the
+    /// reply can be delivered.
+    InSuspendedReply(TaskId),
     /// This task is blocked waiting for messages, either from any source
     /// (`None`) or from a particular sender only.
     InRecv(Option<TaskId>),
@@ -352,6 +504,16 @@ pub enum FaultInfo {
     Injected(TaskId),
     /// A fault has been delivered by a server task.
     FromServer(TaskId, ReplyFaultReason),
+    /// A task lost it's backing memory during hibernation.
+    LostRegion {
+        /// The regions that were lost, as a bitfield over region indices.
+        regions: HibernatedRegionsBitfield,
+    },
+    /// You tried to read memory currently hibernated.
+    HibernatedMemoryAccess {
+        /// The address you tried to read.
+        address: u32,
+    },
 }
 
 /// We're using an explicit `TryFrom` impl for `Sysnum` instead of
@@ -512,6 +674,15 @@ pub enum Kipcnum {
     SoftwareIrq = 8,
     FindFaultedTask = 9,
     ReadPanicMessage = 10,
+
+    // "Extension" kipcnums, used by rose's fork
+    HibernateRegion = 0x80 + 1,
+    ReadHibernatedRegion = 0x80 + 2,
+    WriteHibernatedRegion = 0x80 + 3,
+    RestoreRegion = 0x80 + 4,
+
+    SuspendTask = 0x80 + 5,
+    RestoreTask = 0x80 + 6,
 }
 
 impl core::convert::TryFrom<u16> for Kipcnum {
@@ -529,6 +700,15 @@ impl core::convert::TryFrom<u16> for Kipcnum {
             8 => Ok(Self::SoftwareIrq),
             9 => Ok(Self::FindFaultedTask),
             10 => Ok(Self::ReadPanicMessage),
+
+            0x81 => Ok(Self::HibernateRegion),
+            0x82 => Ok(Self::ReadHibernatedRegion),
+            0x83 => Ok(Self::WriteHibernatedRegion),
+            0x84 => Ok(Self::RestoreRegion),
+
+            0x85 => Ok(Self::SuspendTask),
+            0x86 => Ok(Self::RestoreTask),
+
             _ => Err(()),
         }
     }
@@ -599,6 +779,9 @@ pub enum ReadPanicMessageError {
     /// But, since the panicked task could be any arbitrary binary...anything is
     /// possible.
     BadPanicBuffer = 2,
+    /// The task has panicked, but its panic message buffer is currently
+    /// hibernated, so we can't read it.
+    PanicBufferHibernated = 3,
 }
 
 /// We're using an explicit `TryFrom` impl for `ReadPanicMessageError` instead of
@@ -611,7 +794,114 @@ impl core::convert::TryFrom<u32> for ReadPanicMessageError {
         match x {
             1 => Ok(Self::TaskNotPanicked),
             2 => Ok(Self::BadPanicBuffer),
+            3 => Ok(Self::PanicBufferHibernated),
             _ => Err(()),
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct HibernationEventId(pub u32);
+
+impl HibernationEventId {
+    /// Fabricates a `HibernationEventId` for a known index and generation number.
+    pub fn from_parts(index: u8, generation: u32) -> Option<Self> {
+        if index >= (1 << 5) {
+            return None;
+        }
+
+        if generation >= (1 << 27) {
+            return None;
+        }
+
+        Some(HibernationEventId((generation << 5) | index as u32))
+    }
+
+    /// The index is in the lower 5 bits of the ID, and identifies which
+    /// hibernation event this is referring to.
+    pub fn index(&self) -> u8 {
+        (self.0 & 0x1F) as u8
+    }
+
+    /// The generation is in the upper 27 bits of the ID, and is incremented on each
+    /// hibernation event for a given index.
+    pub fn generation(&self) -> u32 {
+        self.0 >> 5
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[repr(u32)]
+pub enum RestoreMode {
+    /// Restore the hibernated region, and attempt to restore the task to its
+    /// original healthy state. If the task was faulted at the time of hibernation,
+    /// attempt to restore the fault as well.
+    Restored = 0,
+
+    /// Fault the hibernated task with `FaultInfo::LostRegion`. This is intended to
+    /// be used when the hibernated region contents cannot be restored,
+    /// but a fault and reset of the task would allow it to function correctly.
+    Lost = 1,
+}
+
+/// Errors returned by [`Kipcnum::ReinitTask`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ReinitTaskError {
+    /// The target task is currently suspended and cannot be reinitialized.
+    TaskSuspended = 1,
+}
+
+/// Errors returned by [`Kipcnum::HibernateRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum HibernateRegionMessageError {
+    /// No predefined hibernation region matches the (base, size) pair.
+    NoMatchingRegion = 1,
+
+    /// The matching region is already hibernated.
+    AlreadyHibernated = 2,
+
+    /// The region's event ID generation space is exhausted.
+    GenerationOverflow = 3,
+
+    /// The region overlaps memory belonging to a protected task.
+    ProtectedMemory = 4,
+}
+
+/// Errors returned by [`Kipcnum::ReadHibernatedRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ReadHibernatedRegionMessageError {
+    /// The (address, length) specified by the caller is not hibernated.
+    NotHibernated = 1,
+
+    /// Missing a lease to write back the data.
+    MissingWritebackLease = 2,
+
+    /// Writeback lease is missing LeaseAttributes::WRITE.
+    WritebackLeaseNotWritable = 3,
+}
+
+/// Errors returned by [`Kipcnum::WriteHibernatedRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum WriteHibernatedRegionMessageError {
+    /// The (address, length) specified by the caller is not hibernated.
+    NotHibernated = 1,
+
+    /// Missing a lease to read the source data from.
+    MissingSourceLease = 2,
+
+    /// Source lease is missing LeaseAttributes::READ.
+    SourceLeaseNotReadable = 3,
+}
+
+/// Errors returned by [`Kipcnum::RestoreRegion`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RestoreRegionMessageError {
+    /// The event id is stale, out of range, or was never issued.
+    InvalidEventId = 1,
 }
