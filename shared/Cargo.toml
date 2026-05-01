@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["log", "log/macros", "places", "usb-proto"]
+members = ["lilla-oxid", "log", "log/macros", "places", "usb-proto"]

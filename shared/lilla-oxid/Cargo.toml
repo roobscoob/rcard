@@ -1,0 +1,15 @@
+[package]
+name = "lilla-oxid"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# "std"   — filesystem I/O (image_load_*, image_save_*, FontData::load/from_reader).
+# "alloc" — heap allocation (Vec, Image::new, mask, FontData, draw_str_wrapped,
+#            image_parse_*, FontData::from_bytes).
+# Bare (no features) — core rendering only; caller supplies surfaces directly.
+default = ["std"]
+std     = ["alloc"]
+alloc   = []
+
+[dependencies]
