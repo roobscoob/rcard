@@ -505,7 +505,7 @@ pub enum FaultInfo {
     Injected(TaskId),
     /// A fault has been delivered by a server task.
     FromServer(TaskId, ReplyFaultReason),
-    /// A task lost it's backing memory during hibernation.
+    /// A task lost its backing memory during hibernation.
     LostRegion {
         /// The regions that were lost, as a bitfield over region indices.
         regions: HibernatedRegionsBitfield,
