@@ -381,7 +381,7 @@ impl Task {
     /// If you attempt to use this to bring a task out of fault state.
     pub fn set_healthy_state(&mut self, s: SchedState) {
         match &mut self.state {
-            // If we are currently in a healty or hibernated(healthy) state, update it
+            // If we are currently in a healthy or hibernated (healthy) state, update it
             TaskState::Healthy(state) => *state = s,
             TaskState::Suspended {
                 original_fault_info: None,
