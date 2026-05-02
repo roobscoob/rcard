@@ -1440,16 +1440,48 @@ fn psram_mr_read(regs: MpiPeri, mr_addr: u32) -> u8 {
 /// Used to confirm writes actually took on the chip side. Doesn't panic
 /// on mismatch — bringing the system up far enough to log a useful diff
 /// is more valuable than crashing here.
+///
+/// Note: rcard_log only supports `{}` placeholders; format specs like
+/// `{:02x}` print literally. Values render as decimal — adequate for
+/// "did this match?" diagnostics.
 fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, name: &str) {
     let got = psram_mr_read(regs, mr_addr);
     if got == expected {
-        info!("PSRAM {}: 0x{:02x} (ok)", name, got);
+        info!("PSRAM {}: {} (ok)", name, got);
     } else {
         error!(
-            "PSRAM {} mismatch: wrote 0x{:02x}, read 0x{:02x}",
+            "PSRAM {} mismatch: wrote {}, read {}",
             name, expected, got
         );
     }
+}
+
+/// Pre-init the SiP PSRAM's clock + power. Mirrors what the SDK's BSP
+/// (e.g. `customer/boards/sf32lb52-lcd_base/bsp_init.c`) does *before*
+/// it calls into `bsp_psramc_init`:
+///
+///   HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2)
+///   HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, true, true)
+///
+/// Without these, MPI1 has no functional clock (every command TCF-times-
+/// out at 1M iterations ≈ 40 ms) and the PSRAM die has no 1.8 V supply
+/// (it can't respond to anything regardless).
+fn psram_pre_init() {
+    let rcc = sifli_pac::HPSYS_RCC;
+    let pmu = sifli_pac::PMUC;
+
+    // 1. MPI1 functional clock = DLL2 (per the BSP). CSR.SEL_MPI1 lives
+    // at bits [5:4]; value 2 selects clk_dll2.
+    rcc.csr().modify(|w| w.set_sel_mpi1(2));
+
+    // 2. Enable the 1.8 V peripheral LDO. PSRAM_LDO_1V8 (bit 0) = enable;
+    // PSRAM_LDO_1V8_PD (bit 5) = power-down (must be cleared).
+    pmu.peri_ldo().modify(|w| {
+        w.0 = (w.0 & !((1 << 0) | (1 << 5))) | (1 << 0);
+    });
+
+    // 3. LDO settling — SDK's HAL_PMU_ConfigPeriLdo waits 5 ms.
+    spin_us(5_000);
 }
 
 /// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access.
@@ -1538,9 +1570,9 @@ fn init_psram() {
     // this comes back as 0x00 or 0xFF, the OPI/octal/DQS handshake is
     // wrong and nothing downstream will work.
     let vendor_id = psram_mr_read(regs, 1);
-    info!("PSRAM vendor ID (MR1): 0x{:02x}", vendor_id);
+    info!("PSRAM vendor ID (MR1): {}", vendor_id);
     let device_id = psram_mr_read(regs, 2);
-    info!("PSRAM device ID (MR2): 0x{:02x}", device_id);
+    info!("PSRAM device ID (MR2): {}", device_id);
 
     // 8. MR_WRITE(mr=8, value=3) — set drive strength.
     psram_mr_write(regs, 8, 3);
@@ -1598,6 +1630,12 @@ fn init_psram() {
 fn main() -> ! {
     info!("Awake");
 
+    // 1. Pre-init: clock source + LDO. PSRAM has no functional clock
+    // and no 1.8 V supply otherwise — every MPI transaction TCF-times-
+    // out and the chip can't respond.
+    psram_pre_init();
+
+    // 2. Controller + chip bring-up.
     init_psram();
     info!("PSRAM ready");
 
