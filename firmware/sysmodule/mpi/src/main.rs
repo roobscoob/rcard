@@ -1335,9 +1335,16 @@ impl Drop for MpiResource {
 // (HAL_OPI_PSRAM_Init / HAL_PSRAM_RESET / HAL_MPI_PSRAM_Init dispatched
 // from `bsp_psramc_init`). The part is wired as Octal DDR, NOT QSPI.
 const CMD_PSRAM_RESET: u8 = 0xFF; // Global reset
+const CMD_PSRAM_MR_READ: u8 = 0x40; // Mode Register Read
 const CMD_PSRAM_MR_WRITE: u8 = 0xC0; // Mode Register Write
 const CMD_PSRAM_SYNC_READ: u8 = 0x00; // Linear Burst Read (XIP)
 const CMD_PSRAM_SYNC_WRITE: u8 = 0x80; // Linear Burst Write (XIP)
+
+/// Mode-register read latency, in dummy cycles. Per the SDK's
+/// `HAL_MPI_MR_READ`: `rdcyc = hflash->ecc_en` which is set to 3 in the
+/// `freq <= 24 MHz` branch of `HAL_OPI_PSRAM_Init`. CCR1.dcyc is
+/// `rdcyc - 1`.
+const PSRAM_MR_READ_DCYC: u8 = 2;
 
 // Wire-mode encoding for the controller's IMODE/ADMODE/DMODE/ABMODE
 // fields. Value 7 ("quad lines DDR") combined with `CR.OPIE = 1`
@@ -1406,6 +1413,43 @@ fn psram_mr_write(regs: MpiPeri, mr_addr: u32, value: u8) {
     });
     regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_MR_WRITE));
     wait_psram_tcf(regs);
+}
+
+/// Read one PSRAM mode register. Mirrors the SDK's `HAL_MPI_MR_READ`:
+/// 4-byte address, octal DDR data, `PSRAM_MR_READ_DCYC` dummy cycles.
+/// Returns the low byte of the response (the spec says only low byte
+/// is meaningful for MRR).
+fn psram_mr_read(regs: MpiPeri, mr_addr: u32) -> u8 {
+    regs.dlr1().write(|w| w.set_dlen(1)); // 2 bytes
+    regs.ccr1().write(|w| {
+        w.set_imode(MODE_OCTAL_DDR);
+        w.set_admode(MODE_OCTAL_DDR);
+        w.set_adsize(3);
+        w.set_abmode(0);
+        w.set_dmode(MODE_OCTAL_DDR);
+        w.set_dcyc(PSRAM_MR_READ_DCYC);
+        w.set_fmode(false); // read mode
+    });
+    regs.ar1().write(|w| w.0 = mr_addr);
+    regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_MR_READ));
+    wait_psram_tcf(regs);
+    (regs.dr().read().0 & 0xff) as u8
+}
+
+/// Read a register, log the value, and verify it matches `expected`.
+/// Used to confirm writes actually took on the chip side. Doesn't panic
+/// on mismatch — bringing the system up far enough to log a useful diff
+/// is more valuable than crashing here.
+fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, name: &str) {
+    let got = psram_mr_read(regs, mr_addr);
+    if got == expected {
+        info!("PSRAM {}: 0x{:02x} (ok)", name, got);
+    } else {
+        error!(
+            "PSRAM {} mismatch: wrote 0x{:02x}, read 0x{:02x}",
+            name, expected, got
+        );
+    }
 }
 
 /// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access.
@@ -1489,8 +1533,18 @@ fn init_psram() {
     wait_psram_tcf(regs);
     spin_us(10); // SDK calls HAL_Delay_us(0) then HAL_Delay_us(3); pad to 10
 
+    // 7b. Sanity probe — read MR1 (vendor ID) to confirm the chip
+    // decoded our reset and is responding on the expected protocol. If
+    // this comes back as 0x00 or 0xFF, the OPI/octal/DQS handshake is
+    // wrong and nothing downstream will work.
+    let vendor_id = psram_mr_read(regs, 1);
+    info!("PSRAM vendor ID (MR1): 0x{:02x}", vendor_id);
+    let device_id = psram_mr_read(regs, 2);
+    info!("PSRAM device ID (MR2): 0x{:02x}", device_id);
+
     // 8. MR_WRITE(mr=8, value=3) — set drive strength.
     psram_mr_write(regs, 8, 3);
+    validate_mr(regs, 8, 3, "MR8 (drive strength)");
 
     // 9. HCMDR — XIP read/write opcodes the controller emits per AHB
     // transfer.
@@ -1527,7 +1581,9 @@ fn init_psram() {
     // doesn't match the controller's HRCCR/HWCCR.dcyc values, and reads
     // come back shifted/garbled.
     psram_mr_write(regs, 0, PSRAM_MR0_FIXLAT);
+    validate_mr(regs, 0, PSRAM_MR0_FIXLAT, "MR0 (read latency)");
     psram_mr_write(regs, 4, PSRAM_MR4_FIXLAT);
+    validate_mr(regs, 4, PSRAM_MR4_FIXLAT, "MR4 (write latency)");
 
     // 13. Watchdog — AHB-side timeout so an unresponsive memory transfer
     // returns a bus error to the caller instead of hanging the bus
