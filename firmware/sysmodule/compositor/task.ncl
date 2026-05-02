@@ -6,6 +6,7 @@ fun ctx => {
   depends_on = [
     ctx.tasks.sysmodule_display,
     ctx.tasks.sysmodule_log,
+    ctx.tasks.sysmodule_reactor,
   ],
   uses_notifications = ["present"],
   regions = {
