@@ -357,10 +357,21 @@ fn mono_to_ssd1312(src: &Image, out: &mut [u8; DISPLAY_BUF_SIZE]) {
     }
 }
 
-/// Push a `present` notification to ourselves so the dispatcher delivers
-/// it on the next loop iteration. The compositor owns its render cadence
-/// — clients shouldn't push `present`.
-fn schedule_next_present() {
+/// Push a `vsync` notification to ourselves to drive the next frame. The
+/// compositor owns its render cadence — clients listen for `present`,
+/// they don't push the trigger.
+fn schedule_next_vsync() {
+    let _ = Reactor::push(
+        notifications::GROUP_ID_VSYNC,
+        0,
+        25,
+        OverflowStrategy::DropOldest,
+    );
+}
+
+/// Announce that a frame just landed on the display. Clients (e.g. the
+/// fob) subscribe to this and use it as their "update for next frame" tick.
+fn announce_present() {
     let _ = Reactor::push(
         notifications::GROUP_ID_PRESENT,
         0,
@@ -388,8 +399,8 @@ fn tick_fps() {
     .log_expect("reentrant fps access");
 }
 
-#[ipc::notification_handler(present)]
-fn handle_present(_sender: u16, _code: u32) {
+#[ipc::notification_handler(vsync)]
+fn handle_vsync(_sender: u16, _code: u32) {
     let display = DISPLAY_HANDLE.get().log_expect("display not initialized");
     with_scratch(|s| {
         graphics::clear(&mut s.frame, None, Color::White);
@@ -430,7 +441,8 @@ fn handle_present(_sender: u16, _code: u32) {
         display.draw(&s.out).log_expect("Failed to draw to display");
     });
     tick_fps();
-    schedule_next_present();
+    announce_present();
+    schedule_next_vsync();
 }
 
 #[export_name = "main"]
@@ -478,12 +490,12 @@ fn main() -> ! {
     let _ = DISPLAY_HANDLE.set(display);
     info!("Display opened");
 
-    // Kick off the first frame; every render schedules the next.
-    schedule_next_present();
+    // Kick off the first frame; every render schedules the next vsync.
+    schedule_next_vsync();
 
     ipc::server! {
         FrameBuffer: FrameBufferResource,
         Layer: LayerResource,
-        @notifications(Reactor) => handle_present,
+        @notifications(Reactor) => handle_vsync,
     }
 }

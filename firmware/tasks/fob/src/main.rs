@@ -2,8 +2,10 @@
 #![no_main]
 
 use generated::slots::SLOTS;
-use rcard_log::{info, ResultExt};
+use once_cell::{GlobalState, OnceCell};
+use rcard_log::{info, OptionExt, ResultExt};
 use sysmodule_compositor_api::{BlendMode, FrameBufferInfo, ImageFormat};
+use sysmodule_reactor_api::NOTIFICATION_BIT;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
@@ -11,6 +13,7 @@ sysmodule_log_api::panic_handler!(to Log);
 
 sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
 sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
+sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
 const PATTERN_W: u32 = 32;
 const PATTERN_H: u32 = 32;
@@ -62,18 +65,58 @@ fn bounce(t: u32, peak: u32) -> u32 {
     if p <= peak { p } else { 2 * peak - p }
 }
 
+/// Live animation state — mutated on every `present` notification from
+/// the compositor. Held in a `OnceCell<GlobalState<…>>` so the
+/// notification handler can borrow it without macro-generated args.
+struct AnimState {
+    fb_a: FrameBuffer,
+    fb_b: FrameBuffer,
+    layer_a: Layer,
+    layer_b: Layer,
+    buf_a: [u8; PATTERN_BYTES],
+    buf_b: [u8; PATTERN_BYTES],
+    frame: u32,
+}
+
+static STATE: OnceCell<GlobalState<AnimState>> = OnceCell::new();
+
+#[ipc::notification_handler(present)]
+fn handle_present(_sender: u16, _code: u32) {
+    STATE
+        .get()
+        .log_expect("anim state not initialized")
+        .with(|s| {
+            // Display = 128×64, layers = 32×32. A slides on the top half,
+            // B on the bottom half at half speed.
+            let x_max = (128 - PATTERN_W) as u32; // 96
+            let x_a = bounce(s.frame, x_max) as i16;
+            let x_b = bounce(s.frame / 2, x_max) as i16;
+            let _ = s.layer_a.set_position(x_a, 0);
+            let _ = s.layer_b.set_position(x_b, 32);
+
+            let radius = bounce(s.frame, 14);
+            draw_circle(&mut s.buf_a, radius);
+            let _ = s.fb_a.write(&s.buf_a);
+
+            let height = bounce(s.frame, PATTERN_H);
+            draw_bar(&mut s.buf_b, height);
+            let _ = s.fb_b.write(&s.buf_b);
+
+            s.frame = s.frame.wrapping_add(1);
+        })
+        .log_expect("reentrant anim state access");
+}
+
 #[export_name = "main"]
 fn main() -> ! {
     info!("fob: awake");
 
     let mut buf_a = [0u8; PATTERN_BYTES];
     let mut buf_b = [0u8; PATTERN_BYTES];
-
     draw_circle(&mut buf_a, 8);
     draw_bar(&mut buf_b, 16);
 
     let info = FrameBufferInfo::new(ImageFormat::Mono, PATTERN_W, PATTERN_H);
-
     let fb_a = FrameBuffer::new(info, &buf_a)
         .log_expect("frame buffer A IPC")
         .log_expect("frame buffer A creation");
@@ -91,31 +134,26 @@ fn main() -> ! {
         .log_expect("layer B IPC")
         .log_expect("layer B creation");
 
-    info!("fob: layers created, animating");
+    let _ = STATE.set(GlobalState::new(AnimState {
+        fb_a,
+        fb_b,
+        layer_a,
+        layer_b,
+        buf_a,
+        buf_b,
+        frame: 0,
+    }));
 
-    // Display = 128×64, layers = 32×32. Each layer bounces along one axis:
-    //   A on the top half, sliding horizontally
-    //   B on the bottom half, sliding horizontally at half speed
-    // Each layer's contents also animate — A's circle pulses, B's bar fills/drains.
-    let x_max_a = (128 - PATTERN_W) as u32; // 96
-    let x_max_b = (128 - PATTERN_W) as u32; // 96
-    let mut frame: u32 = 0;
+    info!("fob: layers created, listening for present");
+
+    // Drain notifications via the reactor on every kernel-delivered wake.
     loop {
-        // Position animation.
-        let x_a = bounce(frame, x_max_a) as i16;
-        let x_b = bounce(frame / 2, x_max_b) as i16;
-        let _ = layer_a.set_position(x_a, 0);
-        let _ = layer_b.set_position(x_b, 32);
-
-        // Content animation.
-        let radius = bounce(frame, 14); // 0..=14..=0
-        draw_circle(&mut buf_a, radius);
-        let _ = fb_a.write(&buf_a);
-
-        let height = bounce(frame, PATTERN_H); // 0..=32..=0
-        draw_bar(&mut buf_b, height);
-        let _ = fb_b.write(&buf_b);
-
-        frame = frame.wrapping_add(1);
+        let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
+        loop {
+            match Reactor::pull() {
+                Ok(Some(notif)) => handle_present(&notif),
+                _ => break,
+            }
+        }
     }
 }

@@ -28,6 +28,7 @@ fun args =>
       usart_event  = { min_priority = 15, max_priority = 15 },
       host_request = { min_priority = 20, max_priority = 20 },
       present      = { min_priority = 25, max_priority = 25 },
+      vsync        = { min_priority = 25, max_priority = 25 },
     },
 
     trusted_senders = [
