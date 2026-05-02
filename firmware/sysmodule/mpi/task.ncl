@@ -7,7 +7,7 @@ fun ctx => {
   # heap in PSRAM and access it from main(), so the kernel must run mpi to
   # completion of its synchronous bring-up before scheduling them.
   priority = lib.workgroup.core_sysmodule,
-  uses_peripherals = ["mpi1", "mpi2", "pmuc_syscon", "rcc", "syscon"],
+  uses_peripherals = ["mpi1", "mpi2", "pmuc_syscon", "rcc"],
   depends_on = [
     ctx.tasks.sysmodule_log,
   ],

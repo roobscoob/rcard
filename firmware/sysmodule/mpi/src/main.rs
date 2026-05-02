@@ -1471,21 +1471,21 @@ fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, name: &str) {
 /// die has no 1.8 V supply and can't respond regardless.
 fn psram_pre_init() {
     let rcc = sifli_pac::HPSYS_RCC;
-    let cfg = sifli_pac::HPSYS_CFG;
     let pmu = sifli_pac::PMUC;
 
     // 1. Bring DLL2 up at 240 MHz. SDK's HAL_RCC_HCPU_EnableDLL flow
-    // (drivers/hal/bf0_hal_rcc.c:1632):
-    //   - ensure HPSYS_CFG.CAU2_CR has HPBG_EN + HPBG_VDDPSW_EN set
-    //     (kernel already does this for DLL1; defensive for DLL2)
+    // (drivers/hal/bf0_hal_rcc.c:1632) also sets HPSYS_CFG.CAU2_CR
+    // HPBG_EN + HPBG_VDDPSW_EN, but the kernel already does that for
+    // DLL1 (firmware/kernels/sf32lb52/src/main.rs:222-224) and the
+    // band-gap is shared across DLLs, so we don't need to touch it
+    // here — and skipping it lets us avoid declaring `syscon` in the
+    // task's `uses_peripherals`, which would push the MPU region count
+    // over its 8-slot limit.
+    //
     //   - clear DLL2CR.EN, set IN_DIV2_EN=1, OUT_DIV2_EN=0
     //   - STG = (freq - DLL_MIN_FREQ) / DLL_STG_STEP
     //         = (240e6 - 24e6) / 24e6 = 9
     //   - set EN=1, wait, poll READY
-    cfg.cau2_cr().modify(|w| {
-        w.set_hpbg_en(true);
-        w.set_hpbg_vddpsw_en(true);
-    });
     rcc.dllcr(1).modify(|w| w.set_en(false));
     rcc.dllcr(1).modify(|w| {
         w.set_in_div2_en(true);
