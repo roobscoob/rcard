@@ -1,12 +1,11 @@
 // no_std support: in a no_std + alloc build the caller enables the "alloc"
 // feature so Vec resolves to alloc::vec::Vec.  In std builds (the default)
-// Vec comes from the prelude automatically.  The `vec!` macro similarly comes
-// from alloc; in a no_std build the crate root should carry
-// `#[macro_use] extern crate alloc;`.
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-extern crate alloc;
+// Vec comes from the prelude automatically.  `extern crate alloc;` is at the
+// crate root so the `vec!` macro is in scope here without further imports.
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec::Vec;
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Color {

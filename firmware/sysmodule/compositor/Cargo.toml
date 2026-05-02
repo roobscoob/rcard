@@ -19,6 +19,7 @@ sysmodule_log_api = { path = "../log/api" }
 sysmodule_reactor_api = { path = "../reactor/api" }
 userlib.workspace = true
 generated = { path = "../../modules/generated" }
+lilla-oxid = { path = "../../../shared/lilla-oxid", default-features = false, features = ["alloc"] }
 
 [[bin]]
 name = "sysmodule_compositor"
