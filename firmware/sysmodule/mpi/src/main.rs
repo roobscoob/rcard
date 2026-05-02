@@ -1310,9 +1310,178 @@ impl Drop for MpiResource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PSRAM bring-up (MPI1)
+// ---------------------------------------------------------------------------
+//
+// The SF32LB525UC6 packages 8 MB of QSPI PSRAM in the same die as the MCU,
+// wired to MPI1. Until the controller is configured for PSRAM mode, every
+// access to the memory-mapped PSRAM region (0x10000000 / 0x60000000) stalls
+// the bus indefinitely on real hardware — emulators paper over this because
+// the address range is just regular RAM there.
+//
+// `init_psram` runs once at boot, before this sysmodule enters its IPC
+// server loop, and configures MPI1 for memory-mapped XIP read/write to the
+// SiP PSRAM. After it returns, the CPU may freely read/write the PSRAM
+// address ranges declared in `firmware/chips/sf32lb525uc6.ncl`.
+//
+// Boot ordering: this sysmodule runs at `core_sysmodule` priority so the
+// kernel scheduler runs it to completion of the synchronous init below
+// before scheduling any priority-2 sysmodule (compositor, etc.) that
+// touches PSRAM.
+
+// SiP PSRAM commands. Standard QSPI PSRAM opcode set (AP Memory / ISSI).
+const CMD_PSRAM_RESET_ENABLE: u8 = 0x66;
+const CMD_PSRAM_RESET: u8 = 0x99;
+const CMD_PSRAM_RELEASE_DPD: u8 = 0xAB;
+const CMD_PSRAM_ENTER_QPI: u8 = 0x35;
+const CMD_PSRAM_FAST_READ_QUAD: u8 = 0xEB; // 1-4-4 with dummy cycles
+const CMD_PSRAM_QUAD_WRITE: u8 = 0x38; // 1-4-4 no dummy
+
+/// Spin a rough number of microseconds. The existing flash-reset wait
+/// (line 941) calibrates `50_000` iterations to ~200 µs at 240 MHz, so
+/// 250 iterations per µs is the conservative-margin ratio.
+fn spin_us(us: u32) {
+    for _ in 0..(us as u64 * 250) {
+        core::hint::spin_loop();
+    }
+}
+
+/// Poll for transfer-complete on the given MPI instance. Mirrors
+/// `MpiResource::wait_transfer_complete` (line 311) but operates on the
+/// raw `MpiPeri` so we can use it without an `MpiResource`.
+fn wait_psram_tcf(regs: MpiPeri) {
+    for _ in 0..MAX_TRANSFER_POLLS {
+        if regs.sr().read().tcf() {
+            regs.scr().write(|w| w.set_tcfc(true));
+            return;
+        }
+    }
+    // Wake/reset commands fired on the wrong line mode time out by design
+    // (the chip can't decode them); the matching-mode pass succeeds. Don't
+    // log an error — the flash open() path makes the same trade-off
+    // (line 932) and logs at trace level only.
+    trace!("PSRAM init: tcf timeout (expected during double-pass reset)");
+}
+
+/// Issue a command-only PSRAM transaction with the given instruction-line
+/// mode. No address, no data. Mirrors the structure of
+/// `MpiResource::cmd_only_imode` (line 353).
+fn psram_cmd_only(regs: MpiPeri, opcode: u8, imode: LineMode) {
+    regs.ccr1().write(|w| w.set_imode(imode as u8));
+    regs.cmdr1().write(|w| w.set_cmd(opcode));
+    wait_psram_tcf(regs);
+}
+
+/// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access. Idempotent
+/// across BOOTROM starting states (chip might be in SPI/QPI × awake/DPD).
+///
+/// Timing constants below assume `psclr.div = 4` → MCLK = FCLK/4 = 60 MHz,
+/// PSRAM clock = MCLK/2 = 30 MHz (per the PSCLR field doc at the PAC). At
+/// 30 MHz, MCLK period is ~16.67 ns. Cross-check against `bf0_hal_psram.c`
+/// in the SiFli SDK if these don't work on first boot.
+fn init_psram() {
+    let regs = sifli_pac::MPI1;
+    let rcc = sifli_pac::HPSYS_RCC;
+
+    // 1. RCC block reset of MPI1. Same dance as flash open() lines 851-865:
+    // BOOTROM may have left the controller mid-transaction with arbitrary
+    // FIFO / IRQ state; a block reset is the only clean recovery.
+    rcc.rstr2().modify(|w| w.set_mpi1(true));
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    rcc.rstr2().modify(|w| w.set_mpi1(false));
+    rcc.enr2().modify(|w| w.set_mpi1(true));
+
+    // 2. MISCR — explicit zero (no clock invert, no DTR pre, no delays).
+    // RSTR2.mpi1 may not cover every MISCR bit (per the SDK comment cited
+    // at line 894), so write rather than modify.
+    regs.miscr().write(|w| w.0 = 0);
+
+    // 3. CIR — defensive ~85 µs gap between back-to-back commands during
+    // init. Same value the flash path uses (line 887).
+    regs.cir().write(|w| w.0 = 0x5000_5000);
+
+    // 4. PSCLR — conservative div=4 (PSRAM clock 30 MHz). Bump after a
+    // memory test passes if you want more bandwidth.
+    regs.psclr().write(|w| w.set_div(4));
+
+    // 5. DCR — PSRAM-specific timing. At 60 MHz MCLK (16.67 ns period):
+    //   tCEM (max CS-low for refresh)        ~4 µs   → cslmax = 239 (=240*16.67ns)
+    //   tCPH (min CS-high deselect)          ~18 ns  → cshmin = 1 (=33ns)
+    //   tCSP (min CS-low active)             ~18 ns  → cslmin = 1 (=33ns)
+    //   tRC  (min read/write cycle)          ~60 ns  → trcmin = 3 (=67ns)
+    // `xlegacy = 0` because this is not the AP 32Mb part. `hyper = 0`
+    // (QSPI, not HyperBus). `fixlat = 1` per the PAC's recommendation.
+    regs.dcr().write(|w| {
+        w.set_rbsize(0);
+        w.set_dqse(false);
+        w.set_hyper(false);
+        w.set_xlegacy(false);
+        w.set_cslmax(239);
+        w.set_cslmin(1);
+        w.set_cshmin(1);
+        w.set_trcmin(3);
+        w.set_fixlat(true);
+    });
+
+    // 6. Bring controller online.
+    regs.cr().write(|w| w.set_en(true));
+
+    // 7. Wake + reset, double pass. Mirrors the flash recovery loop
+    // (lines 926-944): try Quad lines first to handle a chip the BOOTROM
+    // left in QPI; then Single lines for the SPI/DPD case. Wrong-mode
+    // commands time out harmlessly; the matching pass takes effect.
+    for &imode in &[LineMode::Quad, LineMode::Single] {
+        psram_cmd_only(regs, CMD_PSRAM_RELEASE_DPD, imode);
+        spin_us(150); // tXPHS — typical APS6408L wake margin from DPD
+        psram_cmd_only(regs, CMD_PSRAM_RESET_ENABLE, imode);
+        psram_cmd_only(regs, CMD_PSRAM_RESET, imode);
+        spin_us(50); // tRST margin
+    }
+
+    // 8. Enter QPI. After reset the chip is back in SPI; switch to QPI
+    // for the memory-mapped read/write protocol below.
+    psram_cmd_only(regs, CMD_PSRAM_ENTER_QPI, LineMode::Single);
+    spin_us(2); // tQPI settling
+
+    // 9. HCMDR — XIP opcodes the controller emits per AHB read/write.
+    regs.hcmdr().write(|w| {
+        w.set_rcmd(CMD_PSRAM_FAST_READ_QUAD);
+        w.set_wcmd(CMD_PSRAM_QUAD_WRITE);
+    });
+
+    // 10. HRCCR — 1-4-4 read protocol. Instruction on quad (chip is in
+    // QPI), 24-bit address on quad, 6 dummy cycles before data, data on
+    // quad. No alternate byte (PSRAM doesn't use the CRM bit pattern
+    // that flash drivers care about).
+    regs.hrccr().write(|w| {
+        w.set_imode(LineMode::Quad as u8);
+        w.set_admode(LineMode::Quad as u8);
+        w.set_adsize(AddrSize::ThreeBytes as u8);
+        w.set_abmode(LineMode::None as u8);
+        w.set_absize(0);
+        w.set_dcyc(6);
+        w.set_dmode(LineMode::Quad as u8);
+    });
+
+    // 11. HWCCR — 1-4-4 write protocol. Same as read but no dummies.
+    regs.hwccr().write(|w| {
+        w.set_imode(LineMode::Quad as u8);
+        w.set_admode(LineMode::Quad as u8);
+        w.set_adsize(AddrSize::ThreeBytes as u8);
+        w.set_abmode(LineMode::None as u8);
+        w.set_absize(0);
+        w.set_dcyc(0);
+        w.set_dmode(LineMode::Quad as u8);
+    });
+}
+
 #[export_name = "main"]
 fn main() -> ! {
     info!("Awake");
+
+    init_psram();
+    info!("PSRAM ready");
 
     ipc::server! {
         Mpi: MpiResource,
