@@ -286,7 +286,6 @@ dependencies = [
  "rcard-log-macros",
  "sysmodule_compositor_api",
  "sysmodule_log_api",
- "sysmodule_reactor_api",
  "userlib",
 ]
 

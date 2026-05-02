@@ -14,7 +14,6 @@ rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_compositor_api = { path = "../../sysmodule/compositor/api" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
-sysmodule_reactor_api = { path = "../../sysmodule/reactor/api" }
 userlib.workspace = true
 
 [[bin]]

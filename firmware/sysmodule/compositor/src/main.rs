@@ -6,13 +6,15 @@ extern crate alloc;
 mod heap;
 
 use alloc::vec::Vec;
+use generated::notifications;
 use generated::slots::SLOTS;
 use ipc::allocation;
 use lilla_oxid::graphics::{self, Color, Image, ImageFormat as LillaFormat, Point, Size};
 use once_cell::{GlobalState, OnceCell};
-use rcard_log::{OptionExt, ResultExt};
+use rcard_log::{info, OptionExt, ResultExt};
 use sysmodule_compositor_api::*;
 use sysmodule_display_api::DisplayConfiguration;
+use sysmodule_reactor_api::OverflowStrategy;
 
 sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -79,9 +81,22 @@ struct Scratch {
     out: [u8; DISPLAY_BUF_SIZE],
 }
 
+/// Frame counter + last-log timestamp for the FPS log line. The compositor
+/// owns the present cadence now, so the FPS reading reflects how often
+/// `handle_present` actually completes a render — not how often a client
+/// asks for one.
+struct Fps {
+    frames: u32,
+    last_log_ms: u64,
+}
+
 static REGISTRY: OnceCell<GlobalState<Registry>> = OnceCell::new();
 static LAYERS: OnceCell<GlobalState<Layers>> = OnceCell::new();
 static SCRATCH: OnceCell<GlobalState<Scratch>> = OnceCell::new();
+static FPS: GlobalState<Fps> = GlobalState::new(Fps {
+    frames: 0,
+    last_log_ms: 0,
+});
 static DISPLAY_HANDLE: OnceCell<Display> = OnceCell::new();
 
 struct FrameBufferResource {
@@ -342,6 +357,37 @@ fn mono_to_ssd1312(src: &Image, out: &mut [u8; DISPLAY_BUF_SIZE]) {
     }
 }
 
+/// Push a `present` notification to ourselves so the dispatcher delivers
+/// it on the next loop iteration. The compositor owns its render cadence
+/// — clients shouldn't push `present`.
+fn schedule_next_present() {
+    let _ = Reactor::push(
+        notifications::GROUP_ID_PRESENT,
+        0,
+        25,
+        OverflowStrategy::DropOldest,
+    );
+}
+
+/// Tick the FPS counter and emit `info!("fps: {}", n)` once per second.
+fn tick_fps() {
+    FPS.with(|f| {
+        f.frames = f.frames.wrapping_add(1);
+        let now = userlib::sys_get_timer().now;
+        // Initialize on first call so we don't immediately log a tiny window.
+        if f.last_log_ms == 0 {
+            f.last_log_ms = now;
+            return;
+        }
+        if now.saturating_sub(f.last_log_ms) >= 1000 {
+            info!("fps: {}", f.frames);
+            f.frames = 0;
+            f.last_log_ms = now;
+        }
+    })
+    .log_expect("reentrant fps access");
+}
+
 #[ipc::notification_handler(present)]
 fn handle_present(_sender: u16, _code: u32) {
     let display = DISPLAY_HANDLE.get().log_expect("display not initialized");
@@ -383,11 +429,13 @@ fn handle_present(_sender: u16, _code: u32) {
         mono_to_ssd1312(&s.frame, &mut s.out);
         display.draw(&s.out).log_expect("Failed to draw to display");
     });
+    tick_fps();
+    schedule_next_present();
 }
 
 #[export_name = "main"]
 fn main() -> ! {
-    rcard_log::info!("Awake");
+    info!("Awake");
 
     // Bring the PSRAM region online as the global heap.
     let storage = FRAME_BUFFERS
@@ -428,7 +476,10 @@ fn main() -> ! {
         .ok()
         .log_expect("display already open");
     let _ = DISPLAY_HANDLE.set(display);
-    rcard_log::info!("Display opened");
+    info!("Display opened");
+
+    // Kick off the first frame; every render schedules the next.
+    schedule_next_present();
 
     ipc::server! {
         FrameBuffer: FrameBufferResource,

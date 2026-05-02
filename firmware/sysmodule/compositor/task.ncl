@@ -9,6 +9,7 @@ fun ctx => {
     ctx.tasks.sysmodule_reactor,
   ],
   uses_notifications = ["present"],
+  pushes_notifications = ["present"],
   regions = {
     code          = { place = ctx.places.bulk },
     stack         = { place = ctx.places.fast, size = lib.kiB 8 },
