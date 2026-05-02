@@ -1460,33 +1460,55 @@ fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, name: &str) {
 /// (e.g. `customer/boards/sf32lb52-lcd_base/bsp_init.c`) does *before*
 /// it calls into `bsp_psramc_init`:
 ///
+///   HAL_RCC_HCPU_EnableDLL2(240_000_000)
 ///   HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2)
 ///   HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, true, true)
 ///
-/// Without these, MPI1 has no functional clock (every command TCF-times-
-/// out at 1M iterations ≈ 40 ms) and the PSRAM die has no 1.8 V supply
-/// (it can't respond to anything regardless).
+/// Our kernel only locks DLL1 (firmware/kernels/sf32lb52/src/main.rs:266-289),
+/// so DLL2 is dead at our entry point — we have to bring it up ourselves
+/// before pointing MPI1 at it. Without DLL2 every MPI transaction
+/// TCF-times-out (no clock to drive the bus). Without the LDO the PSRAM
+/// die has no 1.8 V supply and can't respond regardless.
 fn psram_pre_init() {
     let rcc = sifli_pac::HPSYS_RCC;
+    let cfg = sifli_pac::HPSYS_CFG;
     let pmu = sifli_pac::PMUC;
 
-    // 1. MPI1 functional clock = DLL1 (240 MHz). CSR.SEL_MPI1 lives at
-    // bits [5:4]; value 1 selects clk_dll1.
-    //
-    // The SDK's BSP uses DLL2 here, but our kernel
-    // (firmware/kernels/sf32lb52/src/main.rs:266-289) only enables and
-    // locks DLL1, not DLL2. Selecting a non-running clock leaves the
-    // controller without a tick — every transaction TCF-times-out and
-    // DR reads back stale BOOTROM bytes (0x3C in our case).
-    rcc.csr().modify(|w| w.set_sel_mpi1(1));
+    // 1. Bring DLL2 up at 240 MHz. SDK's HAL_RCC_HCPU_EnableDLL flow
+    // (drivers/hal/bf0_hal_rcc.c:1632):
+    //   - ensure HPSYS_CFG.CAU2_CR has HPBG_EN + HPBG_VDDPSW_EN set
+    //     (kernel already does this for DLL1; defensive for DLL2)
+    //   - clear DLL2CR.EN, set IN_DIV2_EN=1, OUT_DIV2_EN=0
+    //   - STG = (freq - DLL_MIN_FREQ) / DLL_STG_STEP
+    //         = (240e6 - 24e6) / 24e6 = 9
+    //   - set EN=1, wait, poll READY
+    cfg.cau2_cr().modify(|w| {
+        w.set_hpbg_en(true);
+        w.set_hpbg_vddpsw_en(true);
+    });
+    rcc.dllcr(1).modify(|w| w.set_en(false));
+    rcc.dllcr(1).modify(|w| {
+        w.set_in_div2_en(true);
+        w.set_out_div2_en(false);
+        w.set_stg(9); // 240 MHz
+        w.set_en(true);
+    });
+    spin_us(10);
+    while !rcc.dllcr(1).read().ready() {
+        core::hint::spin_loop();
+    }
 
-    // 2. Enable the 1.8 V peripheral LDO. PSRAM_LDO_1V8 (bit 0) = enable;
-    // PSRAM_LDO_1V8_PD (bit 5) = power-down (must be cleared).
+    // 2. MPI1 functional clock = DLL2. CSR.SEL_MPI1 lives at bits [5:4];
+    // value 2 selects clk_dll2 (per the PAC + SDK's RCC_CLK_FLASH_DLL2).
+    rcc.csr().modify(|w| w.set_sel_mpi1(2));
+
+    // 3. Enable the 1.8 V peripheral LDO. PMUC.PERI_LDO bit 0 = enable
+    // LDO18; bit 5 = power-down (must be cleared).
     pmu.peri_ldo().modify(|w| {
         w.0 = (w.0 & !((1 << 0) | (1 << 5))) | (1 << 0);
     });
 
-    // 3. LDO settling — SDK's HAL_PMU_ConfigPeriLdo waits 5 ms.
+    // 4. LDO settling — SDK's HAL_PMU_ConfigPeriLdo waits 5 ms.
     spin_us(5_000);
 }
 
