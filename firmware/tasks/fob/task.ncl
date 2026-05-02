@@ -4,9 +4,11 @@ fun ctx => {
   crate_info = import "./Cargo.toml",
   priority = lib.workgroup.app,
   depends_on = [
-    ctx.tasks.sysmodule_display,
+    ctx.tasks.sysmodule_compositor,
     ctx.tasks.sysmodule_log,
+    ctx.tasks.sysmodule_reactor,
   ],
+  pushes_notifications = ["present"],
   regions = {
     code  = { place = ctx.places.bulk },
     stack = { place = ctx.places.fast, size = lib.kiB 8 },
