@@ -1330,13 +1330,24 @@ impl Drop for MpiResource {
 // before scheduling any priority-2 sysmodule (compositor, etc.) that
 // touches PSRAM.
 
-// SiP PSRAM commands. Standard QSPI PSRAM opcode set (AP Memory / ISSI).
-const CMD_PSRAM_RESET_ENABLE: u8 = 0x66;
-const CMD_PSRAM_RESET: u8 = 0x99;
-const CMD_PSRAM_RELEASE_DPD: u8 = 0xAB;
-const CMD_PSRAM_ENTER_QPI: u8 = 0x35;
-const CMD_PSRAM_FAST_READ_QUAD: u8 = 0xEB; // 1-4-4 with dummy cycles
-const CMD_PSRAM_QUAD_WRITE: u8 = 0x38; // 1-4-4 no dummy
+// SiP PSRAM (OPI / Octal DDR) opcodes. Reverse-engineered from the SiFli
+// SDK's `bf0_hal_mpi_psram.o` (HAL_OPI_PSRAM_Init / HAL_PSRAM_RESET /
+// HAL_MPI_PSRAM_Init in the bsp_psramc_init flow) — the part is wired
+// up as Octal DDR, NOT QSPI like a discrete AP6408 would be.
+const CMD_PSRAM_RESET: u8 = 0xFF; // Global reset
+const CMD_PSRAM_MR_WRITE: u8 = 0xC0; // Mode Register Write
+const CMD_PSRAM_SYNC_READ: u8 = 0x00; // Linear Burst Read (XIP)
+const CMD_PSRAM_SYNC_WRITE: u8 = 0x80; // Linear Burst Write (XIP)
+
+// Wire-mode encoding for the controller's IMODE/ADMODE/DMODE/ABMODE
+// fields. Value 7 ("quad lines DDR") combined with `CR.OPIE = 1`
+// becomes Octal DDR — there is no separate "octal" enum value.
+const MODE_OCTAL_DDR: u8 = 7;
+const MODE_QUAD: u8 = 3;
+
+// CR.OPIE lives at bit 21, NOT bit 16 as the user manual table suggests.
+// The SDK confirms via `cr |= 0x200000` in HAL_FLASH_ENABLE_OPI.
+const CR_OPIE: u32 = 1 << 21;
 
 /// Spin a rough number of microseconds. The existing flash-reset wait
 /// (line 941) calibrates `50_000` iterations to ~200 µs at 240 MHz, so
@@ -1357,29 +1368,16 @@ fn wait_psram_tcf(regs: MpiPeri) {
             return;
         }
     }
-    // Wake/reset commands fired on the wrong line mode time out by design
-    // (the chip can't decode them); the matching-mode pass succeeds. Don't
-    // log an error — the flash open() path makes the same trade-off
-    // (line 932) and logs at trace level only.
-    trace!("PSRAM init: tcf timeout (expected during double-pass reset)");
+    trace!("PSRAM init: tcf timeout (chip in unexpected state for command)");
 }
 
-/// Issue a command-only PSRAM transaction with the given instruction-line
-/// mode. No address, no data. Mirrors the structure of
-/// `MpiResource::cmd_only_imode` (line 353).
-fn psram_cmd_only(regs: MpiPeri, opcode: u8, imode: LineMode) {
-    regs.ccr1().write(|w| w.set_imode(imode as u8));
-    regs.cmdr1().write(|w| w.set_cmd(opcode));
-    wait_psram_tcf(regs);
-}
-
-/// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access. Idempotent
-/// across BOOTROM starting states (chip might be in SPI/QPI × awake/DPD).
+/// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access.
 ///
-/// Timing constants below assume `psclr.div = 4` → MCLK = FCLK/4 = 60 MHz,
-/// PSRAM clock = MCLK/2 = 30 MHz (per the PSCLR field doc at the PAC). At
-/// 30 MHz, MCLK period is ~16.67 ns. Cross-check against `bf0_hal_psram.c`
-/// in the SiFli SDK if these don't work on first boot.
+/// Mirrors the SiFli SDK's `bsp_psramc_init` → `HAL_MPI_PSRAM_Init` →
+/// `HAL_OPI_PSRAM_Init` chain (reverse-engineered from the .o files).
+/// Constants are calibrated for the low-clock path (PSRAM clock ≤ 48 MHz),
+/// which is what we get with `PSCLR.div = 4` (MCLK = 60 MHz,
+/// PSRAM clock = MCLK/2 = 30 MHz).
 fn init_psram() {
     let regs = sifli_pac::MPI1;
     let rcc = sifli_pac::HPSYS_RCC;
@@ -1392,87 +1390,139 @@ fn init_psram() {
     rcc.rstr2().modify(|w| w.set_mpi1(false));
     rcc.enr2().modify(|w| w.set_mpi1(true));
 
-    // 2. MISCR — explicit zero (no clock invert, no DTR pre, no delays).
-    // RSTR2.mpi1 may not cover every MISCR bit (per the SDK comment cited
-    // at line 894), so write rather than modify.
-    regs.miscr().write(|w| w.0 = 0);
-
-    // 3. CIR — defensive ~85 µs gap between back-to-back commands during
-    // init. Same value the flash path uses (line 887).
+    // 2. HAL_QSPI_Init equivalent — base controller defaults the SDK sets
+    // on every MPI bring-up.
+    regs.timr().write(|w| w.0 = 0xFF);
     regs.cir().write(|w| w.0 = 0x5000_5000);
+    regs.abr1().write(|w| w.0 = 0xFF);
+    regs.hrabr().write(|w| w.0 = 0xFF);
 
-    // 4. PSCLR — conservative div=4 (PSRAM clock 30 MHz). Bump after a
-    // memory test passes if you want more bandwidth.
+    // 3. PSCLR — div=4 → MCLK = FCLK/4 = 60 MHz, PSRAM clock = MCLK/2 = 30 MHz.
     regs.psclr().write(|w| w.set_div(4));
 
-    // 5. DCR — PSRAM-specific timing. At 60 MHz MCLK (16.67 ns period):
-    //   tCEM (max CS-low for refresh)        ~4 µs   → cslmax = 239 (=240*16.67ns)
-    //   tCPH (min CS-high deselect)          ~18 ns  → cshmin = 1 (=33ns)
-    //   tCSP (min CS-low active)             ~18 ns  → cslmin = 1 (=33ns)
-    //   tRC  (min read/write cycle)          ~60 ns  → trcmin = 3 (=67ns)
-    // `xlegacy = 0` because this is not the AP 32Mb part. `hyper = 0`
-    // (QSPI, not HyperBus). `fixlat = 1` per the PAC's recommendation.
+    // 4. MISCR — DQS delay = 20, SCK delay = 20, all other bits zero.
+    // These are the SDK's low-clock-path calibration values
+    // (HAL_MPI_SET_DQS_DELAY(20) + HAL_MPI_SET_SCK(20, 0)).
+    // Set as a single write to avoid leaving stale BOOTROM state.
+    regs.miscr().write(|w| {
+        w.set_sckdly(20);
+        w.set_dqsdly(20);
+    });
+
+    // 5. DCR — combined HAL_FLASH_SET_CS_TIME + SET_ROW_BOUNDARY +
+    // ENABLE_DQS + SET_FIXLAT. Constants from the SDK's clock ≤ 48 MHz path:
+    //   cslmax = 180   max CS-low (refresh window) ≈ 3 µs
+    //   cslmin = 6     min CS-low
+    //   cshmin = 0
+    //   trcmin = 3     min cycle time
+    //   rbsize = 7     1024-byte rows (controller auto-handles refresh)
+    //   dqse   = true  required for octal DDR Rx data latching
+    //   fixlat = true  recommended; matches the PSRAM's mode register
     regs.dcr().write(|w| {
-        w.set_rbsize(0);
-        w.set_dqse(false);
+        w.set_rbsize(7);
+        w.set_dqse(true);
         w.set_hyper(false);
         w.set_xlegacy(false);
-        w.set_cslmax(239);
-        w.set_cslmin(1);
-        w.set_cshmin(1);
+        w.set_cslmax(180);
+        w.set_cslmin(6);
+        w.set_cshmin(0);
         w.set_trcmin(3);
         w.set_fixlat(true);
     });
 
-    // 6. Bring controller online.
-    regs.cr().write(|w| w.set_en(true));
+    // 6. Bring controller online with OPI enabled. Single write — the SDK
+    // sets EN first then OPIE in two steps, but the result is the same.
+    regs.cr().write(|w| {
+        w.set_en(true);
+        w.0 |= CR_OPIE;
+    });
 
-    // 7. Wake + reset, double pass. Mirrors the flash recovery loop
-    // (lines 926-944): try Quad lines first to handle a chip the BOOTROM
-    // left in QPI; then Single lines for the SPI/DPD case. Wrong-mode
-    // commands time out harmlessly; the matching pass takes effect.
-    for &imode in &[LineMode::Quad, LineMode::Single] {
-        psram_cmd_only(regs, CMD_PSRAM_RELEASE_DPD, imode);
-        spin_us(150); // tXPHS — typical APS6408L wake margin from DPD
-        psram_cmd_only(regs, CMD_PSRAM_RESET_ENABLE, imode);
-        psram_cmd_only(regs, CMD_PSRAM_RESET, imode);
-        spin_us(50); // tRST margin
-    }
+    // 7. PSRAM RESET. The SDK's `HAL_PSRAM_RESET` issues opcode 0xFF
+    // twice — once with the chip presumed in QPI (4-line) mode (in case
+    // BOOTROM left it there), then again in OPI (8-line) mode. Each pass
+    // configures CCR1 fresh.
 
-    // 8. Enter QPI. After reset the chip is back in SPI; switch to QPI
-    // for the memory-mapped read/write protocol below.
-    psram_cmd_only(regs, CMD_PSRAM_ENTER_QPI, LineMode::Single);
-    spin_us(2); // tQPI settling
+    // 7a. Quad-mode reset (chip's possible BOOTROM state).
+    regs.ar1().write(|w| w.0 = 0);
+    regs.ccr1().write(|w| {
+        w.set_imode(MODE_QUAD);
+        w.set_admode(0);
+        w.set_dmode(0);
+        w.set_dcyc(0);
+        w.set_fmode(true);
+    });
+    regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_RESET));
+    wait_psram_tcf(regs);
+    spin_us(10);
 
-    // 9. HCMDR — XIP opcodes the controller emits per AHB read/write.
+    // 7b. Octal-mode reset (matches the post-reset target state).
+    regs.ar1().write(|w| w.0 = 0);
+    regs.ccr1().write(|w| {
+        w.set_imode(MODE_OCTAL_DDR);
+        w.set_admode(MODE_OCTAL_DDR);
+        w.set_adsize(3); // 4-byte address
+        w.set_abmode(MODE_OCTAL_DDR);
+        w.set_absize(1); // 2-byte alt phase
+        w.set_dmode(0);
+        w.set_dcyc(0);
+        w.set_fmode(true);
+    });
+    regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_RESET));
+    wait_psram_tcf(regs);
+    spin_us(10);
+
+    // 8. MR_WRITE(mr=8, value=3) — set drive strength via mode register
+    // 8 (per SDK's HAL_MPI_PSRAM_Init). 2-byte payload: low byte is the
+    // value, high byte is don't-care.
+    regs.dlr1().write(|w| w.set_dlen(1)); // n-1 encoding → 2 bytes
+    regs.dr().write(|w| w.0 = 0x0003);
+    regs.ar1().write(|w| w.0 = 8);
+    regs.ccr1().write(|w| {
+        w.set_imode(MODE_OCTAL_DDR);
+        w.set_admode(MODE_OCTAL_DDR);
+        w.set_adsize(3);
+        w.set_abmode(0);
+        w.set_dmode(MODE_OCTAL_DDR);
+        w.set_dcyc(0);
+        w.set_fmode(true);
+    });
+    regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_MR_WRITE));
+    wait_psram_tcf(regs);
+
+    // 9. HCMDR — opcodes the controller emits for memory-mapped reads/writes.
     regs.hcmdr().write(|w| {
-        w.set_rcmd(CMD_PSRAM_FAST_READ_QUAD);
-        w.set_wcmd(CMD_PSRAM_QUAD_WRITE);
+        w.set_rcmd(CMD_PSRAM_SYNC_READ);
+        w.set_wcmd(CMD_PSRAM_SYNC_WRITE);
     });
 
-    // 10. HRCCR — 1-4-4 read protocol. Instruction on quad (chip is in
-    // QPI), 24-bit address on quad, 6 dummy cycles before data, data on
-    // quad. No alternate byte (PSRAM doesn't use the CRM bit pattern
-    // that flash drivers care about).
+    // 10. HRCCR — XIP read protocol. 4-byte address, 13 dummy cycles
+    // (the SDK's clock ≤ 48 MHz value; bumps to 17/20 at higher clocks).
     regs.hrccr().write(|w| {
-        w.set_imode(LineMode::Quad as u8);
-        w.set_admode(LineMode::Quad as u8);
-        w.set_adsize(AddrSize::ThreeBytes as u8);
-        w.set_abmode(LineMode::None as u8);
+        w.set_imode(MODE_OCTAL_DDR);
+        w.set_admode(MODE_OCTAL_DDR);
+        w.set_adsize(3);
+        w.set_abmode(0);
         w.set_absize(0);
-        w.set_dcyc(6);
-        w.set_dmode(LineMode::Quad as u8);
+        w.set_dcyc(13);
+        w.set_dmode(MODE_OCTAL_DDR);
     });
 
-    // 11. HWCCR — 1-4-4 write protocol. Same as read but no dummies.
+    // 11. HWCCR — XIP write protocol. Same shape as read, no dummy cycles.
     regs.hwccr().write(|w| {
-        w.set_imode(LineMode::Quad as u8);
-        w.set_admode(LineMode::Quad as u8);
-        w.set_adsize(AddrSize::ThreeBytes as u8);
-        w.set_abmode(LineMode::None as u8);
+        w.set_imode(MODE_OCTAL_DDR);
+        w.set_admode(MODE_OCTAL_DDR);
+        w.set_adsize(3);
+        w.set_abmode(0);
         w.set_absize(0);
         w.set_dcyc(0);
-        w.set_dmode(LineMode::Quad as u8);
+        w.set_dmode(MODE_OCTAL_DDR);
+    });
+
+    // 12. Watchdog timer — bus-side timeout so an external memory hang
+    // doesn't lock the AHB bus indefinitely. SDK uses 0xFFFF.
+    regs.wdtr().write(|w| {
+        w.set_timeout(0xFFFF);
+        w.set_en(true);
     });
 }
 
