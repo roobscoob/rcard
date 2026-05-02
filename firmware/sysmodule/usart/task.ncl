@@ -10,7 +10,7 @@ fun ctx => {
   pushes_notifications = ["usart_event"],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = 1024 },
+    stack = { place = ctx.places.fast, size = 2048 },
     data  = { place = ctx.places.fast },
   },
 }
