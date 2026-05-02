@@ -118,19 +118,30 @@ fn lilla_format(fmt: ImageFormat) -> LillaFormat {
     }
 }
 
+/// Build a zero-initialized `Image` of the given size/format. Returns
+/// `None` on heap exhaustion (or if `Image::from_vec` rejects the buffer
+/// length). Callers route this through `log_expect` or map to a structured
+/// error — never use `Image::new` directly, which calls `vec![0; n]`
+/// internally and panics with a formatted message that
+/// `panic_handler!::as_str()` can't extract → bare "panic" in the log.
+fn try_make_image_size(size: Size, format: LillaFormat) -> Option<Image> {
+    let bpp = format as u8 as usize;
+    let pitch = (size.w as usize * bpp + 7) / 8;
+    let len = size.h as usize * pitch;
+    let mut data: Vec<u8> = Vec::new();
+    data.try_reserve_exact(len).ok()?;
+    data.resize(len, 0);
+    Image::from_vec(size, format, data)
+}
+
 /// Build an `Image` from a validated `FrameBufferInfo`. Returns `Err` rather
 /// than panicking on heap exhaustion so a busy compositor degrades gracefully.
 fn try_make_image(info: FrameBufferInfo) -> Result<Image, FrameBufferError> {
-    let len = info.data_len();
-    let mut data: Vec<u8> = Vec::new();
-    data.try_reserve_exact(len)
-        .map_err(|_| FrameBufferError::OutOfMemory)?;
-    data.resize(len, 0);
     let size = Size {
         w: info.width as i32,
         h: info.height as i32,
     };
-    Image::from_vec(size, lilla_format(info.format), data).ok_or(FrameBufferError::InvalidDimensions)
+    try_make_image_size(size, lilla_format(info.format)).ok_or(FrameBufferError::OutOfMemory)
 }
 
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
@@ -462,14 +473,18 @@ fn main() -> ! {
     }));
 
     // Pre-allocate the scratch frame and SSD1312 page buffer once, so
-    // `handle_present` never allocates on the hot path.
-    let frame = Image::new(
+    // `handle_present` never allocates on the hot path. Route through
+    // `try_make_image_size` so a heap failure (e.g. PSRAM controller mis-
+    // configured, reads return zeros) shows up in the log rather than as
+    // a bare formatted panic from `vec!`'s OOM handler.
+    let frame = try_make_image_size(
         Size {
             w: DISPLAY_WIDTH,
             h: DISPLAY_HEIGHT,
         },
         LillaFormat::Mono,
-    );
+    )
+    .log_expect("scratch frame allocation failed (heap broken? PSRAM not initialized?)");
     let _ = SCRATCH.set(GlobalState::new(Scratch {
         frame,
         out: [0u8; DISPLAY_BUF_SIZE],
