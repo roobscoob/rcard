@@ -357,22 +357,14 @@ fn mono_to_ssd1312(src: &Image, out: &mut [u8; DISPLAY_BUF_SIZE]) {
     }
 }
 
-/// Push a `vsync` notification to ourselves to drive the next frame. The
-/// compositor owns its render cadence — clients listen for `present`,
-/// they don't push the trigger.
-fn schedule_next_vsync() {
-    let _ = Reactor::push(
-        notifications::GROUP_ID_VSYNC,
-        0,
-        25,
-        OverflowStrategy::DropOldest,
-    );
-}
-
 /// Announce that a frame just landed on the display. Clients (e.g. the
 /// fob) subscribe to this and use it as their "update for next frame" tick.
+///
+/// `refresh` rather than `push` so at most one outstanding `present` ever
+/// sits in the reactor queue — if a client falls behind, they get the
+/// latest tick when they catch up, not a backlog.
 fn announce_present() {
-    let _ = Reactor::push(
+    let _ = Reactor::refresh(
         notifications::GROUP_ID_PRESENT,
         0,
         25,
@@ -399,8 +391,11 @@ fn tick_fps() {
     .log_expect("reentrant fps access");
 }
 
-#[ipc::notification_handler(vsync)]
-fn handle_vsync(_sender: u16, _code: u32) {
+/// Render one frame and announce it. Driven by the `@interval` tick from
+/// `ipc::server!` — the macro arms a kernel timer to call this at a fixed
+/// cadence between IPC messages, so the compositor owns its own clock
+/// without piggy-backing on the reactor.
+fn render_frame() {
     let display = DISPLAY_HANDLE.get().log_expect("display not initialized");
     with_scratch(|s| {
         graphics::clear(&mut s.frame, None, Color::White);
@@ -442,7 +437,6 @@ fn handle_vsync(_sender: u16, _code: u32) {
     });
     tick_fps();
     announce_present();
-    schedule_next_vsync();
 }
 
 #[export_name = "main"]
@@ -490,12 +484,9 @@ fn main() -> ! {
     let _ = DISPLAY_HANDLE.set(display);
     info!("Display opened");
 
-    // Kick off the first frame; every render schedules the next vsync.
-    schedule_next_vsync();
-
     ipc::server! {
         FrameBuffer: FrameBufferResource,
         Layer: LayerResource,
-        @notifications(Reactor) => handle_vsync,
+        @interval(16ms) => render_frame,
     }
 }

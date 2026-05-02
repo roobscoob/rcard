@@ -8,8 +8,7 @@ fun ctx => {
     ctx.tasks.sysmodule_log,
     ctx.tasks.sysmodule_reactor,
   ],
-  uses_notifications = ["vsync"],
-  pushes_notifications = ["vsync", "present"],
+  pushes_notifications = ["present"],
   regions = {
     code          = { place = ctx.places.bulk },
     stack         = { place = ctx.places.fast, size = lib.kiB 8 },
