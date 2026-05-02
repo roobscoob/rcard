@@ -1470,9 +1470,15 @@ fn psram_pre_init() {
     let rcc = sifli_pac::HPSYS_RCC;
     let pmu = sifli_pac::PMUC;
 
-    // 1. MPI1 functional clock = DLL2 (per the BSP). CSR.SEL_MPI1 lives
-    // at bits [5:4]; value 2 selects clk_dll2.
-    rcc.csr().modify(|w| w.set_sel_mpi1(2));
+    // 1. MPI1 functional clock = DLL1 (240 MHz). CSR.SEL_MPI1 lives at
+    // bits [5:4]; value 1 selects clk_dll1.
+    //
+    // The SDK's BSP uses DLL2 here, but our kernel
+    // (firmware/kernels/sf32lb52/src/main.rs:266-289) only enables and
+    // locks DLL1, not DLL2. Selecting a non-running clock leaves the
+    // controller without a tick — every transaction TCF-times-out and
+    // DR reads back stale BOOTROM bytes (0x3C in our case).
+    rcc.csr().modify(|w| w.set_sel_mpi1(1));
 
     // 2. Enable the 1.8 V peripheral LDO. PSRAM_LDO_1V8 (bit 0) = enable;
     // PSRAM_LDO_1V8_PD (bit 5) = power-down (must be cleared).
