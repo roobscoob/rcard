@@ -394,6 +394,26 @@ fn main() -> ! {
         core::ptr::read_volatile(VECTOR_TABLE_OFFSET_REGISTER)
     });
 
+    // Bring up VDD18 (PERI_LDO_1V8) BEFORE we mux any SA pad to MPI1.
+    // The SiP PSRAM die is powered from the chip's internal LDO18; the
+    // SA pads' I/O domain depends on it being stable. If we switch the
+    // pads out of analog-floating to MPI1 alt-function while VDD18 is
+    // dead, the chip can latch wrong values and the controller will
+    // see a non-responsive bus forever (TCF never fires).
+    //
+    // PMUC.PERI_LDO at 0x500ca05c — bit 0 = EN_LDO18, bit 5 = LDO18_PD.
+    // Set EN, clear PD. SDK then waits 5 ms for the rail to settle
+    // (bf0_hal_pmu.c:1303). At HXT48 boot speed (CPU = 48 MHz) that's
+    // 240k cycles.
+    unsafe {
+        let p = 0x500c_a05c as *mut u32;
+        let v = p.read_volatile();
+        p.write_volatile((v & !(1 << 5)) | (1 << 0));
+    }
+    cortex_m::asm::delay(240_000);
+    usart1_write_str(TICK_ZERO);
+    usart1_write_str("kernel: VDD18 LDO enabled\r\n");
+
     unsafe { apply_pin_config() };
 
     let cycles_per_ms = clock_setup();

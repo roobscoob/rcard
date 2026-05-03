@@ -1480,7 +1480,6 @@ fn psram_cal_delay(regs: MpiPeri) -> (u8, u8) {
 /// die has no 1.8 V supply and can't respond regardless.
 fn psram_pre_init() {
     let rcc = sifli_pac::HPSYS_RCC;
-    let pmuc = sifli_pac::PMUC;
 
     // 1. Bring DLL2 up at 240 MHz. SDK's HAL_RCC_HCPU_EnableDLL flow
     // (drivers/hal/bf0_hal_rcc.c:1632) also sets HPSYS_CFG.CAU2_CR
@@ -1511,27 +1510,12 @@ fn psram_pre_init() {
     // value 2 selects clk_dll2 (per the PAC + SDK's RCC_CLK_FLASH_DLL2).
     rcc.csr().modify(|w| w.set_sel_mpi1(2));
 
-    // 3. Enable LDO18 (1.8 V peripheral LDO that powers VDDSIP).
-    // SDK's `HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, true, true)` from
-    // bsp_init.c:175, which sets PERI_LDO.EN_LDO18=1 and clears
-    // PERI_LDO.LDO18_PD, then waits 5 ms for the rail to settle
-    // (bf0_hal_pmu.c:1289-1304).
-    //
-    // The SF32LB525UC6 is a SiP — VDDSIP is the chip-internal pin that
-    // feeds the PSRAM die. Without LDO18, PSRAM has no supply and every
-    // MPI command times out (the chip can't drive DQS / data).
-    //
-    // CAVEAT: if your specific board routes VDDSIP from an external
-    // regulator instead, this enable causes rail contention. The SDK
-    // gates this on `CONFIG_BSP_VDDSIP_LDO18_ENABLE`. We don't have
-    // visibility into bentoboard's schematic, so we mirror the SDK's
-    // default-on behavior and trust that an SiP package uses the
-    // internal LDO.
-    pmuc.peri_ldo().modify(|w| {
-        w.set_en_ldo18(true);
-        w.set_ldo18_pd(false);
-    });
-    spin_us(5000);
+    // VDD18 LDO is enabled by the kernel before apply_pin_config() — see
+    // firmware/kernels/sf32lb52/src/main.rs. The order matters: the SiP
+    // PSRAM die is powered from the chip's internal LDO18, and the SA
+    // pads' I/O domain depends on it being stable before they switch
+    // out of analog/floating mode to MPI1 alt-function. By the time we
+    // run here, the LDO has been on for >5 ms and pinmux is settled.
 }
 
 /// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access.
