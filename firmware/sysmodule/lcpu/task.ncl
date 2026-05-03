@@ -5,20 +5,21 @@ fun ctx => {
   priority = lib.workgroup.sysmodule,
   uses_peripherals = [
     # RAHHHHHHHHHH
-    "fucking_god",
-    # "hpsys_aon",
-    # "lpsys_aon",
-    # "lpsys_rcc",
-    # "lpsys_sram",
-    # "mailbox1",
+    "hpsys_aon",
+    "lpsys_sram",
+    "mailbox1",
+
+    ## all of this shit got kitchen sinked
     "mailbox2",
+    # "lpsys_rcc",
     # "patch",
     # "ptc2",
     # "bt_rfc",
+    # "lpsys_aon",
   ],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 8 },
+    stack = { place = ctx.places.fast, size = lib.kiB 16 },
     data  = { place = ctx.places.fast },
   },
 }

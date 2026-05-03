@@ -285,6 +285,7 @@ dependencies = [
  "rcard-log",
  "rcard-log-macros",
  "sysmodule_display_api",
+ "sysmodule_lcpu_api",
  "sysmodule_log_api",
  "userlib",
 ]

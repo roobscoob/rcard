@@ -316,6 +316,7 @@ fn main() -> ! {
     info!("lcpu: starting");
     ipc::server! {
         Lcpu: LcpuResource,
+        // TODO: fix my name
         @irq(mailbox2_ch1) => || {
             // Drain MISR / clear ICR.
             mailbox::ack_mailbox2_irq();
