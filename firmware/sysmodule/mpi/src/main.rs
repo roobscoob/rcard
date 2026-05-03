@@ -1471,7 +1471,6 @@ fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, name: &str) {
 /// die has no 1.8 V supply and can't respond regardless.
 fn psram_pre_init() {
     let rcc = sifli_pac::HPSYS_RCC;
-    let pmu = sifli_pac::PMUC;
 
     // 1. Bring DLL2 up at 240 MHz. SDK's HAL_RCC_HCPU_EnableDLL flow
     // (drivers/hal/bf0_hal_rcc.c:1632) also sets HPSYS_CFG.CAU2_CR
@@ -1502,14 +1501,14 @@ fn psram_pre_init() {
     // value 2 selects clk_dll2 (per the PAC + SDK's RCC_CLK_FLASH_DLL2).
     rcc.csr().modify(|w| w.set_sel_mpi1(2));
 
-    // 3. Enable the 1.8 V peripheral LDO. PMUC.PERI_LDO bit 0 = enable
-    // LDO18; bit 5 = power-down (must be cleared).
-    pmu.peri_ldo().modify(|w| {
-        w.0 = (w.0 & !((1 << 0) | (1 << 5))) | (1 << 0);
-    });
-
-    // 4. LDO settling — SDK's HAL_PMU_ConfigPeriLdo waits 5 ms.
-    spin_us(5_000);
+    // 3. Skip LDO18 enable on bentoboard. The user's SDK build has
+    // CONFIG_BSP_VDDSIP_LDO18_ENABLE=n, meaning VDDSIP for the SiP
+    // PSRAM is supplied externally rather than through the internal
+    // 1.8 V LDO. Calling HAL_PMU_ConfigPeriLdo on a letter-series chip
+    // without that config is a no-op in the SDK
+    // (drivers/hal/bf0_hal_pmu.c:1268-1273) — touching PMUC.PERI_LDO
+    // ourselves risks rail contention with the external supply. Leave
+    // whatever BOOTROM set it to.
 }
 
 /// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access.
