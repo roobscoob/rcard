@@ -1,11 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use generated::slots::SLOTS;
 use rcard_log::{error, info, warn};
 use sysmodule_lcpu_api::*;
+use sysmodule_reactor_api::OverflowStrategy;
 
 mod addr;
 mod bringup;
@@ -25,22 +24,7 @@ mod api {
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
-
-/// qty1 acquire flag. Set by `init()` on success, cleared by `Drop`.
-static LCPU_IN_USE: AtomicBool = AtomicBool::new(false);
-
-/// Current LCPU holder. Set by a successful `init()`, cleared by `Drop`.
-/// Read by the mailbox2 IRQ arm to know whose notification bit to post.
-///
-/// Single-task access: lcpu's own server loop is the only writer; the
-/// `@irq` arm runs synchronously inside that loop. No interlocks needed.
-static mut HOLDER: Option<Holder> = None;
-
-#[derive(Copy, Clone)]
-struct Holder {
-    task_id: ipc::kern::TaskId,
-    rx_mask: u32,
-}
+sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
 /// Notification bit the kernel posts when MAILBOX2_CH1 IRQ fires for
 /// this task. Resolved at codegen time from `mailbox2.irqs.ch1` in the
@@ -60,49 +44,29 @@ struct LcpuResource;
 
 impl Lcpu for LcpuResource {
     fn init(
-        meta: ipc::Meta,
+        _meta: ipc::Meta,
         bd_addr: [u8; 6],
-        rx_notification_mask: u32,
     ) -> Result<Self, LcpuInitError> {
-        if LCPU_IN_USE.swap(true, Ordering::Acquire) {
-            error!("lcpu: init() called while already held");
-            return Err(LcpuInitError::AlreadyOpen);
-        }
-        info!("lcpu: bringup starting");
+        info!("bringup starting");
 
         match do_bringup(bd_addr) {
             Ok(()) => {}
             Err(e) => {
-                error!("lcpu: bringup failed: {:?}", e);
+                error!("bringup failed: {}", e);
                 bringup_teardown();
-                LCPU_IN_USE.store(false, Ordering::Release);
                 return Err(e);
             }
         }
 
-        // Holder is published only after bringup fully succeeds.
-        // SAFETY: single-threaded task; only this method writes HOLDER
-        // before publication, and the @irq arm runs inside the same
-        // server loop.
-        unsafe {
-            HOLDER = Some(Holder {
-                task_id: meta.sender,
-                rx_mask: rx_notification_mask,
-            });
-        }
-
-        info!("lcpu: ready");
+        info!("ready");
         Ok(LcpuResource)
     }
 
     fn send_hci(
         &mut self,
-        meta: ipc::Meta,
+        _meta: ipc::Meta,
         data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<(), HciSendError> {
-        if !is_holder(meta.sender) {
-            return Err(HciSendError::NotHolder);
-        }
         let total = data.len();
         if total == 0 {
             return Ok(());
@@ -132,12 +96,9 @@ impl Lcpu for LcpuResource {
 
     fn recv_hci(
         &mut self,
-        meta: ipc::Meta,
+        _meta: ipc::Meta,
         buf: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Write>,
     ) -> u16 {
-        if !is_holder(meta.sender) {
-            return 0;
-        }
         let want = core::cmp::min(buf.len(), SCRATCH_LEN);
         if want == 0 {
             return 0;
@@ -154,24 +115,13 @@ impl Lcpu for LcpuResource {
 
 impl Drop for LcpuResource {
     fn drop(&mut self) {
-        // Stop posting to a holder that's about to disappear.
-        unsafe {
-            HOLDER = None;
-        }
         // Put LCPU back in reset. Errors here are unrecoverable but we
         // can't propagate them through Drop — log and continue.
         if let Err(e) = bringup::lcpu_reset_and_halt() {
-            warn!("lcpu: Drop reset_and_halt failed: {:?}", e);
+            warn!("Drop reset_and_halt failed: {:?}", e);
         }
-        LCPU_IN_USE.store(false, Ordering::Release);
-        info!("lcpu: released");
+        info!("released");
     }
-}
-
-#[inline]
-fn is_holder(sender: ipc::kern::TaskId) -> bool {
-    // SAFETY: see HOLDER docstring — only the lcpu server task touches it.
-    unsafe { HOLDER.map(|h| h.task_id == sender).unwrap_or(false) }
 }
 
 /// Run phases 1, 2, 3, 4, 6, 8, 9, 10 of the recipe. Phases 5 (A3 fw
@@ -179,32 +129,32 @@ fn is_holder(sender: ipc::kern::TaskId) -> bool {
 fn do_bringup(bd_addr: [u8; 6]) -> Result<(), LcpuInitError> {
     // Phase 2 first — we need LCPU halted before we mutate its RAM.
     bringup::lcpu_reset_and_halt()?;
-    info!("lcpu: phase 2 reset/halt done");
+    info!("phase 2 reset/halt done");
 
     // Phase 1 — NVDS TLV blob.
     nvds::write_default(&bd_addr, /*use_lxt=*/ true);
-    info!("lcpu: phase 1 NVDS done");
+    info!("phase 1 NVDS done");
 
     // Initialize the HCPU TX ring header before phase 3 so we have its
     // resolved address to write into ROM-config field +200.
     mailbox::init_tx_ring();
     let hcpu_ipc_addr = mailbox::tx_ring_hcpu_addr();
-    info!("lcpu: HCPU TX ring at 0x{:08x}", hcpu_ipc_addr);
+    info!("HCPU TX ring at {}", hcpu_ipc_addr);
 
     // Phase 3 — Letter-rev ROM config block.
     rom_config::write_letter(hcpu_ipc_addr);
-    info!("lcpu: phase 3 ROM config done");
+    info!("phase 3 ROM config done");
 
     // Phase 4 — clock LCPU off HXT48 + sync gtim.
     bringup::clock_lcpu_off_hxt48()?;
-    info!("lcpu: phase 4 clock done");
+    info!("phase 4 clock done");
 
     // Phase 6 — install patches.
     if let Err(e) = patch::install_letter() {
-        error!("lcpu: patch install failed: {:?}", e);
+        error!("patch install failed: {}", e);
         return Err(LcpuInitError::PatchInstallFailed);
     }
-    info!("lcpu: phase 6 patches done");
+    info!("phase 6 patches done");
 
     // Unmask qid 0 on both mailboxes before LCPU starts running so the
     // warmup HCI event isn't dropped on the floor.
@@ -213,18 +163,18 @@ fn do_bringup(bd_addr: [u8; 6]) -> Result<(), LcpuInitError> {
 
     // Phase 8 — release LCPU.
     bringup::release_lcpu();
-    info!("lcpu: phase 8 LCPU released; waiting for warmup");
+    info!("phase 8 LCPU released; waiting for warmup");
 
     // Phase 9 — wait for the warmup HCI event. We block on the IRQ
     // notification, drain the RX ring on each wake, and stop once we've
     // consumed at least three bytes whose first byte is 0x04 (HCI Event
     // packet indicator).
     wait_for_warmup()?;
-    info!("lcpu: phase 9 warmup HCI event received");
+    info!("phase 9 warmup HCI event received");
 
     // Phase 10 — post-init.
     controller::post_init();
-    info!("lcpu: phase 10 post-init done");
+    info!("phase 10 post-init done");
 
     Ok(())
 }
@@ -270,7 +220,7 @@ fn wait_for_warmup() -> Result<(), LcpuInitError> {
 
         if header[0] != 0x04 {
             warn!(
-                "lcpu: warmup frame had bad H4 type 0x{:02x}, expected 0x04",
+                "warmup frame had bad H4 type {}, expected 0x04",
                 header[0]
             );
             return Err(LcpuInitError::WarmupBadFrame);
@@ -314,18 +264,14 @@ fn bringup_teardown() {
 #[unsafe(export_name = "main")]
 fn main() -> ! {
     info!("lcpu: starting");
-    ipc::server! {
-        Lcpu: LcpuResource,
-        // TODO: fix my name
-        @irq(mailbox2_ch1) => || {
-            // Drain MISR / clear ICR.
-            mailbox::ack_mailbox2_irq();
-            // Wake the holder if any. ipc::server! re-enables the IRQ
-            // for us after this closure returns.
-            let holder = unsafe { HOLDER };
-            if let Some(h) = holder {
-                let _ = userlib::sys_post(h.task_id, h.rx_mask);
-            }
-        },
-    }
+    // ipc::server! {
+    //     Lcpu: LcpuResource,
+    //     @irq(mailbox2_ch1) => || {
+    //         // Drain MISR / clear ICR.
+    //         mailbox::ack_mailbox2_irq();
+    //         // Post to reactor
+    //         Reactor::refresh(generated::notifications::GROUP_ID_LCPU_DATA, 0, 50, OverflowStrategy::Reject);
+    //     },
+    // }
+    loop { }
 }

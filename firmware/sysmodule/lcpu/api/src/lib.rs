@@ -17,18 +17,16 @@ use serde::{Deserialize, Serialize};
 )]
 #[repr(u8)]
 pub enum LcpuInitError {
-    /// LCPU is already in use by another task.
-    AlreadyOpen = 0,
     /// HXT48 oscillator did not report ready within budget.
-    Hxt48Timeout = 1,
+    Hxt48Timeout = 0,
     /// LP_LCPU / LP_MAC reset assertion or release timed out.
-    ResetTimeout = 2,
+    ResetTimeout = 1,
     /// LCPU did not emit the warmup HCI event in time.
-    WarmupTimeout = 3,
+    WarmupTimeout = 2,
     /// First post-release frame was not an HCI Event (H4 type 0x04).
-    WarmupBadFrame = 4,
+    WarmupBadFrame = 3,
     /// Patch installer rejected the bundled patch blob.
-    PatchInstallFailed = 5,
+    PatchInstallFailed = 4,
 }
 
 /// Failures of [`Lcpu::send_hci`].
@@ -54,7 +52,7 @@ pub enum HciSendError {
 
 /// IPC resource exposing the SF32LB52 LCPU (BLE/BT controller).
 ///
-/// `qty1` — at most one task may hold an `Lcpu` handle. Acquiring the
+/// At most one task may hold an `Lcpu` handle. Acquiring the
 /// handle drives the full bringup sequence (NVDS, ROM config, clocks,
 /// patches, release, warmup HCI event, post-init). Dropping the handle
 /// puts LCPU back in reset.
@@ -70,12 +68,8 @@ pub trait Lcpu {
     ///
     /// `bd_addr` is the 6-byte little-endian Bluetooth Device Address
     /// the controller advertises. Written into NVDS tag `0x01`.
-    ///
-    /// `rx_notification_mask` is the notification bit (or set of bits)
-    /// the lcpu task posts on the caller via `sys_post` whenever the
-    /// LCPU→HCPU mailbox IRQ fires. The caller drains via [`recv_hci`].
     #[constructor]
-    fn init(bd_addr: [u8; 6], rx_notification_mask: u32) -> Result<Self, LcpuInitError>;
+    fn init(bd_addr: [u8; 6]) -> Result<Self, LcpuInitError>;
 
     /// Push an HCI H4 frame (type byte + payload) onto the HCPU→LCPU
     /// ring and doorbell MAILBOX1. Returns once the bytes are queued —

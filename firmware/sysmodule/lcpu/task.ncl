@@ -4,7 +4,6 @@ fun ctx => {
   crate_info = import "./Cargo.toml",
   priority = lib.workgroup.sysmodule,
   uses_peripherals = [
-    # RAHHHHHHHHHH
     "hpsys_aon",
     "lpsys_sram",
     "mailbox1",
@@ -19,7 +18,7 @@ fun ctx => {
   ],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 16 },
+    stack = { place = ctx.places.fast, size = lib.kiB 20 },
     data  = { place = ctx.places.fast },
   },
 }

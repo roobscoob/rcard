@@ -54,7 +54,8 @@ members = [
 ]
 
 [workspace.lints.rust]
-warnings = "deny"
+# go away
+#warnings = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

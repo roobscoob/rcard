@@ -287,6 +287,7 @@ dependencies = [
  "sysmodule_display_api",
  "sysmodule_lcpu_api",
  "sysmodule_log_api",
+ "sysmodule_reactor_api",
  "userlib",
 ]
 
@@ -1096,6 +1097,7 @@ dependencies = [
  "sifli-pac 0.2.0 (git+https://github.com/OpenSiFli/sifli-pac.git?rev=bc148a3)",
  "sysmodule_lcpu_api",
  "sysmodule_log_api",
+ "sysmodule_reactor_api",
  "userlib",
 ]
 
