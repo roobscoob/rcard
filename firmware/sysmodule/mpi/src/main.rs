@@ -1553,10 +1553,17 @@ fn init_psram() {
 
     // 5. DCR — HAL_FLASH_SET_CS_TIME + SET_ROW_BOUNDARY + ENABLE_DQS +
     // SET_FIXLAT (the EN_FIXLAT side; MR0/MR4 writes happen later).
-    // SDK low-clock values:
+    // SDK low-clock values.
+    //
+    // NOTE: starting with `dqse=false`. The SDK keeps DQSE on through
+    // init, but the symptom we hit (`SR.BUSY=1, TCF=0` after the reset
+    // command) is exactly what happens if the controller is waiting
+    // for a DQS strobe the chip never drives. Bring up commands first
+    // without DQS, then flip DQSE on before configuring the XIP read
+    // path (which actually needs DQS-aligned reads at speed).
     regs.dcr().write(|w| {
         w.set_rbsize(7); // 1024-byte rows; controller auto-handles refresh
-        w.set_dqse(true); // required for octal DDR Rx latching
+        w.set_dqse(false);
         w.set_hyper(false);
         w.set_xlegacy(false);
         w.set_cslmax(180); // ~12 µs at 15 MHz PSRAM clock
@@ -1620,6 +1627,11 @@ fn init_psram() {
     // 8. MR_WRITE(mr=8, value=3) — set drive strength.
     psram_mr_write(regs, 8, 3);
     validate_mr(regs, 8, 3, "MR8 (drive strength)");
+
+    // 9a. Now that command-mode init has succeeded, enable DQS for the
+    // XIP read path. The controller uses DQS to align its sampling on
+    // the chip's data bytes during burst reads.
+    regs.dcr().modify(|w| w.set_dqse(true));
 
     // 9. HCMDR — XIP read/write opcodes the controller emits per AHB
     // transfer.
