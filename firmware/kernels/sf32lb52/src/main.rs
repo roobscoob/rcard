@@ -44,6 +44,40 @@ pub unsafe fn apply_pin_config() {
         p.write_volatile((p.read_volatile() & !mask) | val);
     }
 
+    // SA01..SA11 -> MPI1 (SiP PSRAM, OPI/octal-DDR). The SDK's
+    // bf0_pin_const.c `pin_pad_func_hcpu` table determines which FSEL
+    // index puts each MPI1 signal on which SA pad; these values match
+    // the eh-lb52xu BSP's PSRAM1 mux. PINMUX layout per kernel
+    // peripheral_types: bits[3:0]=FSEL, bit4=PE (pull enable), bit5=PS
+    // (0=pull-down, 1=pull-up when PE=1), bit6=IE (input enable).
+    // Data and DQS lines need IE so the controller can sample reads
+    // and the chip's DQS strobe; CLK/CS are output-only but the SDK
+    // sets IE on every non-analog pad regardless. All data lines
+    // pull-down (idle low), CLK/CS no-pull.
+    //
+    // SA01 -> mpi1 dio0 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3004, 0x7F, 0x51);
+    // SA02 -> mpi1 dio1 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3008, 0x7F, 0x51);
+    // SA03 -> mpi1 dio2 (FSEL=1, pull=down, IE)
+    rmw(0x5000_300C, 0x7F, 0x51);
+    // SA04 -> mpi1 dio3 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3010, 0x7F, 0x51);
+    // SA05 -> mpi1 dio4 (FSEL=3, pull=down, IE)
+    rmw(0x5000_3014, 0x7F, 0x53);
+    // SA06 -> mpi1 dio5 (FSEL=3, pull=down, IE)
+    rmw(0x5000_3018, 0x7F, 0x53);
+    // SA07 -> mpi1 dio6 (FSEL=3, pull=down, IE)
+    rmw(0x5000_301C, 0x7F, 0x53);
+    // SA08 -> mpi1 dio7 (FSEL=3, pull=down, IE)
+    rmw(0x5000_3020, 0x7F, 0x53);
+    // SA09 -> mpi1 dqsdm (FSEL=3, pull=down, IE)
+    rmw(0x5000_3024, 0x7F, 0x53);
+    // SA10 -> mpi1 clk (FSEL=3, pull=none, IE)
+    rmw(0x5000_3028, 0x7F, 0x43);
+    // SA11 -> mpi1 cs (FSEL=3, pull=none, IE)
+    rmw(0x5000_302C, 0x7F, 0x43);
+
     // PA00 -> lcdc spi rstb (FSEL=1, pull=down)
     rmw(0x5000_3034, 0x7F, 0x11);
     // PA01 -> ovp_fault gpio in (FSEL=0, pull=down, IE)
