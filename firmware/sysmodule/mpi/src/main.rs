@@ -1573,6 +1573,18 @@ fn init_psram() {
         w.0 |= CR_OPIE;
     });
 
+    // Diagnostic: confirm CR took the values we expect (0x200001 = EN | OPIE).
+    let cr_val = regs.cr().read().0;
+    info!("PSRAM CR after enable: {}", cr_val);
+    let sr_val = regs.sr().read().0;
+    info!("PSRAM SR before reset: {}", sr_val);
+    let dllcr2 = sifli_pac::HPSYS_RCC.dllcr(1).read();
+    info!(
+        "PSRAM DLL2 ready: {} stg: {}",
+        dllcr2.ready(),
+        dllcr2.stg()
+    );
+
     // 7. PSRAM RESET — single octal-mode 0xFF, matching the SDK's
     // `HAL_PSRAM_RESET` for SPI_MODE_OPSRAM (LEGPSRAM resets twice; OPSRAM
     // does NOT). Issuing a quad-mode reset first — as I had previously —
@@ -1591,6 +1603,10 @@ fn init_psram() {
     });
     regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_RESET));
     wait_psram_tcf(regs);
+    let sr_after_reset = regs.sr().read().0;
+    info!("PSRAM SR after reset: {}", sr_after_reset);
+    let ccr_after_reset = regs.ccr1().read().0;
+    info!("PSRAM CCR1 after reset: {}", ccr_after_reset);
     spin_us(10); // SDK calls HAL_Delay_us(0) then HAL_Delay_us(3); pad to 10
 
     // 7b. Sanity probe — read MR1 (vendor ID) to confirm the chip
