@@ -1340,12 +1340,6 @@ const CMD_PSRAM_MR_WRITE: u8 = 0xC0; // Mode Register Write
 const CMD_PSRAM_SYNC_READ: u8 = 0x00; // Linear Burst Read (XIP)
 const CMD_PSRAM_SYNC_WRITE: u8 = 0x80; // Linear Burst Write (XIP)
 
-/// Mode-register read latency, in dummy cycles. Per the SDK's
-/// `HAL_MPI_MR_READ`: `rdcyc = hflash->ecc_en` which is set to 3 in the
-/// `freq <= 24 MHz` branch of `HAL_OPI_PSRAM_Init`. CCR1.dcyc is
-/// `rdcyc - 1`.
-const PSRAM_MR_READ_DCYC: u8 = 2;
-
 // Wire-mode encoding for the controller's IMODE/ADMODE/DMODE/ABMODE
 // fields. Value 7 ("quad lines DDR") combined with `CR.OPIE = 1`
 // becomes Octal DDR — there is no separate "octal" enum value.
@@ -1355,23 +1349,10 @@ const MODE_OCTAL_DDR: u8 = 7;
 // The SDK confirms via `cr |= 0x200000` in HAL_FLASH_ENABLE_OPI.
 const CR_OPIE: u32 = 1 << 21;
 
-// Read/write latency cycles for the slowest SDK clock branch
-// (PSRAM clock ≤ 24 MHz, fix_lat=1). HRCCR/HWCCR.dcyc = lat - 1.
-// At higher clocks the SDK bumps these (8/4 at 60 MHz, 14/7 at 84 MHz).
-const PSRAM_R_LAT: u8 = 6;
-const PSRAM_W_LAT: u8 = 3;
-
-// Mode-register values that match `r_lat=6, w_lat=3, fix_lat=1`. Computed
-// per HAL_MPI_SET_FIXLAT (rlat_arr/wlat_arr table lookup):
-//   MR0 = (1<<5) | (rlat_arr[r_lat/2] << 2) | 1
-//       = (1<<5) | (rlat_arr[3] << 2) | 1
-//       = 0x20 | (0 << 2) | 1
-//       = 0x21
-//   MR4 = (wlat_arr[w_lat] << 5)
-//       = (wlat_arr[3] << 5)
-//       = 0
-const PSRAM_MR0_FIXLAT: u8 = 0x21;
-const PSRAM_MR4_FIXLAT: u8 = 0x00;
+// SDK's `HAL_MPI_SET_FIXLAT` uses these lookup tables (bf0_hal_mpi_psram.c:502-503)
+// to convert r_lat/w_lat into the latency-code fields of MR0/MR4.
+const RLAT_ARR: [u8; 8] = [0, 0, 0, 0, 1, 2, 3, 4];
+const WLAT_ARR: [u8; 8] = [0, 0, 0, 0, 4, 2, 6, 1];
 
 /// Spin a rough number of microseconds. The existing flash-reset wait
 /// (line 941) calibrates `50_000` iterations to ~200 µs at 240 MHz, so
@@ -1416,20 +1397,20 @@ fn psram_mr_write(regs: MpiPeri, mr_addr: u32, value: u8) {
 }
 
 /// Read one PSRAM mode register. Mirrors the SDK's `HAL_MPI_MR_READ`:
-/// 4-byte address, octal DDR data, `PSRAM_MR_READ_DCYC` dummy cycles.
+/// 4-byte address, octal DDR data, `rdcyc - 1` dummy cycles.
 /// Returns the low byte of the response (the spec says only low byte
 /// is meaningful for MRR).
-fn psram_mr_read(regs: MpiPeri, mr_addr: u32) -> u8 {
-    regs.dlr1().write(|w| w.set_dlen(1)); // 2 bytes
+fn psram_mr_read(regs: MpiPeri, mr_addr: u32, rdcyc: u8) -> u8 {
     regs.ccr1().write(|w| {
         w.set_imode(MODE_OCTAL_DDR);
         w.set_admode(MODE_OCTAL_DDR);
         w.set_adsize(3);
         w.set_abmode(0);
         w.set_dmode(MODE_OCTAL_DDR);
-        w.set_dcyc(PSRAM_MR_READ_DCYC);
+        w.set_dcyc(rdcyc.saturating_sub(1));
         w.set_fmode(false); // read mode
     });
+    regs.dlr1().write(|w| w.set_dlen(1)); // 2 bytes
     regs.ar1().write(|w| w.0 = mr_addr);
     regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_MR_READ));
     wait_psram_tcf(regs);
@@ -1444,8 +1425,8 @@ fn psram_mr_read(regs: MpiPeri, mr_addr: u32) -> u8 {
 /// Note: rcard_log only supports `{}` placeholders; format specs like
 /// `{:02x}` print literally. Values render as decimal — adequate for
 /// "did this match?" diagnostics.
-fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, name: &str) {
-    let got = psram_mr_read(regs, mr_addr);
+fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, rdcyc: u8, name: &str) {
+    let got = psram_mr_read(regs, mr_addr, rdcyc);
     if got == expected {
         info!("PSRAM {}: {} (ok)", name, got);
     } else {
@@ -1454,6 +1435,34 @@ fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, name: &str) {
             name, expected, got
         );
     }
+}
+
+/// SDK's `HAL_MPI_OPSRAM_CAL_DELAY` (drivers/hal/bf0_hal_mpi_psram.c:1172).
+/// Runs the controller's hardware calibration to find the correct SCK and
+/// DQS sampling delays for the chip on this die. Returns `(sck_dly, dqs_dly)`.
+///
+/// Sequence:
+///   1. PSCLR := 2 (calibration runs at MCLK = SRC/2)
+///   2. clear MISCR.SCKINV
+///   3. set CALCR.EN=1, wait 20 µs, poll CALCR.DONE
+///   4. read CALCR.DELAY
+///   5. clear CALCR.EN
+///   6. for SF32LB52X: sck = delay - 1, dqs = delay - 4
+///   7. PSCLR := 1
+fn psram_cal_delay(regs: MpiPeri) -> (u8, u8) {
+    regs.psclr().write(|w| w.set_div(2));
+    regs.miscr().modify(|w| w.set_sckinv(false));
+    regs.calcr().modify(|w| w.set_en(true));
+    spin_us(20);
+    while !regs.calcr().read().done() {
+        core::hint::spin_loop();
+    }
+    let delay = regs.calcr().read().delay();
+    regs.calcr().modify(|w| w.set_en(false));
+    let sck = delay.saturating_sub(1);
+    let dqs = delay.saturating_sub(4);
+    regs.psclr().write(|w| w.set_div(1));
+    (sck, dqs)
 }
 
 /// Pre-init the SiP PSRAM's clock + power. Mirrors what the SDK's BSP
@@ -1489,7 +1498,7 @@ fn psram_pre_init() {
     rcc.dllcr(1).modify(|w| {
         w.set_in_div2_en(true);
         w.set_out_div2_en(false);
-        w.set_stg(9); // 240 MHz
+        w.set_stg(11); // 288 MHz: (288e6 - 24e6) / 24e6 = 11
         w.set_en(true);
     });
     spin_us(10);
@@ -1513,172 +1522,150 @@ fn psram_pre_init() {
 
 /// Bring up MPI1 + the SiP PSRAM for memory-mapped XIP access.
 ///
-/// Mirrors the SiFli SDK's `bsp_psramc_init` → `HAL_MPI_PSRAM_Init` →
-/// `HAL_OPI_PSRAM_Init` (drivers/hal/bf0_hal_mpi_psram.c) for the
-/// `SPI_MODE_OPSRAM` + `freq <= 24 MHz` path. Constants are picked for
-/// `PSCLR.div = 8` so we land squarely in that branch.
+/// Direct port of the SDK chain `bsp_psramc_init` → `HAL_MPI_PSRAM_Init`
+/// → `HAL_OPI_PSRAM_Init` (drivers/hal/bf0_hal_mpi_psram.c) for
+/// `SPI_MODE_OPSRAM`. With DLL2 = 288 MHz and PSCLR = 1, the SDK lands
+/// in its `freq ≤ 144 MHz` branch (PSRAM clock = 144 MHz, w_lat = 6,
+/// r_lat = 12).
 fn init_psram() {
     let regs = sifli_pac::MPI1;
     let rcc = sifli_pac::HPSYS_RCC;
 
-    // 1. RCC block reset of MPI1. Same dance as the flash open() path:
-    // BOOTROM may have left the controller mid-transaction with arbitrary
-    // FIFO / IRQ state; a block reset is the only clean recovery.
+    // === HAL_OPI_PSRAM_Init ===
+
+    // 1. RCC block reset of MPI1. (BOOTROM never touched MPI1, but the
+    // reset is cheap insurance against any stray state.)
     rcc.rstr2().modify(|w| w.set_mpi1(true));
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     rcc.rstr2().modify(|w| w.set_mpi1(false));
     rcc.enr2().modify(|w| w.set_mpi1(true));
 
-    // 2. HAL_QSPI_Init equivalent — base controller defaults the SDK sets
-    // on every MPI bring-up.
+    // 2. HAL_QSPI_Init defaults.
     regs.timr().write(|w| w.0 = 0xFF);
     regs.cir().write(|w| w.0 = 0x5000_5000);
     regs.abr1().write(|w| w.0 = 0xFF);
     regs.hrabr().write(|w| w.0 = 0xFF);
 
-    // 3. PSCLR — div=8 → low-clock branch (≤ 24 MHz PSRAM clock).
-    // SF32LB52X DLL1 source is ~240 MHz so MCLK = 30 MHz, PSRAM clock = 15 MHz.
-    // We don't have HAL_MPI_OPSRAM_CAL_DELAY (auto-calibration), so we
-    // need to be in the low-clock branch where the SDK's explicit
-    // dqs_dly=20 / sck_dly=20 values apply. Higher-clock branches expect
-    // calibrated values.
-    regs.psclr().write(|w| w.set_div(8));
+    // 3. HAL_MPI_OPSRAM_CAL_DELAY — auto-calibrate sck/dqs delays.
+    let (sck_dly, dqs_dly) = psram_cal_delay(regs);
+    info!("PSRAM cal: sck_dly={} dqs_dly={}", sck_dly, dqs_dly);
 
-    // 4. MISCR — DQS delay = 20, SCK delay = 20 (SF32LB52X-specific
-    // low-clock values from `HAL_OPI_PSRAM_Init`).
-    regs.miscr().write(|w| {
-        w.set_sckdly(20);
-        w.set_dqsdly(20);
-    });
+    // 4. HAL_FLASH_SET_CLK_rom(1) — PSCLR = 1.
+    // (cal_delay leaves PSCLR=1 already, but the SDK reapplies it.)
+    regs.psclr().write(|w| w.set_div(1));
 
-    // 5. DCR — HAL_FLASH_SET_CS_TIME + SET_ROW_BOUNDARY + ENABLE_DQS +
-    // SET_FIXLAT (the EN_FIXLAT side; MR0/MR4 writes happen later).
-    // SDK low-clock values.
-    //
-    // NOTE: starting with `dqse=false`. The SDK keeps DQSE on through
-    // init, but the symptom we hit (`SR.BUSY=1, TCF=0` after the reset
-    // command) is exactly what happens if the controller is waiting
-    // for a DQS strobe the chip never drives. Bring up commands first
-    // without DQS, then flip DQSE on before configuring the XIP read
-    // path (which actually needs DQS-aligned reads at speed).
+    // 5. HAL_FLASH_SET_CS_TIME — SDK's freq ≤ 144 MHz branch:
+    //    cs_min = 6, cs_max = 1140, cshmin = 5, trcmin = 17
+    // 6. HAL_FLASH_SET_ROW_BOUNDARY(7) — DCR.RBSIZE = 7.
+    // 7. HAL_MPI_ENABLE_DQS(1) — DCR.DQSE = 1.
     regs.dcr().write(|w| {
-        w.set_rbsize(7); // 1024-byte rows; controller auto-handles refresh
-        w.set_dqse(false);
+        w.set_rbsize(7);
+        w.set_dqse(true);
         w.set_hyper(false);
         w.set_xlegacy(false);
-        w.set_cslmax(180); // ~12 µs at 15 MHz PSRAM clock
+        w.set_cslmax(1140);
         w.set_cslmin(6);
-        w.set_cshmin(0);
-        w.set_trcmin(3);
-        w.set_fixlat(true);
+        w.set_cshmin(5);
+        w.set_trcmin(17);
+        // FIXLAT will be set by SET_FIXLAT later.
     });
 
-    // 6. Bring controller online with OPI enabled.
-    regs.cr().write(|w| {
-        w.set_en(true);
-        w.0 |= CR_OPIE;
+    // 8. HAL_MPI_SET_DQS_DELAY + HAL_MPI_SET_SCK with calibrated values.
+    regs.miscr().write(|w| {
+        w.set_dqsdly(dqs_dly);
+        w.set_sckdly(sck_dly);
+        w.set_sckinv(false);
     });
 
-    // Diagnostic: confirm CR took the values we expect (0x200001 = EN | OPIE).
-    let cr_val = regs.cr().read().0;
-    info!("PSRAM CR after enable: {}", cr_val);
-    let sr_val = regs.sr().read().0;
-    info!("PSRAM SR before reset: {}", sr_val);
-    let dllcr2 = sifli_pac::HPSYS_RCC.dllcr(1).read();
-    info!(
-        "PSRAM DLL2 ready: {} stg: {}",
-        dllcr2.ready(),
-        dllcr2.stg()
-    );
+    // 9. HAL_FLASH_ENABLE_QSPI(1) → CR.EN, then HAL_FLASH_ENABLE_OPI(1)
+    // → CR.OPIE. SDK does these as separate read-modify-writes.
+    regs.cr().modify(|w| w.set_en(true));
+    regs.cr().modify(|w| w.0 |= CR_OPIE);
 
-    // 7. PSRAM RESET — single octal-mode 0xFF, matching the SDK's
-    // `HAL_PSRAM_RESET` for SPI_MODE_OPSRAM (LEGPSRAM resets twice; OPSRAM
-    // does NOT). Issuing a quad-mode reset first — as I had previously —
-    // leaves the controller in a state where the WDT triggers a bus
-    // fault on the first AHB read.
-    regs.ar1().write(|w| w.0 = 0);
-    regs.ccr1().write(|w| {
-        w.set_imode(MODE_OCTAL_DDR);
-        w.set_admode(MODE_OCTAL_DDR);
-        w.set_adsize(3); // 4-byte address
-        w.set_abmode(MODE_OCTAL_DDR);
-        w.set_absize(1); // 2-byte alt phase
-        w.set_dmode(0);
-        w.set_dcyc(0);
-        w.set_fmode(true);
-    });
-    regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_RESET));
-    wait_psram_tcf(regs);
-    let sr_after_reset = regs.sr().read().0;
-    info!("PSRAM SR after reset: {}", sr_after_reset);
-    let ccr_after_reset = regs.ccr1().read().0;
-    info!("PSRAM CCR1 after reset: {}", ccr_after_reset);
-    spin_us(10); // SDK calls HAL_Delay_us(0) then HAL_Delay_us(3); pad to 10
+    // Diagnostic: confirm we got here with sane state.
+    info!("PSRAM CR: {}", regs.cr().read().0);
+    info!("PSRAM SR before reset: {}", regs.sr().read().0);
 
-    // 7b. Sanity probe — read MR1 (vendor ID) to confirm the chip
-    // decoded our reset and is responding on the expected protocol. If
-    // this comes back as 0x00 or 0xFF, the OPI/octal/DQS handshake is
-    // wrong and nothing downstream will work.
-    let vendor_id = psram_mr_read(regs, 1);
-    info!("PSRAM vendor ID (MR1): {}", vendor_id);
-    let device_id = psram_mr_read(regs, 2);
-    info!("PSRAM device ID (MR2): {}", device_id);
+    // 10. HAL_PSRAM_RESET — single 0xFF on octal lines (OPSRAM mode).
+    psram_reset(regs);
 
-    // 8. MR_WRITE(mr=8, value=3) — set drive strength.
+    // === HAL_MPI_PSRAM_Init dispatcher (SPI_MODE_OPSRAM branch) ===
+
+    // 11. MR_WRITE(8, 3) — drive strength.
+    // SDK's `HAL_MPI_MR_READ` uses `rdcyc = hflash->ecc_en`, which
+    // `HAL_OPI_PSRAM_Init` sets to 6 in the ≤144 MHz branch. Validation
+    // reads must match — wrong rdcyc returns garbage (or hangs the bus).
+    let rdcyc_mr: u8 = 6;
     psram_mr_write(regs, 8, 3);
-    validate_mr(regs, 8, 3, "MR8 (drive strength)");
+    validate_mr(regs, 8, 3, rdcyc_mr, "MR8");
 
-    // 9a. Now that command-mode init has succeeded, enable DQS for the
-    // XIP read path. The controller uses DQS to align its sampling on
-    // the chip's data bytes during burst reads.
-    regs.dcr().modify(|w| w.set_dqse(true));
+    // 12. Pick w_lat by clock branch. With DLL2=288 MHz and PSCLR=1,
+    // sys_clk = HAL_QSPI_GET_CLK / 2 = 144 MHz, hits the ≤166 branch:
+    //   w_lat = 6, r_lat = w_lat * 2 = 12 (fix_lat=1)
+    let w_lat: u8 = 6;
+    let r_lat: u8 = w_lat * 2;
 
-    // 9. HCMDR — XIP read/write opcodes the controller emits per AHB
-    // transfer.
-    regs.hcmdr().write(|w| {
-        w.set_rcmd(CMD_PSRAM_SYNC_READ);
-        w.set_wcmd(CMD_PSRAM_SYNC_WRITE);
-    });
-
-    // 10. HRCCR — XIP read protocol. 4-byte address; dummy = r_lat - 1.
+    // 13. HAL_FLASH_CFG_AHB_RCMD + SET_AHB_RCMD.
+    // HRCCR fields: imode/admode/adsize/abmode/absize/dcyc/dmode.
     regs.hrccr().write(|w| {
         w.set_imode(MODE_OCTAL_DDR);
         w.set_admode(MODE_OCTAL_DDR);
         w.set_adsize(3);
         w.set_abmode(0);
         w.set_absize(0);
-        w.set_dcyc(PSRAM_R_LAT - 1);
+        w.set_dcyc(r_lat - 1);
         w.set_dmode(MODE_OCTAL_DDR);
     });
+    regs.hcmdr().modify(|w| w.set_rcmd(CMD_PSRAM_SYNC_READ));
 
-    // 11. HWCCR — XIP write protocol. Same as HRCCR with dummy = w_lat - 1.
+    // 14. HAL_FLASH_CFG_AHB_WCMD + SET_AHB_WCMD.
     regs.hwccr().write(|w| {
         w.set_imode(MODE_OCTAL_DDR);
         w.set_admode(MODE_OCTAL_DDR);
         w.set_adsize(3);
         w.set_abmode(0);
         w.set_absize(0);
-        w.set_dcyc(PSRAM_W_LAT - 1);
+        w.set_dcyc(w_lat - 1);
         w.set_dmode(MODE_OCTAL_DDR);
     });
+    regs.hcmdr().modify(|w| w.set_wcmd(CMD_PSRAM_SYNC_WRITE));
 
-    // 12. Configure the PSRAM's own latency mode to match. SDK's
-    // HAL_MPI_SET_FIXLAT writes MR0 (read latency code) and MR4 (write
-    // latency code). Without these the chip's internal latency setting
-    // doesn't match the controller's HRCCR/HWCCR.dcyc values, and reads
-    // come back shifted/garbled.
-    psram_mr_write(regs, 0, PSRAM_MR0_FIXLAT);
-    validate_mr(regs, 0, PSRAM_MR0_FIXLAT, "MR0 (read latency)");
-    psram_mr_write(regs, 4, PSRAM_MR4_FIXLAT);
-    validate_mr(regs, 4, PSRAM_MR4_FIXLAT, "MR4 (write latency)");
+    // 15. HAL_MPI_SET_FIXLAT(fix=1, r_lat, w_lat). Per SDK
+    // (bf0_hal_mpi_psram.c:496): set DCR.FIXLAT, write MR0/MR4 derived
+    // from rlat_arr/wlat_arr, then re-modify HRCCR/HWCCR.dcyc.
+    regs.dcr().modify(|w| w.set_fixlat(true));
+    let mr0 = (1 << 5) | (RLAT_ARR[(r_lat / 2) as usize] << 2) | 1;
+    let mr4 = WLAT_ARR[w_lat as usize] << 5;
+    psram_mr_write(regs, 0, mr0);
+    validate_mr(regs, 0, mr0, rdcyc_mr, "MR0");
+    psram_mr_write(regs, 4, mr4);
+    validate_mr(regs, 4, mr4, rdcyc_mr, "MR4");
 
-    // 13. Watchdog — AHB-side timeout so an unresponsive memory transfer
-    // returns a bus error to the caller instead of hanging the bus
-    // indefinitely.
+    // 16. HAL_FLASH_SET_WDT(0xFFFF) — AHB-side timeout.
     regs.wdtr().write(|w| {
         w.set_timeout(0xFFFF);
         w.set_en(true);
     });
+}
+
+/// SDK's `HAL_PSRAM_RESET` for SPI_MODE_OPSRAM (drivers/hal/bf0_hal_mpi_psram.c:671).
+/// Single 0xFF on octal lines: imode=admode=abmode=7, adsize=3 (4-byte),
+/// absize=1 (2-byte), no data phase, fmode=write.
+fn psram_reset(regs: MpiPeri) {
+    regs.ccr1().write(|w| {
+        w.set_imode(MODE_OCTAL_DDR);
+        w.set_admode(MODE_OCTAL_DDR);
+        w.set_adsize(3);
+        w.set_abmode(MODE_OCTAL_DDR);
+        w.set_absize(1);
+        w.set_dmode(0);
+        w.set_dcyc(0);
+        w.set_fmode(true);
+    });
+    regs.ar1().write(|w| w.0 = 0);
+    regs.cmdr1().write(|w| w.set_cmd(CMD_PSRAM_RESET));
+    wait_psram_tcf(regs);
+    spin_us(3); // SDK: HAL_Delay_us(0); HAL_Delay_us(3)
 }
 
 #[export_name = "main"]
