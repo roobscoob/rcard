@@ -44,6 +44,58 @@ pub unsafe fn apply_pin_config() {
         p.write_volatile((p.read_volatile() & !mask) | val);
     }
 
+    // SA00..SA12 -> MPI1 (SiP PSRAM, OPI/octal-DDR, 64 Mb APM XCELLA).
+    //
+    // SF32LB525UC6 part-number decode (DS5201 p.51 Table 5-7):
+    // 525UC6 = 64 Mb (8 MB) OPI PSRAM die, APMemory XCELLA. The chip
+    // ID register (HPSYS_CFG.IDR.PID) reads 3 at runtime, which the
+    // SDK's BSP_PIN_Init dispatches to `board_pinmux_psram_func1_2_4(1)`
+    // (eh-lb52xu/bsp_pinmux.c:30-67, switch case at line 193). The
+    // 128 Mb part (SF32LB527UD6, pid=2) uses `func0` with a different
+    // pad layout — easy to confuse since the eh-lb52xu BSP file is
+    // shared across all 52xU SiP variants and switches at runtime.
+    //
+    // FSEL values come from bf0_pin_const.c `pin_pad_func_hcpu` table:
+    // each row enumerates the function-index → pin_function mapping
+    // for one pad, and we pick the column whose value matches the
+    // signal we want.
+    //
+    // PINMUX layout: bits[3:0]=FSEL, bit4=PE (pull enable), bit5=PS
+    // (0=pull-down, 1=pull-up when PE=1), bit6=IE (input enable).
+    // Analog mode is FSEL=0xF (PIN_ANALOG_FUNC) with PE/IE cleared.
+    //
+    // Data and DQSDM lines need IE so the controller can sample reads
+    // and the chip's DQS strobe; CLK/CS are output-only but the SDK
+    // sets IE on every non-analog pad regardless. Data lines pull-down
+    // (idle low), CLK/CS no-pull.
+    //
+    // SA00 -> analog (unused on 64 Mb part)
+    rmw(0x5000_3000, 0x7F, 0x0F);
+    // SA01 -> mpi1 dio0 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3004, 0x7F, 0x51);
+    // SA02 -> mpi1 dio1 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3008, 0x7F, 0x51);
+    // SA03 -> mpi1 dio2 (FSEL=1, pull=down, IE)
+    rmw(0x5000_300C, 0x7F, 0x51);
+    // SA04 -> mpi1 dio3 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3010, 0x7F, 0x51);
+    // SA05 -> mpi1 cs (FSEL=1, pull=none, IE)
+    rmw(0x5000_3014, 0x7F, 0x41);
+    // SA06 -> analog (unused on 64 Mb part)
+    rmw(0x5000_3018, 0x7F, 0x0F);
+    // SA07 -> mpi1 clk (FSEL=1, pull=none, IE)
+    rmw(0x5000_301C, 0x7F, 0x41);
+    // SA08 -> mpi1 dio4 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3020, 0x7F, 0x51);
+    // SA09 -> mpi1 dio5 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3024, 0x7F, 0x51);
+    // SA10 -> mpi1 dio6 (FSEL=1, pull=down, IE)
+    rmw(0x5000_3028, 0x7F, 0x51);
+    // SA11 -> mpi1 dio7 (FSEL=1, pull=down, IE)
+    rmw(0x5000_302C, 0x7F, 0x51);
+    // SA12 -> mpi1 dqsdm (FSEL=2, pull=down, IE)
+    rmw(0x5000_3030, 0x7F, 0x52);
+
     // PA00 -> lcdc spi rstb (FSEL=1, pull=down)
     rmw(0x5000_3034, 0x7F, 0x11);
     // PA01 -> ovp_fault gpio in (FSEL=0, pull=down, IE)
@@ -341,6 +393,26 @@ fn main() -> ! {
     usart1_write_u32_hex("kernel: Set VTOR to 0x", unsafe {
         core::ptr::read_volatile(VECTOR_TABLE_OFFSET_REGISTER)
     });
+
+    // Bring up VDD18 (PERI_LDO_1V8) BEFORE we mux any SA pad to MPI1.
+    // The SiP PSRAM die is powered from the chip's internal LDO18; the
+    // SA pads' I/O domain depends on it being stable. If we switch the
+    // pads out of analog-floating to MPI1 alt-function while VDD18 is
+    // dead, the chip can latch wrong values and the controller will
+    // see a non-responsive bus forever (TCF never fires).
+    //
+    // PMUC.PERI_LDO at 0x500ca05c — bit 0 = EN_LDO18, bit 5 = LDO18_PD.
+    // Set EN, clear PD. SDK then waits 5 ms for the rail to settle
+    // (bf0_hal_pmu.c:1303). At HXT48 boot speed (CPU = 48 MHz) that's
+    // 240k cycles.
+    unsafe {
+        let p = 0x500c_a05c as *mut u32;
+        let v = p.read_volatile();
+        p.write_volatile((v & !(1 << 5)) | (1 << 0));
+    }
+    cortex_m::asm::delay(240_000);
+    usart1_write_str(TICK_ZERO);
+    usart1_write_str("kernel: VDD18 LDO enabled\r\n");
 
     unsafe { apply_pin_config() };
 

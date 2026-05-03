@@ -6,8 +6,9 @@ fun ctx => {
   depends_on = [
     ctx.tasks.sysmodule_display,
     ctx.tasks.sysmodule_log,
+    ctx.tasks.sysmodule_reactor,
   ],
-  uses_notifications = ["present"],
+  pushes_notifications = ["present"],
   regions = {
     code          = { place = ctx.places.bulk },
     stack         = { place = ctx.places.fast, size = lib.kiB 8 },

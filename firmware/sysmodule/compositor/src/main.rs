@@ -1,16 +1,20 @@
 #![no_std]
 #![no_main]
 
-pub mod allocator;
-pub mod frame_buffers;
+extern crate alloc;
 
-use frame_buffers::FrameBuffers;
+mod heap;
+
+use alloc::vec::Vec;
+use generated::notifications;
 use generated::slots::SLOTS;
+use ipc::allocation;
+use lilla_oxid::graphics::{self, Color, Image, ImageFormat as LillaFormat, Point, Size};
 use once_cell::{GlobalState, OnceCell};
-use rcard_log::{OptionExt, ResultExt};
-use sysmodule_compositor_api::channel::ImageFormat;
+use rcard_log::{info, OptionExt, ResultExt};
 use sysmodule_compositor_api::*;
 use sysmodule_display_api::DisplayConfiguration;
+use sysmodule_reactor_api::OverflowStrategy;
 
 sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -18,61 +22,190 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log; cleanup Display, Reactor);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
-static FRAME_BUFFERS: OnceCell<GlobalState<FrameBuffers>> = OnceCell::new();
+const FRAME_BUFFERS_BYTES: usize = 512 * 1024;
+allocation!(FRAME_BUFFERS = @frame_buffers: [u8; FRAME_BUFFERS_BYTES]);
 
-fn with_frame_buffers<R>(f: impl FnOnce(&mut FrameBuffers) -> R) -> R {
-    FRAME_BUFFERS
-        .get()
-        .log_expect("frame buffers not initialized")
-        .with(f)
-        .log_expect("reentrant frame buffer access")
+#[global_allocator]
+static HEAP: heap::Heap = heap::Heap::new();
+
+const DISPLAY_WIDTH: i32 = 128;
+const DISPLAY_HEIGHT: i32 = 64;
+const DISPLAY_PAGES: usize = (DISPLAY_HEIGHT / 8) as usize;
+const DISPLAY_BUF_SIZE: usize = DISPLAY_WIDTH as usize * DISPLAY_PAGES;
+
+const MAX_FRAME_BUFFERS: usize = 32; // matches FrameBuffer arena_size
+const MAX_LAYERS: usize = 32; // matches Layer arena_size
+const MAX_IMAGE_DIM: u32 = 4096;
+
+struct FrameBufferEntry {
+    id: u32,
+    image: Image,
 }
 
-const DISPLAY_WIDTH: usize = 128;
-const DISPLAY_HEIGHT: usize = 64;
-const DISPLAY_PAGES: usize = DISPLAY_HEIGHT / 8;
-const DISPLAY_BUF_SIZE: usize = DISPLAY_WIDTH * DISPLAY_PAGES;
+struct Registry {
+    slots: [Option<FrameBufferEntry>; MAX_FRAME_BUFFERS],
+    next_id: u32,
+}
+
+impl Registry {
+    fn find_image(&self, id: u32) -> Option<&Image> {
+        self.slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .find(|e| e.id == id)
+            .map(|e| &e.image)
+    }
+
+    fn contains(&self, id: u32) -> bool {
+        self.find_image(id).is_some()
+    }
+}
+
+struct LayerEntry {
+    framebuffer_id: u32,
+    x: i16,
+    y: i16,
+    z: i16,
+    /// Reserved for future blend modes (alpha-mask, additive, etc.).
+    /// Today only `Replace` is honored.
+    _blend: BlendMode,
+    visible: bool,
+}
+
+struct Layers {
+    slots: [Option<LayerEntry>; MAX_LAYERS],
+}
+
+struct Scratch {
+    frame: Image,
+    out: [u8; DISPLAY_BUF_SIZE],
+}
+
+/// Frame counter + last-log timestamp for the FPS log line. The compositor
+/// owns the present cadence now, so the FPS reading reflects how often
+/// `handle_present` actually completes a render — not how often a client
+/// asks for one.
+struct Fps {
+    frames: u32,
+    last_log_ms: u64,
+}
+
+static REGISTRY: OnceCell<GlobalState<Registry>> = OnceCell::new();
+static LAYERS: OnceCell<GlobalState<Layers>> = OnceCell::new();
+static SCRATCH: OnceCell<GlobalState<Scratch>> = OnceCell::new();
+static FPS: GlobalState<Fps> = GlobalState::new(Fps {
+    frames: 0,
+    last_log_ms: 0,
+});
+static DISPLAY_HANDLE: OnceCell<Display> = OnceCell::new();
 
 struct FrameBufferResource {
-    allocation_id: u32,
-    format: ImageFormat,
+    slot: u8,
     owner: u16,
+    id: u32,
+}
+
+struct LayerResource {
+    slot: u8,
+    owner: u16,
+}
+
+fn lilla_format(fmt: ImageFormat) -> LillaFormat {
+    match fmt {
+        ImageFormat::Mono => LillaFormat::Mono,
+        ImageFormat::TwoBpp => LillaFormat::TwoBpp,
+        ImageFormat::EightBpp => LillaFormat::EightBpp,
+    }
+}
+
+/// Build a zero-initialized `Image` of the given size/format. Returns
+/// `None` on heap exhaustion (or if `Image::from_vec` rejects the buffer
+/// length). Callers route this through `log_expect` or map to a structured
+/// error — never use `Image::new` directly, which calls `vec![0; n]`
+/// internally and panics with a formatted message that
+/// `panic_handler!::as_str()` can't extract → bare "panic" in the log.
+fn try_make_image_size(size: Size, format: LillaFormat) -> Option<Image> {
+    let bpp = format as u8 as usize;
+    let pitch = (size.w as usize * bpp + 7) / 8;
+    let len = size.h as usize * pitch;
+    let mut data: Vec<u8> = Vec::new();
+    data.try_reserve_exact(len).ok()?;
+    data.resize(len, 0);
+    Image::from_vec(size, format, data)
+}
+
+/// Build an `Image` from a validated `FrameBufferInfo`. Returns `Err` rather
+/// than panicking on heap exhaustion so a busy compositor degrades gracefully.
+fn try_make_image(info: FrameBufferInfo) -> Result<Image, FrameBufferError> {
+    let size = Size {
+        w: info.width as i32,
+        h: info.height as i32,
+    };
+    try_make_image_size(size, lilla_format(info.format)).ok_or(FrameBufferError::OutOfMemory)
+}
+
+fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+    REGISTRY
+        .get()
+        .log_expect("registry not initialized")
+        .with(f)
+        .log_expect("reentrant registry access")
+}
+
+fn with_layers<R>(f: impl FnOnce(&mut Layers) -> R) -> R {
+    LAYERS
+        .get()
+        .log_expect("layers not initialized")
+        .with(f)
+        .log_expect("reentrant layers access")
+}
+
+fn with_scratch<R>(f: impl FnOnce(&mut Scratch) -> R) -> R {
+    SCRATCH
+        .get()
+        .log_expect("scratch not initialized")
+        .with(f)
+        .log_expect("reentrant scratch access")
 }
 
 impl FrameBuffer for FrameBufferResource {
     fn new(
         meta: ipc::Meta,
-        format: ImageFormat,
+        info: FrameBufferInfo,
         seed_data: ipc::dispatch::LeaseBorrow<'_, ipc::dispatch::Read>,
     ) -> Result<Self, FrameBufferError> {
-        let expected = format.storage_size_bytes();
+        if info.width == 0
+            || info.height == 0
+            || info.width > MAX_IMAGE_DIM
+            || info.height > MAX_IMAGE_DIM
+        {
+            return Err(FrameBufferError::InvalidDimensions);
+        }
+        let expected = info.data_len();
         if seed_data.len() != expected {
             return Err(FrameBufferError::WrongSeedLength);
         }
 
-        let mut buf = [0u8; frame_buffers::CHUNK_SIZE];
-        with_frame_buffers(|fb| {
-            let allocation_id = fb.next_id();
-            let mut writer = fb
-                .allocator_mut()
-                .begin_write(allocation_id, expected)
-                .map_err(|_| FrameBufferError::OutOfVram)?;
+        let mut image = try_make_image(info)?;
+        let _ = seed_data.read_range(0, image.data.as_mut_slice());
 
-            let mut offset = 0;
-            while offset < expected {
-                let n = (expected - offset).min(buf.len());
-                let _ = seed_data.read_range(offset, &mut buf[..n]);
-                writer
-                    .append(&buf[..n])
-                    .map_err(|_| FrameBufferError::OutOfVram)?;
-                offset += n;
+        let owner = meta.sender.task_index();
+        with_registry(move |r| {
+            for (idx, slot) in r.slots.iter_mut().enumerate() {
+                if slot.is_none() {
+                    let id = r.next_id;
+                    // Skip 0 on wrap so id == 0 never names a live framebuffer.
+                    let next = id.wrapping_add(1);
+                    r.next_id = if next == 0 { 1 } else { next };
+                    *slot = Some(FrameBufferEntry { id, image });
+                    return Ok(FrameBufferResource {
+                        slot: idx as u8,
+                        owner,
+                        id,
+                    });
+                }
             }
-
-            Ok(FrameBufferResource {
-                allocation_id,
-                format,
-                owner: meta.sender.task_index(),
-            })
+            Err(FrameBufferError::OutOfSlots)
         })
     }
 
@@ -84,65 +217,278 @@ impl FrameBuffer for FrameBufferResource {
         if meta.sender.task_index() != self.owner {
             return Err(FrameBufferError::NotOwner);
         }
-        let expected = self.format.storage_size_bytes();
-        if seed_data.len() != expected {
-            return Err(FrameBufferError::WrongSeedLength);
-        }
-
-        let mut buf = [0u8; frame_buffers::CHUNK_SIZE];
-        let id = self.allocation_id;
-        with_frame_buffers(|fb| {
-            let mut writer = fb
-                .allocator_mut()
-                .begin_write(id, expected)
-                .map_err(|_| FrameBufferError::OutOfVram)?;
-
-            let mut offset = 0;
-            while offset < expected {
-                let n = (expected - offset).min(buf.len());
-                let _ = seed_data.read_range(offset, &mut buf[..n]);
-                writer
-                    .append(&buf[..n])
-                    .map_err(|_| FrameBufferError::OutOfVram)?;
-                offset += n;
+        let slot = self.slot as usize;
+        with_registry(|r| {
+            let entry = r.slots[slot]
+                .as_mut()
+                .log_expect("frame buffer slot vanished while owned");
+            if seed_data.len() != entry.image.data.len() {
+                return Err(FrameBufferError::WrongSeedLength);
             }
-
+            let _ = seed_data.read_range(0, entry.image.data.as_mut_slice());
             Ok(())
         })
+    }
+
+    fn id(&mut self, _meta: ipc::Meta) -> FrameBufferId {
+        FrameBufferId(self.id)
     }
 }
 
 impl Drop for FrameBufferResource {
     fn drop(&mut self) {
-        with_frame_buffers(|fb| {
-            fb.free(self.allocation_id);
+        let slot = self.slot as usize;
+        with_registry(|r| {
+            r.slots[slot] = None;
         });
     }
 }
 
-#[ipc::notification_handler(present)]
-fn handle_present(_sender: u16, _code: u32) {
-    let display = DISPLAY_HANDLE.get().log_expect("display not initialized");
-
-    // Build a 1x1 checkerboard in SSD1312 GDDRAM format.
-    // Each byte encodes 8 vertical pixels (LSB = topmost).
-    // 0x55 = 0b01010101, 0xAA = 0b10101010.
-    let mut buf = [0u8; DISPLAY_BUF_SIZE];
-    for page in 0..DISPLAY_PAGES {
-        for col in 0..DISPLAY_WIDTH {
-            buf[page * DISPLAY_WIDTH + col] = if (page + col) % 2 == 0 { 0x55 } else { 0xAA };
+impl Layer for LayerResource {
+    fn new(
+        meta: ipc::Meta,
+        framebuffer: FrameBufferId,
+        x: i16,
+        y: i16,
+        z: i16,
+        blend: BlendMode,
+    ) -> Result<Self, LayerError> {
+        if !with_registry(|r| r.contains(framebuffer.0)) {
+            return Err(LayerError::UnknownFrameBuffer);
         }
+        let owner = meta.sender.task_index();
+        with_layers(|layers| {
+            for (idx, slot) in layers.slots.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Some(LayerEntry {
+                        framebuffer_id: framebuffer.0,
+                        x,
+                        y,
+                        z,
+                        _blend: blend,
+                        visible: true,
+                    });
+                    return Ok(LayerResource {
+                        slot: idx as u8,
+                        owner,
+                    });
+                }
+            }
+            Err(LayerError::OutOfSlots)
+        })
     }
 
-    display.draw(&buf).log_expect("Failed to draw to display");
+    fn set_framebuffer(
+        &mut self,
+        meta: ipc::Meta,
+        framebuffer: FrameBufferId,
+    ) -> Result<(), LayerError> {
+        if meta.sender.task_index() != self.owner {
+            return Err(LayerError::NotOwner);
+        }
+        if !with_registry(|r| r.contains(framebuffer.0)) {
+            return Err(LayerError::UnknownFrameBuffer);
+        }
+        let slot = self.slot as usize;
+        with_layers(|layers| {
+            if let Some(entry) = layers.slots[slot].as_mut() {
+                entry.framebuffer_id = framebuffer.0;
+            }
+        });
+        Ok(())
+    }
+
+    fn set_position(&mut self, meta: ipc::Meta, x: i16, y: i16) -> Result<(), LayerError> {
+        if meta.sender.task_index() != self.owner {
+            return Err(LayerError::NotOwner);
+        }
+        let slot = self.slot as usize;
+        with_layers(|layers| {
+            if let Some(entry) = layers.slots[slot].as_mut() {
+                entry.x = x;
+                entry.y = y;
+            }
+        });
+        Ok(())
+    }
+
+    fn set_z(&mut self, meta: ipc::Meta, z: i16) -> Result<(), LayerError> {
+        if meta.sender.task_index() != self.owner {
+            return Err(LayerError::NotOwner);
+        }
+        let slot = self.slot as usize;
+        with_layers(|layers| {
+            if let Some(entry) = layers.slots[slot].as_mut() {
+                entry.z = z;
+            }
+        });
+        Ok(())
+    }
+
+    fn set_visible(&mut self, meta: ipc::Meta, visible: bool) -> Result<(), LayerError> {
+        if meta.sender.task_index() != self.owner {
+            return Err(LayerError::NotOwner);
+        }
+        let slot = self.slot as usize;
+        with_layers(|layers| {
+            if let Some(entry) = layers.slots[slot].as_mut() {
+                entry.visible = visible;
+            }
+        });
+        Ok(())
+    }
 }
 
-static DISPLAY_HANDLE: OnceCell<Display> = OnceCell::new();
+impl Drop for LayerResource {
+    fn drop(&mut self) {
+        let slot = self.slot as usize;
+        with_layers(|layers| {
+            layers.slots[slot] = None;
+        });
+    }
+}
+
+/// Convert a 128×64 Mono `Image` to SSD1312 GDDRAM page format:
+/// `height/8` pages of `width` bytes each, where each byte encodes 8 vertical
+/// pixels with the LSB as the topmost pixel.
+fn mono_to_ssd1312(src: &Image, out: &mut [u8; DISPLAY_BUF_SIZE]) {
+    let width = DISPLAY_WIDTH as usize;
+    out.fill(0);
+    for page in 0..DISPLAY_PAGES {
+        for col in 0..width {
+            let mut byte = 0u8;
+            for bit in 0..8u8 {
+                let y = page as i32 * 8 + bit as i32;
+                if graphics::read_pixel(src, Point { x: col as i32, y }) == Color::Black {
+                    byte |= 1 << bit;
+                }
+            }
+            out[page * width + col] = byte;
+        }
+    }
+}
+
+/// Announce that a frame just landed on the display. Clients (e.g. the
+/// fob) subscribe to this and use it as their "update for next frame" tick.
+///
+/// `refresh` rather than `push` so at most one outstanding `present` ever
+/// sits in the reactor queue — if a client falls behind, they get the
+/// latest tick when they catch up, not a backlog.
+fn announce_present() {
+    let _ = Reactor::refresh(
+        notifications::GROUP_ID_PRESENT,
+        0,
+        25,
+        OverflowStrategy::DropOldest,
+    );
+}
+
+/// Tick the FPS counter and emit `info!("fps: {}", n)` once per second.
+fn tick_fps() {
+    FPS.with(|f| {
+        f.frames = f.frames.wrapping_add(1);
+        let now = userlib::sys_get_timer().now;
+        // Initialize on first call so we don't immediately log a tiny window.
+        if f.last_log_ms == 0 {
+            f.last_log_ms = now;
+            return;
+        }
+        if now.saturating_sub(f.last_log_ms) >= 1000 {
+            info!("fps: {}", f.frames);
+            f.frames = 0;
+            f.last_log_ms = now;
+        }
+    })
+    .log_expect("reentrant fps access");
+}
+
+/// Render one frame and announce it. Driven by the `@interval` tick from
+/// `ipc::server!` — the macro arms a kernel timer to call this at a fixed
+/// cadence between IPC messages, so the compositor owns its own clock
+/// without piggy-backing on the reactor.
+fn render_frame() {
+    let display = DISPLAY_HANDLE.get().log_expect("display not initialized");
+    with_scratch(|s| {
+        graphics::clear(&mut s.frame, None, Color::White);
+        with_layers(|layers| {
+            with_registry(|fbs| {
+                // Build a stable index list of visible layers and sort by z.
+                // Tie-break is allocation order via stable sort + ascending
+                // input order. 32 entries → in-place sort is trivial.
+                let mut entries: [(u8, i16); MAX_LAYERS] = [(0u8, 0i16); MAX_LAYERS];
+                let mut count = 0usize;
+                for (idx, slot) in layers.slots.iter().enumerate() {
+                    if let Some(layer) = slot {
+                        if layer.visible {
+                            entries[count] = (idx as u8, layer.z);
+                            count += 1;
+                        }
+                    }
+                }
+                entries[..count].sort_by_key(|&(_, z)| z);
+
+                for &(idx, _) in &entries[..count] {
+                    if let Some(layer) = layers.slots[idx as usize].as_ref() {
+                        if let Some(image) = fbs.find_image(layer.framebuffer_id) {
+                            graphics::draw_image(
+                                &mut s.frame,
+                                image,
+                                Point {
+                                    x: layer.x as i32,
+                                    y: layer.y as i32,
+                                },
+                            );
+                        }
+                    }
+                }
+            });
+        });
+        mono_to_ssd1312(&s.frame, &mut s.out);
+        display.draw(&s.out).log_expect("Failed to draw to display");
+    });
+    tick_fps();
+    announce_present();
+}
 
 #[export_name = "main"]
 fn main() -> ! {
-    rcard_log::info!("Awake");
-    let _ = FRAME_BUFFERS.set(GlobalState::new(FrameBuffers::take()));
+    info!("Awake");
+
+    // Bring the PSRAM region online as the global heap.
+    let storage = FRAME_BUFFERS
+        .get()
+        .log_expect("frame buffer region already taken");
+    // SAFETY: the region is freshly taken from `ipc::allocation!`, so it's
+    // exclusively ours and lives forever.
+    unsafe {
+        HEAP.init(storage.as_mut_ptr() as *mut u8, FRAME_BUFFERS_BYTES);
+    }
+
+    let _ = REGISTRY.set(GlobalState::new(Registry {
+        slots: core::array::from_fn(|_| None),
+        next_id: 1,
+    }));
+    let _ = LAYERS.set(GlobalState::new(Layers {
+        slots: core::array::from_fn(|_| None),
+    }));
+
+    // Pre-allocate the scratch frame and SSD1312 page buffer once, so
+    // `handle_present` never allocates on the hot path. Route through
+    // `try_make_image_size` so a heap failure (e.g. PSRAM controller mis-
+    // configured, reads return zeros) shows up in the log rather than as
+    // a bare formatted panic from `vec!`'s OOM handler.
+    let frame = try_make_image_size(
+        Size {
+            w: DISPLAY_WIDTH,
+            h: DISPLAY_HEIGHT,
+        },
+        LillaFormat::Mono,
+    )
+    .log_expect("scratch frame allocation failed (heap broken? PSRAM not initialized?)");
+    let _ = SCRATCH.set(GlobalState::new(Scratch {
+        frame,
+        out: [0u8; DISPLAY_BUF_SIZE],
+    }));
 
     let display = DisplayConfiguration::builder(DISPLAY_WIDTH as u8, DISPLAY_HEIGHT as u8)
         .build()
@@ -150,12 +496,12 @@ fn main() -> ! {
         .log_expect("display IPC error")
         .ok()
         .log_expect("display already open");
-
     let _ = DISPLAY_HANDLE.set(display);
-    rcard_log::info!("Display opened");
+    info!("Display opened");
 
     ipc::server! {
         FrameBuffer: FrameBufferResource,
-        @notifications(Reactor) => handle_present,
+        Layer: LayerResource,
+        @interval(16ms) => render_frame,
     }
 }

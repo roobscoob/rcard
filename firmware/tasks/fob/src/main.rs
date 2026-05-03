@@ -2,258 +2,158 @@
 #![no_main]
 
 use generated::slots::SLOTS;
-use rcard_log::info;
-use sysmodule_display_api::DisplayConfiguration;
+use once_cell::{GlobalState, OnceCell};
+use rcard_log::{info, OptionExt, ResultExt};
+use sysmodule_compositor_api::{BlendMode, FrameBufferInfo, ImageFormat};
+use sysmodule_reactor_api::NOTIFICATION_BIT;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
-sysmodule_display_api::bind_display!(Display = SLOTS.sysmodule_display);
+sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
+sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
+sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
-const WIDTH: usize = 128;
-const HEIGHT: usize = 64;
-const FB_SIZE: usize = WIDTH * (HEIGHT / 8);
+const PATTERN_W: u32 = 32;
+const PATTERN_H: u32 = 32;
+const PATTERN_PITCH: usize = (PATTERN_W as usize) / 8;
+const PATTERN_BYTES: usize = PATTERN_PITCH * (PATTERN_H as usize);
 
-const CHARM_WIDTH: usize = 44;
-const CHARM_PAGES: usize = 2;
-const CHARM_MASK: [u8; 88] = [
-    // page 0
-    0xE0, 0xF8, 0xFC, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE0,
-    0xF0, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF0, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xF8, 0xF0, 0xF0,
-    0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0x00, 0x00, 0x00, // page 1
-    0x1F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x1F, 0x1F, 0x3F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F,
-    0x3F, 0x1F, 0x0F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x1F, 0x1F,
-    0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x1F,
-];
-const CHARM_DATA: [u8; 88] = [
-    // page 0
-    0x00, 0x00, 0x80, 0x60, 0x10, 0x08, 0x04, 0x1C, 0x00, 0xA0, 0x78, 0x24, 0x9C, 0x00, 0x00, 0x00,
-    0x00, 0x80, 0x40, 0x20, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x40, 0x70, 0xA0, 0x40, 0x00, 0x00, 0xC0,
-    0x00, 0x80, 0x40, 0xC0, 0x00, 0x80, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, // page 1
-    0x00, 0x00, 0x07, 0x08, 0x08, 0x08, 0x04, 0x02, 0x00, 0x07, 0x02, 0x01, 0x0F, 0x10, 0x08, 0x06,
-    0x00, 0x01, 0x02, 0x01, 0x03, 0x04, 0x02, 0x01, 0x00, 0x00, 0x07, 0x08, 0x04, 0x03, 0x00, 0x07,
-    0x02, 0x01, 0x00, 0x07, 0x01, 0x00, 0x07, 0x08, 0x08, 0x04, 0x00, 0x00,
-];
-
-struct Xorshift32(u32);
-
-impl Xorshift32 {
-    fn next(&mut self) -> u32 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 17;
-        self.0 ^= self.0 << 5;
-        self.0
-    }
-}
-
-fn set_pixel(fb: &mut [u8; FB_SIZE], x: usize, y: usize) {
-    if x < WIDTH && y < HEIGHT {
-        fb[x + (y / 8) * WIDTH] |= 1 << (y % 8);
-    }
-}
-
-const NUM_STARS: usize = 500;
-const CX: f32 = WIDTH as f32 / 2.0;
-const CY: f32 = HEIGHT as f32 / 2.0;
-const MAX_RADIUS: f32 = 80.0;
-const SPEED_SCALE: f32 = 0.005;
-
-#[derive(Clone, Copy)]
-struct Star {
-    x: f32,
-    y: f32,
-}
-
-fn approx_sin(x: f32) -> f32 {
-    // Bhaskara I approximation: sin(x) for x in [0, PI]
-    // For full range, fold into [0, 2*PI] then handle sign.
-    const TWO_PI: f32 = 6.2831853;
-    const PI: f32 = 3.1415927;
-    let mut x = x % TWO_PI;
-    if x < 0.0 {
-        x += TWO_PI;
-    }
-    let negate = x >= PI;
-    if negate {
-        x -= PI;
-    }
-    let val = 16.0 * x * (PI - x) / (5.0 * PI * PI - 4.0 * x * (PI - x));
-    if negate {
-        -val
-    } else {
-        val
-    }
-}
-
-fn approx_cos(x: f32) -> f32 {
-    approx_sin(x + 1.5707963)
-}
-
-fn spawn_star(rng: &mut Xorshift32) -> Star {
-    let angle = (rng.next() as f32) * (6.2831853 / 4294967296.0);
-    let r = (rng.next() % 1199 + 1) as f32 * 0.01;
-    Star {
-        x: CX + r * approx_cos(angle),
-        y: CY + r * approx_sin(angle),
-    }
-}
-
-const FONT_3X5: [[u8; 3]; 10] = [
-    [0x1F, 0x11, 0x1F], // 0
-    [0x00, 0x1F, 0x00], // 1
-    [0x1D, 0x15, 0x17], // 2
-    [0x15, 0x15, 0x1F], // 3
-    [0x07, 0x04, 0x1F], // 4
-    [0x17, 0x15, 0x1D], // 5
-    [0x1F, 0x15, 0x1D], // 6
-    [0x01, 0x01, 0x1F], // 7
-    [0x1F, 0x15, 0x1F], // 8
-    [0x17, 0x15, 0x1F], // 9
-];
-
-fn draw_digit(fb: &mut [u8; FB_SIZE], x: usize, y: usize, digit: u8) {
-    if digit > 9 { return; }
-    let glyph = &FONT_3X5[digit as usize];
-    for col in 0..3 {
-        let bits = glyph[col];
-        for row in 0..5 {
-            if bits & (1 << row) != 0 {
-                set_pixel(fb, x + col, y + row);
-            }
-        }
-    }
-}
-
-fn draw_number(fb: &mut [u8; FB_SIZE], x: usize, y: usize, mut val: u32) {
-    if val == 0 {
-        draw_digit(fb, x, y, 0);
+/// Set a single pixel in a Mono framebuffer (MSB = leftmost column).
+fn set_pixel(buf: &mut [u8; PATTERN_BYTES], x: i32, y: i32) {
+    if x < 0 || y < 0 || x >= PATTERN_W as i32 || y >= PATTERN_H as i32 {
         return;
     }
-    let mut digits = [0u8; 10];
-    let mut len = 0;
-    while val > 0 {
-        digits[len] = (val % 10) as u8;
-        val /= 10;
-        len += 1;
-    }
-    for i in 0..len {
-        draw_digit(fb, x + (len - 1 - i) * 4, y, digits[i]);
-    }
+    let byte = (y as usize) * PATTERN_PITCH + (x as usize) / 8;
+    buf[byte] |= 0x80 >> ((x as usize) % 8);
 }
 
-fn blit_charm(fb: &mut [u8; FB_SIZE]) {
-    let ox = (WIDTH - CHARM_WIDTH) / 2;
-    let oy_page = (HEIGHT / 8 - CHARM_PAGES) / 2;
-    let oy_bit = (HEIGHT - CHARM_PAGES * 8) / 2 % 8;
-
-    for col in 0..CHARM_WIDTH {
-        let fb_x = ox + col;
-        if fb_x >= WIDTH {
-            break;
-        }
-        for page in 0..CHARM_PAGES {
-            let mask = CHARM_MASK[page * CHARM_WIDTH + col];
-            let data = CHARM_DATA[page * CHARM_WIDTH + col];
-
-            if oy_bit == 0 {
-                let fb_page = oy_page + page;
-                if fb_page < HEIGHT / 8 {
-                    let idx = fb_page * WIDTH + fb_x;
-                    fb[idx] = (fb[idx] & !mask) | (data & mask);
-                }
-            } else {
-                let fb_page_lo = oy_page + page;
-                let fb_page_hi = fb_page_lo + 1;
-                if fb_page_lo < HEIGHT / 8 {
-                    let shifted_mask = mask << oy_bit;
-                    let shifted_data = data << oy_bit;
-                    let idx = fb_page_lo * WIDTH + fb_x;
-                    fb[idx] = (fb[idx] & !shifted_mask) | (shifted_data & shifted_mask);
-                }
-                if fb_page_hi < HEIGHT / 8 {
-                    let shifted_mask = mask >> (8 - oy_bit);
-                    let shifted_data = data >> (8 - oy_bit);
-                    let idx = fb_page_hi * WIDTH + fb_x;
-                    fb[idx] = (fb[idx] & !shifted_mask) | (shifted_data & shifted_mask);
-                }
+/// Filled circle of `radius` pixels, centered in a 32×32 buffer.
+fn draw_circle(buf: &mut [u8; PATTERN_BYTES], radius: u32) {
+    buf.fill(0);
+    let r = radius as i32;
+    let r2 = r * r;
+    for y in 0..PATTERN_H as i32 {
+        for x in 0..PATTERN_W as i32 {
+            let dx = x - 16;
+            let dy = y - 16;
+            if dx * dx + dy * dy <= r2 {
+                set_pixel(buf, x, y);
             }
         }
     }
+}
+
+/// A `height`-row solid bar starting at the top of the buffer.
+fn draw_bar(buf: &mut [u8; PATTERN_BYTES], height: u32) {
+    buf.fill(0);
+    let h = (height as usize).min(PATTERN_H as usize);
+    for row in 0..h {
+        for col in 0..PATTERN_PITCH {
+            buf[row * PATTERN_PITCH + col] = 0xFF;
+        }
+    }
+}
+
+/// Triangle-wave bounce: cycles 0..=peak..=0 over `2 * peak` steps.
+fn bounce(t: u32, peak: u32) -> u32 {
+    if peak == 0 {
+        return 0;
+    }
+    let p = t % (2 * peak);
+    if p <= peak { p } else { 2 * peak - p }
+}
+
+/// Live animation state — mutated on every `present` notification from
+/// the compositor. Held in a `OnceCell<GlobalState<…>>` so the
+/// notification handler can borrow it without macro-generated args.
+struct AnimState {
+    fb_a: FrameBuffer,
+    fb_b: FrameBuffer,
+    layer_a: Layer,
+    layer_b: Layer,
+    buf_a: [u8; PATTERN_BYTES],
+    buf_b: [u8; PATTERN_BYTES],
+    frame: u32,
+}
+
+static STATE: OnceCell<GlobalState<AnimState>> = OnceCell::new();
+
+#[ipc::notification_handler(present)]
+fn handle_present(_sender: u16, _code: u32) {
+    STATE
+        .get()
+        .log_expect("anim state not initialized")
+        .with(|s| {
+            // Display = 128×64, layers = 32×32. A slides on the top half,
+            // B on the bottom half at half speed.
+            let x_max = (128 - PATTERN_W) as u32; // 96
+            let x_a = bounce(s.frame, x_max) as i16;
+            let x_b = bounce(s.frame / 2, x_max) as i16;
+            let _ = s.layer_a.set_position(x_a, 0);
+            let _ = s.layer_b.set_position(x_b, 32);
+
+            let radius = bounce(s.frame, 14);
+            draw_circle(&mut s.buf_a, radius);
+            let _ = s.fb_a.write(&s.buf_a);
+
+            let height = bounce(s.frame, PATTERN_H);
+            draw_bar(&mut s.buf_b, height);
+            let _ = s.fb_b.write(&s.buf_b);
+
+            s.frame = s.frame.wrapping_add(1);
+        })
+        .log_expect("reentrant anim state access");
 }
 
 #[export_name = "main"]
 fn main() -> ! {
-    info!("Awake");
+    info!("fob: awake");
 
-    let config = DisplayConfiguration::builder(WIDTH as u8, HEIGHT as u8)
-        .flip_vertical()
-        .no_charge_pump()
-        .build();
+    let mut buf_a = [0u8; PATTERN_BYTES];
+    let mut buf_b = [0u8; PATTERN_BYTES];
+    draw_circle(&mut buf_a, 8);
+    draw_bar(&mut buf_b, 16);
 
-    let display = config.open::<DisplayServer>().unwrap().unwrap();
+    let info = FrameBufferInfo::new(ImageFormat::Mono, PATTERN_W, PATTERN_H);
+    let fb_a = FrameBuffer::new(info, &buf_a)
+        .log_expect("frame buffer A IPC")
+        .log_expect("frame buffer A creation");
+    let fb_b = FrameBuffer::new(info, &buf_b)
+        .log_expect("frame buffer B IPC")
+        .log_expect("frame buffer B creation");
 
-    let mut rng = Xorshift32(0xDEAD_BEEF);
+    let id_a = fb_a.id().log_expect("fb_a id");
+    let id_b = fb_b.id().log_expect("fb_b id");
 
-    let mut stars = [Star { x: CX, y: CY }; NUM_STARS];
-    for star in stars.iter_mut() {
-        *star = spawn_star(&mut rng);
-        let dx = star.x - CX;
-        let dy = star.y - CY;
-        let spread = (rng.next() % 40) as f32 + 1.0;
-        star.x = CX + dx * spread;
-        star.y = CY + dy * spread;
-    }
+    let layer_a = Layer::new(id_a, 0, 0, 0, BlendMode::Replace)
+        .log_expect("layer A IPC")
+        .log_expect("layer A creation");
+    let layer_b = Layer::new(id_b, 0, 32, 1, BlendMode::Replace)
+        .log_expect("layer B IPC")
+        .log_expect("layer B creation");
 
-    let mut fb = [0u8; FB_SIZE];
-    let mut fps: u32 = 0;
-    let mut fps_frames: u32 = 0;
-    let mut fps_last = userlib::sys_get_timer().now;
+    let _ = STATE.set(GlobalState::new(AnimState {
+        fb_a,
+        fb_b,
+        layer_a,
+        layer_b,
+        buf_a,
+        buf_b,
+        frame: 0,
+    }));
 
+    info!("fob: layers created, listening for present");
+
+    // Drain notifications via the reactor on every kernel-delivered wake.
     loop {
-        fb.fill(0);
-
-        for star in stars.iter_mut() {
-            let dx = star.x - CX;
-            let dy = star.y - CY;
-            let dist_sq = dx * dx + dy * dy;
-            let speed = SPEED_SCALE + dist_sq * SPEED_SCALE * 0.001;
-            star.x += dx * speed;
-            star.y += dy * speed;
-
-            if star.x < 0.0
-                || star.x >= WIDTH as f32
-                || star.y < 0.0
-                || star.y >= HEIGHT as f32
-                || dist_sq > MAX_RADIUS * MAX_RADIUS
-            {
-                *star = spawn_star(&mut rng);
-                continue;
+        let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
+        loop {
+            match Reactor::pull() {
+                Ok(Some(notif)) => handle_present(&notif),
+                _ => break,
             }
-
-            set_pixel(&mut fb, star.x as usize, star.y as usize);
         }
-
-        blit_charm(&mut fb);
-
-        let fps_digits = if fps == 0 { 1usize } else {
-            let mut n = fps;
-            let mut d = 0usize;
-            while n > 0 { d += 1; n /= 10; }
-            d
-        };
-        draw_number(&mut fb, WIDTH - fps_digits * 4, 1, fps);
-
-        let _ = display.draw(&fb);
-
-        fps_frames += 1;
-        let now = userlib::sys_get_timer().now;
-        if now - fps_last >= 1000 {
-            fps = fps_frames;
-            fps_frames = 0;
-            fps_last = now;
-            info!("fps: {}", fps);
-        }
-
     }
 }

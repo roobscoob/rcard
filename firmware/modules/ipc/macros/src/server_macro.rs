@@ -27,10 +27,23 @@ pub struct IrqConfig {
     pub handler: syn::Expr,
 }
 
+/// Periodic-tick handler. The macro arms a kernel timer (`sys_set_timer`)
+/// for `period_ms` in the future on entry and re-arms it after every fire,
+/// so the dispatcher wakes at fixed intervals between IPC traffic. The
+/// schedule is monotonic (next deadline = previous deadline + period), so
+/// short overruns don't accumulate drift; long stalls advance to `now + 1`.
+pub struct IntervalConfig {
+    /// Tick period in milliseconds.
+    pub period_ms: u64,
+    /// Function called on every tick. Takes no arguments.
+    pub handler: syn::Path,
+}
+
 pub struct ServerInput {
     pub entries: Vec<ServerEntry>,
     pub notifications: Option<NotificationConfig>,
     pub irq: Option<IrqConfig>,
+    pub interval: Option<IntervalConfig>,
 }
 
 impl syn::parse::Parse for ServerInput {
@@ -38,6 +51,7 @@ impl syn::parse::Parse for ServerInput {
         let mut entries = Vec::new();
         let mut notifications = None;
         let mut irq = None;
+        let mut interval = None;
 
         while !input.is_empty() {
             if input.peek(syn::Token![@]) {
@@ -80,10 +94,40 @@ impl syn::parse::Parse for ServerInput {
                     if input.peek(syn::Token![,]) {
                         input.parse::<syn::Token![,]>()?;
                     }
+                } else if kw == "interval" {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let lit: syn::LitInt = content.parse()?;
+                    let value: u64 = lit.base10_parse()?;
+                    let period_ms = match lit.suffix() {
+                        "" | "ms" => value,
+                        "s" => value.saturating_mul(1000),
+                        "us" => value / 1000,
+                        other => {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                format!(
+                                    "interval: unknown duration suffix `{other}` (use ms/s/us)"
+                                ),
+                            ));
+                        }
+                    };
+                    if period_ms == 0 {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "interval: period rounds to 0 ms",
+                        ));
+                    }
+                    input.parse::<syn::Token![=>]>()?;
+                    let handler: syn::Path = input.parse()?;
+                    interval = Some(IntervalConfig { period_ms, handler });
+                    if input.peek(syn::Token![,]) {
+                        input.parse::<syn::Token![,]>()?;
+                    }
                 } else {
                     return Err(syn::Error::new(
                         kw.span(),
-                        "expected `notifications` or `irq`",
+                        "expected `notifications`, `irq`, or `interval`",
                     ));
                 }
             } else {
@@ -103,6 +147,7 @@ impl syn::parse::Parse for ServerInput {
             entries,
             notifications,
             irq,
+            interval,
         })
     }
 }
@@ -166,87 +211,102 @@ pub fn gen_server(input: &ServerInput) -> TokenStream2 {
         });
     }
 
-    let pkg_ident = format_ident!(
-        "{}",
-        std::env::var("CARGO_PKG_NAME")
-            .unwrap_or_default()
-            .replace('-', "_")
-    );
+    // Compose the dispatcher loop from the optional notification / irq /
+    // interval pieces. Each contributes:
+    //   - prelude: declarations / setup that runs before `run_with_notifications`
+    //   - mask term: a bit that joins the `notification_mask` argument
+    //   - closure branch: a `if __bits & FOO != 0 { … }` block in the closure
+    let mut prelude_pieces: Vec<TokenStream2> = Vec::new();
+    let mut mask_terms: Vec<TokenStream2> = Vec::new();
+    let mut closure_branches: Vec<TokenStream2> = Vec::new();
 
-    let run_call = match (input.notifications.as_ref(), input.irq.as_ref()) {
-        (None, None) => quote! { __server.run(&mut __buf) },
-        (Some(notif_cfg), None) => {
-            let reactor = &notif_cfg.reactor_client;
-            let handlers = &notif_cfg.handlers;
-            quote! {
+    if let Some(notif_cfg) = input.notifications.as_ref() {
+        let reactor = &notif_cfg.reactor_client;
+        let handlers = &notif_cfg.handlers;
+        mask_terms.push(quote! { sysmodule_reactor_api::NOTIFICATION_BIT });
+        closure_branches.push(quote! {
+            if __bits & sysmodule_reactor_api::NOTIFICATION_BIT != 0 {
+                loop {
+                    match #reactor::pull() {
+                        Ok(Some(notif)) => { #( #handlers(&notif); )* }
+                        _ => break,
+                    }
+                }
+            }
+        });
+    }
+
+    if let Some(irq_cfg) = input.irq.as_ref() {
+        let pkg_ident = format_ident!(
+            "{}",
+            std::env::var("CARGO_PKG_NAME")
+                .unwrap_or_default()
+                .replace('-', "_")
+        );
+        let irq_name = &irq_cfg.name;
+        let handler = &irq_cfg.handler;
+        prelude_pieces.push(quote! {
+            const __IRQ_BIT: u32 = ::generated::irq_bit!(#pkg_ident, #irq_name);
+            ::userlib::sys_enable_irq_and_clear_pending(__IRQ_BIT);
+            let mut __irq_handler = #handler;
+        });
+        mask_terms.push(quote! { __IRQ_BIT });
+        closure_branches.push(quote! {
+            if __bits & __IRQ_BIT != 0 {
+                __irq_handler();
+                ::userlib::sys_enable_irq(__IRQ_BIT);
+            }
+        });
+    }
+
+    if let Some(int_cfg) = input.interval.as_ref() {
+        let period_ms = int_cfg.period_ms;
+        let handler = &int_cfg.handler;
+        // Bit 30 is reserved for the interval timer; reactor uses bit 31
+        // (`NOTIFICATION_BIT`) and IRQs use lower bits assigned by the build.
+        prelude_pieces.push(quote! {
+            const __INTERVAL_BIT: u32 = 1u32 << 30;
+            const __INTERVAL_PERIOD_MS: u64 = #period_ms;
+            let mut __next_interval_deadline: u64 =
+                ::userlib::sys_get_timer().now + __INTERVAL_PERIOD_MS;
+            ::userlib::sys_set_timer(
+                ::core::option::Option::Some(__next_interval_deadline),
+                __INTERVAL_BIT,
+            );
+        });
+        mask_terms.push(quote! { __INTERVAL_BIT });
+        closure_branches.push(quote! {
+            if __bits & __INTERVAL_BIT != 0 {
+                #handler();
+                let __now = ::userlib::sys_get_timer().now;
+                // Monotonic schedule: small overruns don't drift; long
+                // stalls jump to (now + period) so we don't burn CPU
+                // catching up on missed ticks.
+                __next_interval_deadline = ::core::cmp::max(
+                    __next_interval_deadline + __INTERVAL_PERIOD_MS,
+                    __now + __INTERVAL_PERIOD_MS,
+                );
+                ::userlib::sys_set_timer(
+                    ::core::option::Option::Some(__next_interval_deadline),
+                    __INTERVAL_BIT,
+                );
+            }
+        });
+    }
+
+    let run_call = if mask_terms.is_empty() {
+        quote! { __server.run(&mut __buf) }
+    } else {
+        quote! {
+            {
+                #( #prelude_pieces )*
                 __server.run_with_notifications(
                     &mut __buf,
-                    sysmodule_reactor_api::NOTIFICATION_BIT,
-                    |_bits| {
-                        loop {
-                            match #reactor::pull() {
-                                Ok(Some(notif)) => {
-                                    #( #handlers(&notif); )*
-                                }
-                                _ => break,
-                            }
-                        }
+                    0u32 #( | #mask_terms )*,
+                    |__bits| {
+                        #( #closure_branches )*
                     },
                 )
-            }
-        }
-        (None, Some(irq_cfg)) => {
-            let irq_name = &irq_cfg.name;
-            let handler = &irq_cfg.handler;
-            quote! {
-                {
-                    const __IRQ_BIT: u32 = ::generated::irq_bit!(#pkg_ident, #irq_name);
-                    ::userlib::sys_enable_irq_and_clear_pending(__IRQ_BIT);
-                    let mut __irq_handler = #handler;
-                    __server.run_with_notifications(
-                        &mut __buf,
-                        __IRQ_BIT,
-                        |__bits| {
-                            if __bits & __IRQ_BIT != 0 {
-                                __irq_handler();
-                                ::userlib::sys_enable_irq(__IRQ_BIT);
-                            }
-                        },
-                    )
-                }
-            }
-        }
-        (Some(notif_cfg), Some(irq_cfg)) => {
-            let reactor = &notif_cfg.reactor_client;
-            let handlers = &notif_cfg.handlers;
-            let irq_name = &irq_cfg.name;
-            let handler = &irq_cfg.handler;
-            quote! {
-                {
-                    const __IRQ_BIT: u32 = ::generated::irq_bit!(#pkg_ident, #irq_name);
-                    ::userlib::sys_enable_irq_and_clear_pending(__IRQ_BIT);
-                    let mut __irq_handler = #handler;
-                    __server.run_with_notifications(
-                        &mut __buf,
-                        __IRQ_BIT | sysmodule_reactor_api::NOTIFICATION_BIT,
-                        |__bits| {
-                            if __bits & __IRQ_BIT != 0 {
-                                __irq_handler();
-                                ::userlib::sys_enable_irq(__IRQ_BIT);
-                            }
-                            if __bits & sysmodule_reactor_api::NOTIFICATION_BIT != 0 {
-                                loop {
-                                    match #reactor::pull() {
-                                        Ok(Some(notif)) => {
-                                            #( #handlers(&notif); )*
-                                        }
-                                        _ => break,
-                                    }
-                                }
-                            }
-                        },
-                    )
-                }
             }
         }
     };

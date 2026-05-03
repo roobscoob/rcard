@@ -1526,8 +1526,6 @@ async fn usart1_connect_loop(
                     }
                 }
                 item = line_rx.recv() => {
-                    eprintln!("[usart1:{port}] line_rx.recv() ready: {item:?}");
-
                     let Some((line_received_at, raw_line)) = item else {
                         // Reader task ended → port closed / error.
                         eprintln!("[usart1:{port}] serial line reader ended, closing connection");
