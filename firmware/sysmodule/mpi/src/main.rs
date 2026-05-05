@@ -11,6 +11,7 @@ use sysmodule_mpi_api::*;
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
+sysmodule_clocks_api::bind_clocks!(Clocks = SLOTS.sysmodule_clocks);
 
 static MPI_IN_USE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
@@ -843,92 +844,27 @@ impl Mpi for MpiResource {
             sfdp_access_protocol: 0,
         };
 
-        // Full RCC block-reset of the MPI peripheral. The stub that
-        // precedes us may have left it mid-transaction, mid-QPI-setup,
-        // or with arbitrary FIFO / IRQ state asserted; a block reset
-        // is the only clean recovery.
-        let rcc = sifli_pac::HPSYS_RCC;
-        match index {
-            1 => {
-                rcc.rstr2().modify(|w| w.set_mpi1(true));
-                core::sync::atomic::compiler_fence(Ordering::SeqCst);
-                rcc.rstr2().modify(|w| w.set_mpi1(false));
-                rcc.enr2().modify(|w| w.set_mpi1(true));
-            }
-            2 => {
-                rcc.rstr2().modify(|w| w.set_mpi2(true));
-                core::sync::atomic::compiler_fence(Ordering::SeqCst);
-                rcc.rstr2().modify(|w| w.set_mpi2(false));
-                rcc.enr2().modify(|w| w.set_mpi2(true));
-            }
+        let peripheral = match index {
+            1 => sysmodule_clocks_api::Peripheral::Mpi1,
+            2 => sysmodule_clocks_api::Peripheral::Mpi2,
             _ => unreachable!("index validated above"),
-        }
+        };
+        let _ = Clocks::reset(peripheral);
+        let _ = Clocks::enable(peripheral);
 
-        // Reapply init. TIMR/CIR/ABR1/HRABR mirror the SDK's
-        // `HAL_QSPI_Init` (drivers/hal/bf0_hal_qspi.c). CIR is the
-        // "command interval" — minimum gap between back-to-back
-        // commands. Default 0 confuses the chip during init while
-        // it's still settling from a wake-from-DP; the SDK uses
-        // 0x5000 in both halves (~85 µs at 240 MHz).
-        //
-        // ABR1=0xFF is the mode byte driven during the alternate-byte
-        // phase of fast-IO reads. Bits 5:4 = 11, which is the
-        // "not-CRM" encoding on Winbond W25Q, GD25, and Macronix MX25
-        // — the chips we've validated. Other vendors (Cypress/Infineon,
-        // ISSI, some EON) may use a different CRM-exit encoding, in
-        // which case a quad-IO read could leave the chip in CRM and
-        // misinterpret the next instruction byte as a mode byte. The
-        // reset sequence issued by `open()` clears any stuck CRM
-        // state, but steady-state operation on untested vendors is
-        // not guaranteed. Set `preferred_mode = Single` in `MpiConfig`
-        // if bringing up a new vendor whose CRM encoding you haven't
-        // verified.
         resource.regs.timr().write(|w| w.0 = 0xF);
         resource.regs.cir().write(|w| w.0 = 0x5000_5000);
         resource.regs.abr1().write(|w| w.0 = 0xFF);
         resource.regs.hrabr().write(|w| w.0 = 0xFF);
         resource.regs.psclr().write(|w| w.set_div(config.prescaler));
-        // Write (not modify) MISCR so RXCLKINV / RXCLKDLY / DTRPRE /
-        // SCKDLY all land at 0 regardless of what BOOTROM put there.
-        // Per SDK comment (bf0_hal_mpi.h:54): on 52x, RXCLKINV=1 with
-        // 3.3V sip flash makes JEDEC ID reads fail — and RSTR2.mpi2
-        // may not cover that bit.
         resource.regs.miscr().write(|w| {
             w.set_sckinv(config.clock_polarity as u8 != 0);
         });
         resource.regs.cr().write(|w| w.set_en(true));
 
-        // Wake + reset, once on QUAD lines then once on SINGLE lines.
-        // BOOTROM may have left the chip in any of { SPI, QPI } ×
-        // { awake, DPD }:
-        //
-        //   QPI + DPD   → QUAD RDPD wakes it; QUAD RST_EN+RST returns
-        //                 the chip to SPI mode.
-        //   QPI + awake → QUAD RDPD is a no-op; QUAD RST_EN+RST returns
-        //                 the chip to SPI.
-        //   SPI + DPD   → QUAD pass is bit-garbage on DIO0 and ignored;
-        //                 SINGLE RDPD wakes the chip; SINGLE RST_EN+RST
-        //                 scrubs any residual status-reg state.
-        //   SPI + awake → every command is a no-op or idempotent reset.
-        //
-        // Dropping either pass leaves a start state uncovered, so run
-        // both. Commands sent on the wrong line-count get interpreted
-        // as 2-clock fragments by a non-QPI chip, or as bit garbage by
-        // a QPI chip; both are aborted mid-instruction with no side
-        // effect, so blasting them blind is safe.
-        //
-        // After each pass we busy-wait a tRST margin. SPI NOR `tRST`
-        // is spec'd at ~30 µs (Winbond W25Q, GD25, Macronix MX25);
-        // during that window the chip ignores all commands, so the
-        // first command of the next pass would be silently dropped if
-        // issued too early. 50_000 spin_loop iterations is ~200 µs at
-        // 240 MHz — well above tRST with margin for slower clocks.
         for imode in [LineMode::Quad, LineMode::Single] {
             for &cmd in &[CMD_RELEASE_DPD, CMD_RESET_ENABLE, CMD_RESET] {
                 if let Err(e) = resource.cmd_only_imode(cmd, imode) {
-                    // Timing out on the mode that doesn't match the
-                    // chip's starting state is expected — log at
-                    // trace, not error.
                     trace!(
                         "MPI{}: reset cmd 0x{:02x} on {} lines: {}",
                         index,
@@ -943,8 +879,6 @@ impl Mpi for MpiResource {
             }
         }
 
-        // Confirm the chip is alive on single-line SPI post-reset. JEDEC
-        // is a sanity check only — capacity comes from SFDP below.
         let jedec = match resource.read_jedec_id(meta) {
             Ok(j) => j,
             Err(e) => {
@@ -958,9 +892,6 @@ impl Mpi for MpiResource {
             return Err(MpiOpenError::ChipNotResponding);
         }
 
-        // Populate SFDP state and derive capacity. Must run before any
-        // address-bearing operation (read/write/erase) — capacity
-        // bounds-checks every one of those.
         resource.init_sfdp()?;
 
         debug!(
@@ -968,16 +899,6 @@ impl Mpi for MpiResource {
             index, jedec, resource.capacity_bytes
         );
 
-        // Align the chip's addressing mode with the SFDP-resolved
-        // `resource.addr_size`. EN4B/EX4B are command-only and
-        // idempotent — safe to issue even if the chip is already in
-        // the target mode. OneByte / TwoBytes aren't real SPI NOR
-        // modes, so we don't touch the chip's mode bit for those.
-        //
-        // Propagate failure: if EN4B fails but we've committed to
-        // `FourBytes`, subsequent reads/writes/erases would issue
-        // 4-byte opcodes to a chip still in 3-byte mode, interpreting
-        // the 4th address byte as data — silent corruption.
         match resource.addr_size {
             AddrSize::FourBytes => {
                 if let Err(e) = resource.cmd_only(CMD_ENTER_4BYTE_MODE) {
@@ -1479,36 +1400,28 @@ fn psram_cal_delay(regs: MpiPeri) -> (u8, u8) {
 /// TCF-times-out (no clock to drive the bus). Without the LDO the PSRAM
 /// die has no 1.8 V supply and can't respond regardless.
 fn psram_pre_init() {
-    let rcc = sifli_pac::HPSYS_RCC;
+    use sysmodule_clocks_api::{ClockSource, DllConfig, DllIndex, Peripheral};
 
-    // 1. Bring DLL2 up at 240 MHz. SDK's HAL_RCC_HCPU_EnableDLL flow
+    // 1. Bring DLL2 up at 288 MHz. SDK's HAL_RCC_HCPU_EnableDLL flow
     // (drivers/hal/bf0_hal_rcc.c:1632) also sets HPSYS_CFG.CAU2_CR
     // HPBG_EN + HPBG_VDDPSW_EN, but the kernel already does that for
     // DLL1 (firmware/kernels/sf32lb52/src/main.rs:222-224) and the
     // band-gap is shared across DLLs, so we don't need to touch it
-    // here — and skipping it lets us avoid declaring `syscon` in the
-    // task's `uses_peripherals`, which would push the MPU region count
-    // over its 8-slot limit.
+    // here.
     //
-    //   - clear DLL2CR.EN, set IN_DIV2_EN=1, OUT_DIV2_EN=0
-    //   - STG = (freq - DLL_MIN_FREQ) / DLL_STG_STEP
-    //         = (240e6 - 24e6) / 24e6 = 9
-    //   - set EN=1, wait, poll READY
-    rcc.dllcr(1).modify(|w| w.set_en(false));
-    rcc.dllcr(1).modify(|w| {
-        w.set_in_div2_en(true);
-        w.set_out_div2_en(false);
-        w.set_stg(11); // 288 MHz: (288e6 - 24e6) / 24e6 = 11
-        w.set_en(true);
-    });
-    spin_us(10);
-    while !rcc.dllcr(1).read().ready() {
-        core::hint::spin_loop();
-    }
+    //   STG = (288e6 - 24e6) / 24e6 = 11
+    let _ = Clocks::configure_dll(
+        DllIndex::Dll2,
+        DllConfig {
+            stg: 11,
+            in_div2_en: true,
+            out_div2_en: false,
+        },
+    );
 
     // 2. MPI1 functional clock = DLL2. CSR.SEL_MPI1 lives at bits [5:4];
     // value 2 selects clk_dll2 (per the PAC + SDK's RCC_CLK_FLASH_DLL2).
-    rcc.csr().modify(|w| w.set_sel_mpi1(2));
+    let _ = Clocks::set_clock_source(Peripheral::Mpi1, ClockSource::Dll2);
 
     // VDD18 LDO is enabled by the kernel before apply_pin_config() — see
     // firmware/kernels/sf32lb52/src/main.rs. The order matters: the SiP
@@ -1527,16 +1440,13 @@ fn psram_pre_init() {
 /// r_lat = 12).
 fn init_psram() {
     let regs = sifli_pac::MPI1;
-    let rcc = sifli_pac::HPSYS_RCC;
 
     // === HAL_OPI_PSRAM_Init ===
 
     // 1. RCC block reset of MPI1. (BOOTROM never touched MPI1, but the
     // reset is cheap insurance against any stray state.)
-    rcc.rstr2().modify(|w| w.set_mpi1(true));
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
-    rcc.rstr2().modify(|w| w.set_mpi1(false));
-    rcc.enr2().modify(|w| w.set_mpi1(true));
+    let _ = Clocks::reset(sysmodule_clocks_api::Peripheral::Mpi1);
+    let _ = Clocks::enable(sysmodule_clocks_api::Peripheral::Mpi1);
 
     // 2. HAL_QSPI_Init defaults.
     regs.timr().write(|w| w.0 = 0xFF);

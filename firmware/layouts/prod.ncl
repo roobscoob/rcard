@@ -7,7 +7,6 @@ fun memory =>
   let flash = lib.partition memory.mpi2 [
     { name = "boot",     size = lib.kiB 20 },
     { name = "firmware", size = lib.kiB 384 },
-    { name = "xip_rom",  size = lib.kiB 64 },
     { name = "logs",     size = lib.miB 1 },
     { name = "fs_main",  size = lib.miB 1 },
   ] in
@@ -25,8 +24,6 @@ fun memory =>
     logs     = flash.logs     & { unmapped = true },
     fs_main  = flash.fs_main  & { unmapped = true },
 
-    # Opt-in XIP-from-NOR — discouraged. Keeps the CPU exec mapping so a
-    # task that explicitly targets this place will XIP. Only use for cold
-    # paths (factory/DFU/self-update) that can tolerate slow flash reads.
-    xip_rom = flash.xip_rom,
+    # XIP code placement for sysmodules that don't need RAM-resident .text
+    code_generic = flash.firmware,
   }

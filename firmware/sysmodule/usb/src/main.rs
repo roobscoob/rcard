@@ -62,6 +62,7 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
+sysmodule_clocks_api::bind_clocks!(Clocks = SLOTS.sysmodule_clocks);
 
 use generated::notifications;
 use sysmodule_reactor_api::OverflowStrategy;
@@ -323,15 +324,8 @@ impl UsbGlobal {
     /// Called when the last endpoint is opened.
     fn activate(&mut self) {
         // First: clear any stale MUSB state with a peripheral reset
-        sifli_pac::HPSYS_RCC.rstr2().modify(|w| w.set_usbc(true));
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        // brief spin
-        for _ in 0..100 {
-            core::hint::spin_loop();
-        }
-        sifli_pac::HPSYS_RCC.rstr2().modify(|w| w.set_usbc(false));
-        // Re-enable clock after reset
-        sifli_pac::HPSYS_RCC.enr2().modify(|w| w.set_usbc(true));
+        let _ = Clocks::reset(sysmodule_clocks_api::Peripheral::Usbc);
+        let _ = Clocks::enable(sysmodule_clocks_api::Peripheral::Usbc);
         let alloc = USB_ALLOC.get().as_ref().log_expect("USB allocator missing");
 
         let power_before = UsbInstance::regs().power().read();
@@ -473,7 +467,7 @@ impl UsbGlobal {
             w.set_usb_en(false);
             w.set_dp_en(false);
         });
-        sifli_pac::HPSYS_RCC.enr2().modify(|w| w.set_usbc(false));
+        let _ = Clocks::disable(sysmodule_clocks_api::Peripheral::Usbc);
 
         *self = Self::new();
     }
@@ -527,17 +521,11 @@ impl UsbBus for UsbBusResource {
         usb.config = config;
         usb.endpoint_count = endpoints;
 
-        // Enable the USB peripheral clock
-        let rcc = sifli_pac::HPSYS_RCC;
-        rcc.enr2().modify(|w| w.set_usbc(true));
-
-        // Reset the USB controller
-        rcc.rstr2().modify(|w| w.set_usbc(true));
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        rcc.rstr2().modify(|w| w.set_usbc(false));
-
+        // Enable the USB peripheral clock, reset, and set divider
+        let _ = Clocks::enable(sysmodule_clocks_api::Peripheral::Usbc);
+        let _ = Clocks::reset(sysmodule_clocks_api::Peripheral::Usbc);
         // USB function clock must be 60MHz: 240MHz / 4 = 60MHz
-        rcc.usbcr().modify(|w| w.set_div(4));
+        let _ = Clocks::set_divider(sysmodule_clocks_api::Peripheral::Usbc, 4);
 
         // Power on the USB PHY (LDO + transceiver + D+ pull resistor)
         sifli_pac::HPSYS_CFG.usbcr().modify(|w| {

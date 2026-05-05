@@ -12,6 +12,9 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 
+sysmodule_clocks_api::bind_clocks!(Clocks = SLOTS.sysmodule_clocks);
+sysmodule_syscon_api::bind_syscon!(Syscon = SLOTS.sysmodule_syscon);
+
 fn lcdc() -> sifli_pac::lcdc::Lcdc {
     sifli_pac::LCDC1
 }
@@ -33,8 +36,9 @@ fn set_display_en(on: bool) {
     }
 }
 
-fn busy_wait(cycles: u32) {
-    for _ in 0..cycles {
+fn wait_ms(ms: u64) {
+    let start = userlib::sys_get_timer().now;
+    while userlib::sys_get_timer().now - start < ms {
         core::hint::spin_loop();
     }
 }
@@ -70,11 +74,8 @@ fn ssd1312_cmd_arg(cmd: u8, arg: u8) {
 
 /// Configure the LCDC for 4-wire SPI mode and reset the display.
 fn lcdc_init_spi() {
-    let rcc = sifli_pac::HPSYS_RCC;
-    rcc.rstr1().modify(|w| w.set_lcdc1(true));
-    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-    rcc.rstr1().modify(|w| w.set_lcdc1(false));
-    rcc.enr1().modify(|w| w.set_lcdc1(true));
+    let _ = Clocks::reset(sysmodule_clocks_api::Peripheral::Lcdc1);
+    let _ = Clocks::enable(sysmodule_clocks_api::Peripheral::Lcdc1);
 
     let l = lcdc();
 
@@ -98,7 +99,7 @@ fn lcdc_init_spi() {
     );
 
     // Hold reset low for ~10ms (main.c uses rt_thread_mdelay(10))
-    busy_wait(2_400_000);
+    wait_ms(10);
 
     // LCD_IF_CONF: bit 23 LCD_RSTB = 1 (release reset), same timing
     l.lcd_if_conf()
@@ -109,7 +110,7 @@ fn lcdc_init_spi() {
     );
 
     // Wait for SSD1312 to complete internal reset (~10ms, matching main.c)
-    busy_wait(2_400_000);
+    wait_ms(10);
     rcard_log::trace!("LCDC init complete");
 }
 
@@ -185,13 +186,9 @@ impl Display for DisplayResource {
         // wait for the display's power supply to stabilize before sending commands; empirically
         // ~10ms is sufficient
 
-        sifli_pac::PMUC
-            .peri_ldo()
-            .modify(|peri_ldo| peri_ldo.set_en_vdd33_ldo3(true));
+        let _ = Syscon::enable_ldo(sysmodule_syscon_api::Ldo::Vdd33Ldo3);
 
-        for _ in 0..10_000_000 {
-            core::hint::black_box({});
-        }
+        wait_ms(10);
 
         rcard_log::trace!("power stabilized, initializing LCDC");
         lcdc_init_spi();

@@ -5,7 +5,7 @@ fun ctx => {
   priority = lib.workgroup.core_sysmodule,
   uses_peripherals = ["rtc"],
   regions = {
-    code  = { place = ctx.places.bulk },
+    code  = { place = ctx.places.code_generic, execute = true },
     stack = { place = ctx.places.fast, size = lib.kiB 1 },
     data  = { place = ctx.places.fast },
   },

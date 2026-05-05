@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use generated::slots::SLOTS;
 use once_cell::OnceCell;
-use rcard_log::{error, warn, OptionExt, ResultExt};
+use rcard_log::{error, formatter::Format, warn, OptionExt, ResultExt};
 use storage_api::{Geometry, StorageError};
 use sysmodule_mpi_api::*;
 use sysmodule_storage_api::*;
@@ -42,6 +42,7 @@ struct CachedGeometry {
 }
 
 impl CachedGeometry {
+    #[allow(dead_code)]
     fn from_bfpt(bfpt: &sysmodule_mpi_api::sfdp::Bfpt<'_>) -> Self {
         // Smallest advertised erase type — in practice the 4K sector
         // erase, because the driver prefers to subdivide erases into
@@ -132,7 +133,7 @@ const MPI_IPC_MAX_ATTEMPTS: u32 = 3;
 /// For chunked operations where a partial multi-chunk result must be
 /// discarded and restarted, inline the retry loop instead — see
 /// [`mpi_read_to_lease`] / [`mpi_program_from_lease`].
-fn mpi_retry_single<T, OE, IE>(
+fn mpi_retry_single<T, OE: Format, IE: Format>(
     mut op: impl FnMut() -> Result<Result<T, OE>, IE>,
     context: &str,
     address: u32,
@@ -140,11 +141,15 @@ fn mpi_retry_single<T, OE, IE>(
     for attempt in 0..MPI_IPC_MAX_ATTEMPTS {
         match op() {
             Ok(Ok(v)) => return Ok(v),
-            Ok(Err(_)) => return Err(StorageError::device(0xFFFE)),
-            Err(_) => {
+            Ok(Err(e)) => {
+                warn!("MPI {} operation error at {}: {}", context, address, e);
+                return Err(StorageError::device(0xFFFE));
+            }
+            Err(e) => {
                 warn!(
-                    "MPI {} IPC failure at {} (attempt {}/{}), retrying",
+                    "MPI {} IPC failure ({}) at {} (attempt {}/{}), retrying",
                     context,
+                    e,
                     address,
                     attempt + 1,
                     MPI_IPC_MAX_ATTEMPTS,
@@ -153,7 +158,7 @@ fn mpi_retry_single<T, OE, IE>(
         }
     }
     error!(
-        "MPI {} failed at 0x{:08x} after {} IPC attempts",
+        "MPI {} failed at {} after {} IPC attempts",
         context, address, MPI_IPC_MAX_ATTEMPTS,
     );
     Err(StorageError::device(0xFFFE))
@@ -190,7 +195,12 @@ fn mpi_read_to_lease(
                     );
                     continue 'attempt;
                 }
-                Ok(Err(_)) => {
+                Ok(Err(e)) => {
+                    warn!(
+                        "MPI read operation error at {}: {}",
+                        address + offset as u32,
+                        e
+                    );
                     return Err(StorageError::device(0xFFFE));
                 }
                 Ok(Ok(())) => {
@@ -204,7 +214,7 @@ fn mpi_read_to_lease(
         let elapsed = userlib::sys_get_timer().now - t0;
         if elapsed > 100 {
             warn!(
-                "mpi_read_to_lease: {}ms for {} bytes at 0x{:08x}",
+                "mpi_read_to_lease: {}ms for {} bytes at {}",
                 elapsed, len, address
             );
         }
@@ -212,7 +222,7 @@ fn mpi_read_to_lease(
     }
 
     error!(
-        "MPI read failed at 0x{:08x} after {} IPC attempts",
+        "MPI read failed at {} after {} IPC attempts",
         address, MPI_IPC_MAX_ATTEMPTS
     );
     Err(StorageError::device(0xFFFE))
@@ -262,7 +272,7 @@ fn mpi_program_from_lease(
     }
 
     error!(
-        "MPI write failed at 0x{:08x} after {} IPC attempts",
+        "MPI write failed at {} after {} IPC attempts",
         address, MPI_IPC_MAX_ATTEMPTS
     );
     Err(StorageError::device(0xFFFE))
@@ -513,14 +523,15 @@ fn main() -> ! {
     .log_expect("storage: failed to open MPI");
     MPI.set(flash).ok();
 
-    // Cache SFDP-derived geometry once at startup so
-    // `Partition::geometry()` and write-alignment checks don't hit IPC
-    // on every call. `with_sfdp` reads the SFDP global header + all
-    // parameter headers + BFPT body under one helper call.
-    use sysmodule_mpi_api::sfdp::MpiExt;
-    let geometry = mpi()
-        .with_sfdp(|sfdp| CachedGeometry::from_bfpt(&sfdp.bfpt))
-        .log_unwrap();
+    // Standard SPI NOR geometry — true for every chip we target.
+    // Previously derived from SFDP at runtime, but MPI2 can't serve
+    // indirect commands while in memory-mapped (XIP) mode, so SFDP
+    // is unavailable.
+    let geometry = CachedGeometry {
+        erase_size: 4096,
+        program_size: 256,
+        read_size: 1,
+    };
     FLASH_GEOMETRY.set(geometry).ok();
 
     ipc::server! {

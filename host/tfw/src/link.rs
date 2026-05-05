@@ -101,23 +101,30 @@ pub fn link_image(
         }
     }
 
-    // CPU base of the place hosting places.bin. Segments in this place
-    // get file_offset = (segment_dest - host_base), so their bytes land
-    // at their linker addresses on flash and run XIP. Segments destined
-    // for other places (RAM-init data) are packed after the host place's
-    // data, at any unclaimed file offset.
-    //
-    // Which place hosts places.bin is chosen by the app ncl via
-    // `boot.image`. Without a boot config there is no host place.
-    let host_place_name: Option<&str> = config.boot.as_ref()
-        .and_then(|b| b.image.name.as_deref());
-    let host_base = config.boot.as_ref()
-        .and_then(|b| b.image.mappings.first().map(|m| m.address + b.image.offset.unwrap_or(0)));
+    // CPU address range of the flash region hosting places.bin, derived
+    // from boot.image. Segments whose addresses fall within [host_base,
+    // host_end) are host-resident: they get file_offset = (paddr -
+    // host_base) so their bytes land at their linker addresses on flash
+    // and run XIP. Segments outside this range are packed sequentially.
+    let host_base: Option<u64> = config.boot.as_ref()
+        .and_then(|b| b.image.mappings.first()
+            .map(|m| m.address + b.image.offset.unwrap_or(0)));
+    let host_end: Option<u64> = config.boot.as_ref()
+        .and_then(|b| b.image.mappings.first()
+            .map(|m| m.address + b.image.offset.unwrap_or(0) + b.image.size));
 
-    // Iterate places in two passes: host place first (so it takes
-    // file_offset 0..host_size), then everything else packed after.
+    let is_host_resident = |paddr: u64| -> bool {
+        host_base.is_some_and(|h| paddr >= h) && host_end.is_some_and(|e| paddr < e)
+    };
+
+    // Iterate places in two passes: host-resident places first (so their
+    // file_offset is derived from their linker address), then everything
+    // else packed after.
     let mut place_names: Vec<&str> = by_place.keys().copied().collect();
-    place_names.sort_by_key(|n| if Some(*n) == host_place_name { 0 } else { 1 });
+    place_names.sort_by_key(|n| {
+        let base = by_place[n].iter().map(|s| s.paddr).min().unwrap();
+        if is_host_resident(base) { 0 } else { 1 }
+    });
 
     let mut place_layouts: BTreeMap<String, PlaceLayout> = BTreeMap::new();
     let mut tail_cursor: u32 = 0;
@@ -166,16 +173,13 @@ pub fn link_image(
         let mem_size = (mem_end - base) as u32;
 
         // Compute file_offset.
-        let file_offset = if Some(place_name) == host_place_name {
-            let host = host_base.ok_or_else(|| LinkError::Other(
-                "host place exists in by_place but has no CPU mapping".into()
-            ))?;
+        let file_offset = if is_host_resident(base) {
+            let host = host_base.unwrap();
             let off = (base - host) as u32;
-            // Reserve the rest of the host's data region for its own bytes.
-            tail_cursor = off + total as u32;
+            tail_cursor = tail_cursor.max(off + total as u32);
             off
         } else {
-            // Pack RAM-init segments after the image data.
+            // Pack RAM-init segments after the host data.
             let off = (tail_cursor + 3) & !3;
             tail_cursor = off + total as u32;
             off

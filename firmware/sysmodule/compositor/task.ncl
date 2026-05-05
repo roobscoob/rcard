@@ -6,11 +6,12 @@ fun ctx => {
   depends_on = [
     ctx.tasks.sysmodule_display,
     ctx.tasks.sysmodule_log,
+    ctx.tasks.sysmodule_mpi,
     ctx.tasks.sysmodule_reactor,
   ],
   pushes_notifications = ["present"],
   regions = {
-    code          = { place = ctx.places.bulk },
+    code          = { place = ctx.places.code_generic, execute = true },
     stack         = { place = ctx.places.fast, size = lib.kiB 8 },
     data          = { place = ctx.places.fast },
     frame_buffers = { place = ctx.places.psram, size = lib.kiB 512, align = 32 },

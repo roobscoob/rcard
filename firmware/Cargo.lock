@@ -923,6 +923,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_clocks"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "sifli-pac",
+ "sysmodule_clocks_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_clocks_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
 name = "sysmodule_compositor"
 version = "0.1.0"
 dependencies = [
@@ -986,8 +1010,10 @@ dependencies = [
  "rcard-log",
  "rcard-log-macros",
  "sifli-pac",
+ "sysmodule_clocks_api",
  "sysmodule_display_api",
  "sysmodule_log_api",
+ "sysmodule_syscon_api",
  "userlib",
 ]
 
@@ -1158,6 +1184,7 @@ dependencies = [
  "rcard-log",
  "rcard-log-macros",
  "sifli-pac",
+ "sysmodule_clocks_api",
  "sysmodule_log_api",
  "sysmodule_mpi_api",
  "userlib",
@@ -1182,7 +1209,7 @@ version = "0.1.0"
 dependencies = [
  "generated",
  "ipc",
- "sifli-pac",
+ "sysmodule_clocks_api",
  "sysmodule_rand_api",
  "userlib",
 ]
@@ -1255,6 +1282,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_syscon"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "sifli-pac",
+ "sysmodule_log_api",
+ "sysmodule_syscon_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_syscon_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
 name = "sysmodule_time"
 version = "0.1.0"
 dependencies = [
@@ -1310,6 +1364,7 @@ dependencies = [
  "rcard-log",
  "rcard-log-macros",
  "sifli-pac",
+ "sysmodule_clocks_api",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
  "sysmodule_usb_api",

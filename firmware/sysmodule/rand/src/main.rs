@@ -3,7 +3,10 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use generated::slots::SLOTS;
 use sysmodule_rand_api::*;
+
+sysmodule_clocks_api::bind_clocks!(Clocks = SLOTS.sysmodule_clocks);
 
 const TRNG_BASE: usize = 0x5000_F000;
 
@@ -64,11 +67,6 @@ impl Rand for RandImpl {
     }
 }
 
-fn enable_trng_clock() {
-    let rcc = sifli_pac::HPSYS_RCC;
-    rcc.enr1().modify(|w| w.set_trng(true));
-}
-
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     userlib::sys_panic(b"rand panic")
@@ -76,7 +74,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 
 #[export_name = "main"]
 fn main() -> ! {
-    enable_trng_clock();
+    let _ = Clocks::enable(sysmodule_clocks_api::Peripheral::Trng);
 
     ipc::server! {
         Rand: RandImpl,

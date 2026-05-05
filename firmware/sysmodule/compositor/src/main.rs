@@ -11,7 +11,7 @@ use generated::slots::SLOTS;
 use ipc::allocation;
 use lilla_oxid::graphics::{self, Color, Image, ImageFormat as LillaFormat, Point, Size};
 use once_cell::{GlobalState, OnceCell};
-use rcard_log::{info, OptionExt, ResultExt};
+use rcard_log::{info, trace, OptionExt, ResultExt};
 use sysmodule_compositor_api::*;
 use sysmodule_display_api::DisplayConfiguration;
 use sysmodule_reactor_api::OverflowStrategy;
@@ -458,6 +458,8 @@ fn main() -> ! {
     let storage = FRAME_BUFFERS
         .get()
         .log_expect("frame buffer region already taken");
+
+    trace!("FRAME_BUFFERS @ {}", storage.as_ptr() as u32);
     // SAFETY: the region is freshly taken from `ipc::allocation!`, so it's
     // exclusively ours and lives forever.
     unsafe {

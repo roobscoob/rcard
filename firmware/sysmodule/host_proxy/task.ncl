@@ -20,7 +20,7 @@ fun ctx => {
   ],
   uses_notifications = ["host_request"],
   regions = {
-    code    = { place = ctx.places.bulk },
+    code    = { place = ctx.places.code_generic, execute = true },
     stack   = { place = ctx.places.fast, size = 2048 },
     data    = { place = ctx.places.fast },
     tunnel  = { place = ctx.places.scratch, size = 8480, align = 4, shared = "tunnel" },
