@@ -50,6 +50,10 @@ fn get_cursor_pos_in_window(ctx: &egui::Context) -> Option<egui::Pos2> {
 pub struct RcardApp {
     pub state: AppState,
     runtime: Option<tokio::runtime::Runtime>,
+    /// egui_taffy needs cross-frame sizing data that isn't available on frame 0,
+    /// so the layout is wrong until frame 1 runs. Request an immediate repaint
+    /// after frame 0 to let taffy converge without waiting for user input.
+    needs_initial_repaint: bool,
 }
 
 impl RcardApp {
@@ -66,6 +70,7 @@ impl RcardApp {
         RcardApp {
             state,
             runtime: Some(runtime),
+            needs_initial_repaint: true,
         }
     }
 }
@@ -112,6 +117,11 @@ impl eframe::App for RcardApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.needs_initial_repaint {
+            ctx.request_repaint();
+            self.needs_initial_repaint = false;
+        }
+
         self.state.drain_events();
 
         // ── File drop handling ──────────────────────────────────────
