@@ -1458,9 +1458,11 @@ fn init_psram() {
     let (sck_dly, dqs_dly) = psram_cal_delay(regs);
     info!("PSRAM cal: sck_dly={} dqs_dly={}", sck_dly, dqs_dly);
 
-    // 4. HAL_FLASH_SET_CLK_rom(1) — PSCLR = 1.
-    // (cal_delay leaves PSCLR=1 already, but the SDK reapplies it.)
-    regs.psclr().write(|w| w.set_div(1));
+    // 4. PSCLR = 2 → 72 MHz OPI DDR. At 144 MHz (PSCLR=1) the DQS
+    // timing margin is too tight for sustained D-cache burst reads.
+    // SiFli disables D-cache entirely on all SF32LB52x boards rather
+    // than solve this; we trade half the bus clock for D-cache support.
+    regs.psclr().write(|w| w.set_div(2));
 
     // 5. HAL_FLASH_SET_CS_TIME — SDK's freq ≤ 144 MHz branch:
     //    cs_min = 6, cs_max = 1140, cshmin = 5, trcmin = 17
