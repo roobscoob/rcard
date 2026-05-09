@@ -149,18 +149,35 @@ pub unsafe fn apply_pin_config() {
     rmw(0x5000_30A0, 0x7F, 0x70);
     // PA28 -> ws2812_en gpio out (FSEL=0, pull=down)
     rmw(0x5000_30A4, 0x7F, 0x10);
-    // PA30 -> i2c3 sda (FSEL=4, pull=down, IE)
-    rmw(0x5000_30AC, 0x7F, 0x54);
+    // PA30 -> i2c3 sda (FSEL=4 = PA_I2C_UART, pull=up, IE)
+    rmw(0x5000_30AC, 0x7F, 0x74);
     rmw(0x5000_B050, 0x3F00, 0x1E00); // PINR: i2c3 sda = PA30
-                                      // PA31 -> i2c3 scl (FSEL=4, pull=down, IE)
-    rmw(0x5000_30B0, 0x7F, 0x54);
+                                      // PA31 -> i2c3 scl (FSEL=4, pull=up, IE)
+    rmw(0x5000_30B0, 0x7F, 0x74);
     rmw(0x5000_B050, 0x3F, 0x1F); // PINR: i2c3 scl = PA31
-                                  // PA32 -> i2c2 sda (FSEL=4, pull=down, IE)
-    rmw(0x5000_30B4, 0x7F, 0x54);
+                                  // PA32 -> i2c2 sda (FSEL=4, pull=up, IE)
+    rmw(0x5000_30B4, 0x7F, 0x74);
     rmw(0x5000_B04C, 0x3F00, 0x2000); // PINR: i2c2 sda = PA32
-                                      // PA33 -> i2c2 scl (FSEL=4, pull=down, IE)
-    rmw(0x5000_30B8, 0x7F, 0x54);
+                                      // PA33 -> i2c2 scl (FSEL=4, pull=up, IE)
+    rmw(0x5000_30B8, 0x7F, 0x74);
     rmw(0x5000_B04C, 0x3F, 0x21); // PINR: i2c2 scl = PA33
+    // I2C pads need output enable (DOESR = write-1-to-set)
+    // DOESR0: PA30 (bit 30), PA31 (bit 31)
+    let doesr0 = 0x500A_0014 as *mut u32;
+    doesr0.write_volatile((1 << 30) | (1 << 31));
+    // DOESR1: PA32 (bit 0), PA33 (bit 1)
+    let doesr1 = 0x500A_0094 as *mut u32;
+    doesr1.write_volatile((1 << 0) | (1 << 1));
+    // Select HXT48 as peripheral functional clock (CSR bit 12 = SEL_PERI)
+    // Without this, I2C/SPI/USART fclk is not connected.
+    rmw(0x5000_0004, 1 << 12, 1 << 12); // CSR: SEL_PERI = HXT48
+    // Enable I2C2/I2C3 clocks then reset modules (HAL_RCC_ResetModule sequence)
+    rmw(0x5000_0008, 1 << 28, 1 << 28); // ENR1: enable I2C2
+    rmw(0x5000_000C, 1 << 8, 1 << 8);   // ENR2: enable I2C3
+    rmw(0x5000_0028, 1 << 28, 1 << 28); // RSTR1: assert I2C2 reset
+    rmw(0x5000_0028, 1 << 28, 0);       // RSTR1: deassert I2C2 reset
+    rmw(0x5000_002C, 1 << 8, 1 << 8);   // RSTR2: assert I2C3 reset
+    rmw(0x5000_002C, 1 << 8, 0);        // RSTR2: deassert I2C3 reset
                                   // PA37 -> spi2 dio (FSEL=2, pull=down)
     rmw(0x5000_30C8, 0x7F, 0x12);
     // PA38 -> spi2 di (FSEL=2, pull=down, IE)
@@ -417,6 +434,20 @@ fn main() -> ! {
     unsafe { apply_pin_config() };
 
     let cycles_per_ms = clock_setup();
+
+    // Diagnostic: dump RCC CSR and ENR to verify clock configuration
+    {
+        let csr = unsafe { (0x5000_0020 as *const u32).read_volatile() };
+        let enr1 = unsafe { (0x5000_0008 as *const u32).read_volatile() };
+        let enr2 = unsafe { (0x5000_000C as *const u32).read_volatile() };
+        let rstr1 = unsafe { (0x5000_0000 as *const u32).read_volatile() };
+        let rstr2 = unsafe { (0x5000_0004 as *const u32).read_volatile() };
+        usart1_write_u32_hex("kernel: RCC CSR=0x", csr);
+        usart1_write_u32_hex("kernel: RCC ENR1=0x", enr1);
+        usart1_write_u32_hex("kernel: RCC ENR2=0x", enr2);
+        usart1_write_u32_hex("kernel: RCC RSTR1=0x", rstr1);
+        usart1_write_u32_hex("kernel: RCC RSTR2=0x", rstr2);
+    }
 
     // kernel time!
     usart1_write_str(TICK_ZERO);

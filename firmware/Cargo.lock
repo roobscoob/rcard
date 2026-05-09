@@ -285,6 +285,7 @@ dependencies = [
  "once-cell",
  "rcard-log",
  "rcard-log-macros",
+ "sysmodule_cap1208_api",
  "sysmodule_compositor_api",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
@@ -920,6 +921,34 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sysmodule_cap1208"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "sifli-pac",
+ "sysmodule_cap1208_api",
+ "sysmodule_clocks_api",
+ "sysmodule_log_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_cap1208_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
 ]
 
 [[package]]

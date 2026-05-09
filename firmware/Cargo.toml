@@ -29,6 +29,8 @@ members = [
     "sysmodule/compositor/api",
     "sysmodule/mpi",
     "sysmodule/mpi/api",
+    "sysmodule/cap1208",
+    "sysmodule/cap1208/api",
     "sysmodule/log_sink_storage",
     "sysmodule/usb",
     "sysmodule/usb/api",

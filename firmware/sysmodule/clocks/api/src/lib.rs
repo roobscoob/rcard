@@ -22,6 +22,8 @@ pub enum Peripheral {
     Mpi2 = 2,
     Usbc = 3,
     Trng = 4,
+    I2c2 = 5,
+    I2c3 = 6,
 }
 
 #[derive(

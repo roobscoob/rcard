@@ -4,6 +4,7 @@
 use generated::slots::SLOTS;
 use once_cell::{GlobalState, OnceCell};
 use rcard_log::{info, OptionExt, ResultExt};
+use sysmodule_cap1208_api::*;
 use sysmodule_compositor_api::{BlendMode, FrameBufferInfo, ImageFormat};
 use sysmodule_reactor_api::NOTIFICATION_BIT;
 
@@ -11,142 +12,169 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
+sysmodule_cap1208_api::bind_cap1208!(Cap1208 = SLOTS.sysmodule_cap1208);
 sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
 sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
-const PATTERN_W: u32 = 32;
-const PATTERN_H: u32 = 32;
-const PATTERN_PITCH: usize = (PATTERN_W as usize) / 8;
-const PATTERN_BYTES: usize = PATTERN_PITCH * (PATTERN_H as usize);
+const SCREEN_W: usize = 128;
+const SCREEN_H: usize = 64;
+const HALF_H: usize = SCREEN_H / 2;
+const PITCH: usize = SCREEN_W / 8;
+const FB_BYTES: usize = PITCH * SCREEN_H;
 
-/// Set a single pixel in a Mono framebuffer (MSB = leftmost column).
-fn set_pixel(buf: &mut [u8; PATTERN_BYTES], x: i32, y: i32) {
-    if x < 0 || y < 0 || x >= PATTERN_W as i32 || y >= PATTERN_H as i32 {
-        return;
-    }
-    let byte = (y as usize) * PATTERN_PITCH + (x as usize) / 8;
-    buf[byte] |= 0x80 >> ((x as usize) % 8);
+const NUM_CHANNELS: usize = 8;
+const BAR_STRIDE: usize = SCREEN_W / NUM_CHANNELS; // 16 px per bar
+const BAR_WIDTH: usize = BAR_STRIDE - 2; // 14 px bar, 2 px gap
+
+fn set_pixel(buf: &mut [u8; FB_BYTES], x: usize, y: usize) {
+    let byte = y * PITCH + x / 8;
+    buf[byte] |= 0x80 >> (x % 8);
 }
 
-/// Filled circle of `radius` pixels, centered in a 32×32 buffer.
-fn draw_circle(buf: &mut [u8; PATTERN_BYTES], radius: u32) {
+fn draw_bars(buf: &mut [u8; FB_BYTES], top: &[i32; 8], bottom: &[i32; 8]) {
     buf.fill(0);
-    let r = radius as i32;
-    let r2 = r * r;
-    for y in 0..PATTERN_H as i32 {
-        for x in 0..PATTERN_W as i32 {
-            let dx = x - 16;
-            let dy = y - 16;
-            if dx * dx + dy * dy <= r2 {
-                set_pixel(buf, x, y);
+
+    // Auto-scale: find min/max across all 16 values
+    let mut min = top[0];
+    let mut max = top[0];
+    let mut i = 0;
+    while i < 8 {
+        if top[i] < min {
+            min = top[i];
+        }
+        if top[i] > max {
+            max = top[i];
+        }
+        if bottom[i] < min {
+            min = bottom[i];
+        }
+        if bottom[i] > max {
+            max = bottom[i];
+        }
+        i += 1;
+    }
+
+    let range = max - min;
+
+    // Top half: Device A bars grow downward from row 0
+    i = 0;
+    while i < NUM_CHANNELS {
+        let h = if range > 0 {
+            (((top[7 - i] - min) as u32 * HALF_H as u32) / range as u32) as usize
+        } else {
+            1
+        };
+        let x0 = i * BAR_STRIDE + 1;
+        let mut row = 0;
+        while row < h {
+            let mut col = 0;
+            while col < BAR_WIDTH {
+                set_pixel(buf, x0 + col, row);
+                col += 1;
             }
+            row += 1;
         }
+        i += 1;
     }
-}
 
-/// A `height`-row solid bar starting at the top of the buffer.
-fn draw_bar(buf: &mut [u8; PATTERN_BYTES], height: u32) {
-    buf.fill(0);
-    let h = (height as usize).min(PATTERN_H as usize);
-    for row in 0..h {
-        for col in 0..PATTERN_PITCH {
-            buf[row * PATTERN_PITCH + col] = 0xFF;
+    // Bottom half: Device B bars grow upward from row 63
+    i = 0;
+    while i < NUM_CHANNELS {
+        let h = if range > 0 {
+            (((bottom[i] - min) as u32 * HALF_H as u32) / range as u32) as usize
+        } else {
+            1
+        };
+        let x0 = i * BAR_STRIDE + 1;
+        let mut row = 0;
+        while row < h {
+            let y = SCREEN_H - 1 - row;
+            let mut col = 0;
+            while col < BAR_WIDTH {
+                set_pixel(buf, x0 + col, y);
+                col += 1;
+            }
+            row += 1;
         }
+        i += 1;
     }
 }
 
-/// Triangle-wave bounce: cycles 0..=peak..=0 over `2 * peak` steps.
-fn bounce(t: u32, peak: u32) -> u32 {
-    if peak == 0 {
-        return 0;
-    }
-    let p = t % (2 * peak);
-    if p <= peak { p } else { 2 * peak - p }
+struct TouchState {
+    cap_a: Cap1208,
+    cap_b: Cap1208,
+    fb: FrameBuffer,
+    _layer: Layer,
+    buf: [u8; FB_BYTES],
 }
 
-/// Live animation state — mutated on every `present` notification from
-/// the compositor. Held in a `OnceCell<GlobalState<…>>` so the
-/// notification handler can borrow it without macro-generated args.
-struct AnimState {
-    fb_a: FrameBuffer,
-    fb_b: FrameBuffer,
-    layer_a: Layer,
-    layer_b: Layer,
-    buf_a: [u8; PATTERN_BYTES],
-    buf_b: [u8; PATTERN_BYTES],
-    frame: u32,
-}
-
-static STATE: OnceCell<GlobalState<AnimState>> = OnceCell::new();
+static STATE: OnceCell<GlobalState<TouchState>> = OnceCell::new();
 
 #[ipc::notification_handler(present)]
 fn handle_present(_sender: u16, _code: u32) {
     STATE
         .get()
-        .log_expect("anim state not initialized")
+        .log_expect("touch state not initialized")
         .with(|s| {
-            // Display = 128×64, layers = 32×32. A slides on the top half,
-            // B on the bottom half at half speed.
-            let x_max = (128 - PATTERN_W) as u32; // 96
-            let x_a = bounce(s.frame, x_max) as i16;
-            let x_b = bounce(s.frame / 2, x_max) as i16;
-            let _ = s.layer_a.set_position(x_a, 0);
-            let _ = s.layer_b.set_position(x_b, 32);
+            let top = match s.cap_a.read() {
+                Ok(Ok(v)) => v,
+                _ => return,
+            };
+            let bottom = match s.cap_b.read() {
+                Ok(Ok(v)) => v,
+                _ => return,
+            };
 
-            let radius = bounce(s.frame, 14);
-            draw_circle(&mut s.buf_a, radius);
-            let _ = s.fb_a.write(&s.buf_a);
-
-            let height = bounce(s.frame, PATTERN_H);
-            draw_bar(&mut s.buf_b, height);
-            let _ = s.fb_b.write(&s.buf_b);
-
-            s.frame = s.frame.wrapping_add(1);
+            draw_bars(&mut s.buf, &top, &bottom);
+            let _ = s.fb.write(&s.buf);
         })
-        .log_expect("reentrant anim state access");
+        .log_expect("reentrant touch state access");
 }
 
 #[export_name = "main"]
 fn main() -> ! {
     info!("fob: awake");
 
-    let mut buf_a = [0u8; PATTERN_BYTES];
-    let mut buf_b = [0u8; PATTERN_BYTES];
-    draw_circle(&mut buf_a, 8);
-    draw_bar(&mut buf_b, 16);
+    let config = Cap1208Config {
+        enabled_channels: 0xFF,
+        signal: SignalConfig::new(AnalogGain::X1, DigitalShift::X1),
+        sampling: SamplingConfig::fastest(Averaging::Avg4, Duration::Us640),
+        recalibration: RecalibrationConfig::every(RecalRate::Samples32)
+            .with_touch_duration(TouchRecalDuration::Disabled)
+            .with_below_baseline(BelowBaseline::Count32),
+    };
 
-    let info = FrameBufferInfo::new(ImageFormat::Mono, PATTERN_W, PATTERN_H);
-    let fb_a = FrameBuffer::new(info, &buf_a)
-        .log_expect("frame buffer A IPC")
-        .log_expect("frame buffer A creation");
-    let fb_b = FrameBuffer::new(info, &buf_b)
-        .log_expect("frame buffer B IPC")
-        .log_expect("frame buffer B creation");
+    let cap_a = Cap1208::open(Device::A, config)
+        .log_expect("cap1208 A IPC")
+        .log_expect("cap1208 A open");
 
-    let id_a = fb_a.id().log_expect("fb_a id");
-    let id_b = fb_b.id().log_expect("fb_b id");
+    let cap_b = Cap1208::open(Device::B, config)
+        .log_expect("cap1208 B IPC")
+        .log_expect("cap1208 B open");
 
-    let layer_a = Layer::new(id_a, 0, 0, 0, BlendMode::Replace)
-        .log_expect("layer A IPC")
-        .log_expect("layer A creation");
-    let layer_b = Layer::new(id_b, 0, 32, 1, BlendMode::Replace)
-        .log_expect("layer B IPC")
-        .log_expect("layer B creation");
+    info!("fob: touch sensors open");
 
-    let _ = STATE.set(GlobalState::new(AnimState {
-        fb_a,
-        fb_b,
-        layer_a,
-        layer_b,
-        buf_a,
-        buf_b,
-        frame: 0,
+    let buf = [0u8; FB_BYTES];
+    let info = FrameBufferInfo::new(ImageFormat::Mono, SCREEN_W as u32, SCREEN_H as u32);
+    let fb = FrameBuffer::new(info, &buf)
+        .log_expect("fb IPC")
+        .log_expect("fb creation");
+    let fb_id = fb.id().log_expect("fb id");
+    let layer = Layer::new(fb_id, 0, 0, 0, BlendMode::Replace)
+        .log_expect("layer IPC")
+        .log_expect("layer creation");
+
+    let _ = STATE.set(GlobalState::new(TouchState {
+        cap_a,
+        cap_b,
+        fb,
+        _layer: layer,
+        buf,
     }));
 
-    info!("fob: layers created, listening for present");
+    info!("fob: touch bar display running");
 
-    // Drain notifications via the reactor on every kernel-delivered wake.
     loop {
         let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
         loop {
