@@ -264,7 +264,7 @@ fn bringup_teardown() {
 #[unsafe(export_name = "main")]
 fn main() -> ! {
     info!("lcpu: starting");
-    // ipc::server! {
+    // ipc::server! {   
     //     Lcpu: LcpuResource,
     //     @irq(mailbox2_ch1) => || {
     //         // Drain MISR / clear ICR.
