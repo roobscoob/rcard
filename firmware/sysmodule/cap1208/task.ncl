@@ -7,7 +7,7 @@ fun ctx => {
     ctx.tasks.sysmodule_clocks,
     ctx.tasks.sysmodule_log,
   ],
-  uses_peripherals = ["i2c2", "i2c3", "syscon"],
+  uses_peripherals = ["i2c2", "i2c3", "hpsys_cfg"],
   regions = {
     code  = { place = ctx.places.code_generic, execute = true },
     stack = { place = ctx.places.fast, size = lib.kiB 2 },
