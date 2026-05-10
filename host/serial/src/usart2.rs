@@ -203,7 +203,7 @@ async fn read_structured(
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        eprintln!("[usart2-wire] waiting for data...");
+        // eprintln!("[usart2-wire] waiting for data...");
 
         let n = tokio::select! {
             read_result = port.read(&mut buf) => match read_result {
@@ -212,7 +212,7 @@ async fn read_structured(
                     return;
                 }
                 Ok(n) => {
-                    eprintln!("[usart2-wire] {} bytes: {:02x?}", n, &buf[..n.min(64)]);
+                    // eprintln!("[usart2-wire] {} bytes: {:02x?}", n, &buf[..n.min(64)]);
                     n
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
@@ -235,7 +235,7 @@ async fn read_structured(
                     match cobs::decode(&cobs_buf, &mut decoded) {
                         Ok(len) => {
                             let chunk = &decoded[..len];
-                            eprintln!("[usart2] chunk ({} bytes): {:02x?}", chunk.len(), chunk);
+                            // eprintln!("[usart2] chunk ({} bytes): {:02x?}", chunk.len(), chunk);
                             process_chunk(
                                 chunk,
                                 started,
@@ -245,7 +245,7 @@ async fn read_structured(
                                 &protocol,
                             )
                             .await;
-                            eprintln!("[usart2] chunk processing complete");
+                            // eprintln!("[usart2] chunk processing complete");
                         }
                         Err(error) => {
                             sink.error(crate::error::SerialError::CobsDecode {

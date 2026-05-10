@@ -282,10 +282,11 @@ version = "0.1.0"
 dependencies = [
  "generated",
  "ipc",
+ "once-cell",
  "rcard-log",
  "rcard-log-macros",
- "sysmodule_display_api",
- "sysmodule_lcpu_api",
+ "sysmodule_cap1208_api",
+ "sysmodule_compositor_api",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
  "userlib",
@@ -455,7 +456,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "kern",
- "sifli-pac 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sifli-pac",
 ]
 
 [[package]]
@@ -482,6 +483,10 @@ dependencies = [
  "cfg-if",
  "windows-link",
 ]
+
+[[package]]
+name = "lilla-oxid"
+version = "0.1.0"
 
 [[package]]
 name = "littlefs2-sys"
@@ -869,14 +874,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sifli-pac"
-version = "0.2.0"
-source = "git+https://github.com/OpenSiFli/sifli-pac.git?rev=bc148a3#bc148a3d953b745b923d1e88d7a2c65fa818b952"
-dependencies = [
- "cortex-m",
-]
-
-[[package]]
 name = "ssmarshal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -910,7 +907,7 @@ dependencies = [
  "abi",
  "generated",
  "kipc",
- "sifli-pac 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sifli-pac",
  "ssmarshal",
  "userlib",
 ]
@@ -927,12 +924,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_cap1208"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "sifli-pac",
+ "sysmodule_cap1208_api",
+ "sysmodule_clocks_api",
+ "sysmodule_log_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_cap1208_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
+name = "sysmodule_clocks"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "sifli-pac",
+ "sysmodule_clocks_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_clocks_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
 name = "sysmodule_compositor"
 version = "0.1.0"
 dependencies = [
  "generated",
  "ipc",
  "ipc-macros",
+ "lilla-oxid",
  "once-cell",
  "rcard-log",
  "rcard-log-macros",
@@ -948,7 +998,9 @@ name = "sysmodule_compositor_api"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "postcard-schema",
  "rcard-log",
+ "serde",
  "userlib",
  "zerocopy",
 ]
@@ -986,9 +1038,11 @@ dependencies = [
  "ipc",
  "rcard-log",
  "rcard-log-macros",
- "sifli-pac 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sifli-pac",
+ "sysmodule_clocks_api",
  "sysmodule_display_api",
  "sysmodule_log_api",
+ "sysmodule_syscon_api",
  "userlib",
 ]
 
@@ -1086,35 +1140,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysmodule_lcpu"
-version = "0.1.0"
-dependencies = [
- "cortex-m",
- "generated",
- "ipc",
- "rcard-log",
- "rcard-log-macros",
- "sifli-pac 0.2.0 (git+https://github.com/OpenSiFli/sifli-pac.git?rev=bc148a3)",
- "sysmodule_lcpu_api",
- "sysmodule_log_api",
- "sysmodule_reactor_api",
- "userlib",
-]
-
-[[package]]
-name = "sysmodule_lcpu_api"
-version = "0.1.0"
-dependencies = [
- "ipc",
- "postcard-schema",
- "rcard-log",
- "rcard-log-macros",
- "serde",
- "userlib",
- "zerocopy",
-]
-
-[[package]]
 name = "sysmodule_log"
 version = "0.1.0"
 dependencies = [
@@ -1187,7 +1212,8 @@ dependencies = [
  "ipc",
  "rcard-log",
  "rcard-log-macros",
- "sifli-pac 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sifli-pac",
+ "sysmodule_clocks_api",
  "sysmodule_log_api",
  "sysmodule_mpi_api",
  "userlib",
@@ -1212,7 +1238,7 @@ version = "0.1.0"
 dependencies = [
  "generated",
  "ipc",
- "sifli-pac 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sysmodule_clocks_api",
  "sysmodule_rand_api",
  "userlib",
 ]
@@ -1285,6 +1311,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysmodule_syscon"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "sifli-pac",
+ "sysmodule_log_api",
+ "sysmodule_syscon_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_syscon_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
 name = "sysmodule_time"
 version = "0.1.0"
 dependencies = [
@@ -1312,7 +1365,7 @@ dependencies = [
  "generated",
  "ipc",
  "once-cell",
- "sifli-pac 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sifli-pac",
  "sysmodule_reactor_api",
  "sysmodule_usart_api",
  "userlib",
@@ -1339,7 +1392,8 @@ dependencies = [
  "musb",
  "rcard-log",
  "rcard-log-macros",
- "sifli-pac 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sifli-pac",
+ "sysmodule_clocks_api",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
  "sysmodule_usb_api",

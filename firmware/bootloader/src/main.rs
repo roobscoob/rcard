@@ -123,21 +123,72 @@ pub unsafe extern "C" fn bootloader_main() -> ! {
         usart1_write_hex(seg.file_size());
         usart1_write_bytes(b" mem=");
         usart1_write_hex(seg.mem_size());
+
+        // Skip copy and .bss zero-fill for flash-resident XIP segments
+        // (dest already points at the data within the places image).
+        let src = seg.data().as_ptr() as u32;
+        usart1_write_bytes(b" src=");
+        usart1_write_hex(src);
+        let self_resident = dest == src;
+        if self_resident {
+            usart1_write_bytes(b"  (xip, skip)");
+        } else {
+            ptr::copy(
+                seg.data().as_ptr(),
+                dest as *mut u8,
+                seg.file_size() as usize,
+            );
+
+            // Zero-fill .bss
+            let bss_start = dest + seg.file_size();
+            let bss_len = seg.zero_fill() as usize;
+            if bss_len > 0 {
+                ptr::write_bytes(bss_start as *mut u8, 0, bss_len);
+            }
+        }
+
         usart1_write_bytes(b"\r\n");
+    }
 
-        ptr::copy(
-            seg.data().as_ptr(),
-            dest as *mut u8,
-            seg.file_size() as usize,
-        );
+    // Enable I-cache and D-cache. The bootrom leaves both disabled
+    // (mpu_config/cache_enable are stubbed as no-ops in bf0_ap_hal_msp.c).
+    // Without caches, every instruction fetch from MPI2 XIP goes over SPI.
+    const SCB_CCR: *mut u32 = 0xE000_ED14 as *mut u32;
+    const SCB_ICIALLU: *mut u32 = 0xE000_EF50 as *mut u32;
+    const SCB_DCISW: *mut u32 = 0xE000_EF60 as *mut u32;
+    const SCB_CCSIDR: *const u32 = 0xE000_ED80 as *const u32;
+    const SCB_CSSELR: *mut u32 = 0xE000_ED84 as *mut u32;
+    const CCR_IC: u32 = 1 << 17;
+    const CCR_DC: u32 = 1 << 16;
 
-        // Zero-fill .bss
-        let bss_start = dest + seg.file_size();
-        let bss_len = seg.zero_fill() as usize;
-        if bss_len > 0 {
-            ptr::write_bytes(bss_start as *mut u8, 0, bss_len);
+    // I-cache: invalidate all, then enable
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    ptr::write_volatile(SCB_ICIALLU, 0);
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+    let ccr = ptr::read_volatile(SCB_CCR);
+    ptr::write_volatile(SCB_CCR, ccr | CCR_IC);
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+
+    // Enable D-cache now that all RAM copies are done. Invalidate all
+    // sets/ways first so the cache is clean.
+    ptr::write_volatile(SCB_CSSELR, 0); // select L1 data cache
+    cortex_m::asm::dsb();
+    let ccsidr = ptr::read_volatile(SCB_CCSIDR);
+    let sets = (ccsidr >> 13) & 0x7FFF;
+    let ways = (ccsidr >> 3) & 0x3FF;
+    for way in 0..=ways {
+        for set in 0..=sets {
+            ptr::write_volatile(SCB_DCISW, (way << 30) | (set << 5));
         }
     }
+    cortex_m::asm::dsb();
+    let ccr = ptr::read_volatile(SCB_CCR);
+    ptr::write_volatile(SCB_CCR, ccr | CCR_DC);
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
 
     let entry = image.entry_point();
     usart1_write_bytes(TICK_ZERO);

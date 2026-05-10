@@ -187,6 +187,12 @@ pub struct RegionRequest {
     /// co-allocated to the same physical address. `None` = private.
     #[serde(default)]
     pub shared: Option<String>,
+    /// If true, prefer an executable CPU mapping for this region.
+    /// When a place has both executable and non-executable mappings
+    /// (e.g. PSRAM at 0x10000000 and 0x60000000), this selects which
+    /// mapping the region is allocated in.
+    #[serde(default)]
+    pub execute: bool,
 }
 
 // -- Peripherals --
@@ -307,9 +313,6 @@ pub fn load(
     let tasks = discover_tasks(firmware_dir);
     let shim = build_shim(firmware_dir, root_ncl, board_ncl, layout_ncl, &tasks);
 
-    let shim_dump = std::path::PathBuf::from(firmware_dir).join("../.nickel_shim_debug.ncl");
-    std::fs::write(&shim_dump, &shim).ok();
-    eprintln!("[tfw] shim written to {}", shim_dump.display());
 
     let mut config: AppConfig =
         nickel_lang_core::deserialize::from_str(&shim)

@@ -45,11 +45,24 @@ pub fn collect_tasks(config: &AppConfig) -> BTreeMap<&str, &TaskConfig> {
 }
 
 /// Resolve a place to a CPU base address.
+///
+/// When `needs_execute` is true, prefer an executable mapping.
+/// When false, prefer a non-executable mapping — this places data
+/// regions into the ARM default memory map's RAM region (WBWA)
+/// rather than the Code region (WT), which matters for D-cache
+/// attribute agreement when the kernel accesses task memory via
+/// PRIVDEFENA.
 pub fn resolve_cpu_address(place: &Place, needs_execute: bool) -> Option<u64> {
     let offset = place.offset.unwrap_or(0);
 
+    // Prefer a mapping that matches the execute requirement.
     for mapping in &place.mappings {
-        if needs_execute && !mapping.execute {
+        let dominated = if needs_execute {
+            !mapping.execute
+        } else {
+            mapping.execute
+        };
+        if dominated {
             continue;
         }
         if offset + place.size <= mapping.size {
@@ -57,7 +70,7 @@ pub fn resolve_cpu_address(place: &Place, needs_execute: bool) -> Option<u64> {
         }
     }
 
-    // Fallback: any mapping
+    // Fallback: any mapping that fits.
     for mapping in &place.mappings {
         if offset + place.size <= mapping.size {
             return Some(mapping.address + offset);
@@ -167,19 +180,25 @@ fn advance_cursors_past(placed: &BTreeMap<RegionKey, Allocation>, cursors: &mut 
 
 /// Try to allocate `size` bytes (with `align`) in `place`.
 /// Returns the allocation if it fits, None otherwise.
+///
+/// The cursor always tracks in the canonical (first-fit) address space
+/// so that code and data regions sharing a physical device don't overlap.
+/// The allocation's base is translated to the CPU mapping selected by
+/// `needs_execute`.
 fn try_allocate(
     place: &Place,
     size: u64,
     align: u64,
+    needs_execute: bool,
     cursors: &mut CursorMap,
     reservations: &Reservations,
 ) -> Option<Allocation> {
-    let cpu_base = resolve_cpu_address(place, false)?;
+    let canonical_base = resolve_cpu_address(place, false)?;
     let pk = place_key(place);
     let pc = cursors.entry(pk).or_insert(PlaceCursor {
-        base: cpu_base,
-        cursor: cpu_base,
-        end: cursor_end(cpu_base, place, reservations),
+        base: canonical_base,
+        cursor: canonical_base,
+        end: cursor_end(canonical_base, place, reservations),
     });
     let aligned = (pc.cursor + align - 1) & !(align - 1);
     let end = aligned + size;
@@ -187,7 +206,11 @@ fn try_allocate(
         return None;
     }
     pc.cursor = end;
-    Some(Allocation { base: aligned, size })
+
+    let target_base = resolve_cpu_address(place, needs_execute)
+        .unwrap_or(canonical_base);
+    let offset = aligned - canonical_base;
+    Some(Allocation { base: target_base + offset, size })
 }
 
 /// Remaining bytes in a place's primary region.
@@ -318,7 +341,7 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
             continue;
         }
 
-        let alloc = try_allocate(place, size, align, &mut cursors, reservations)
+        let alloc = try_allocate(place, size, align, false, &mut cursors, reservations)
             .ok_or_else(|| LayoutError::OutOfSpace {
                 owner: format!("shared:{}", group_name),
                 region: group_name.clone(),
@@ -355,7 +378,7 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
         let size = req.size.unwrap();
         let align = req.align.unwrap_or(4);
 
-        let alloc = try_allocate(place, size, align, &mut cursors, reservations)
+        let alloc = try_allocate(place, size, align, req.execute, &mut cursors, reservations)
             .ok_or_else(|| LayoutError::OutOfSpace {
                 owner: key.0.clone(),
                 region: key.1.clone(),
@@ -454,6 +477,7 @@ impl Layout {
             size: u64,
             align: u64,
             place: Place,
+            execute: bool,
         }
 
         let mut regions: Vec<Region> = Vec::new();
@@ -481,6 +505,7 @@ impl Layout {
                 size,
                 align: req.align.unwrap_or(32),
                 place: place.clone(),
+                execute: req.execute,
             });
         }
 
@@ -508,14 +533,16 @@ impl Layout {
                 // as the base so the address is real. Downstream MPU
                 // setup must skip zero-size allocations to avoid an
                 // ARMv8-M RLAR wraparound.
-                let base = resolve_cpu_address(&r.place, false).unwrap_or(0);
+                let canonical = resolve_cpu_address(&r.place, false).unwrap_or(0);
+                let target = resolve_cpu_address(&r.place, r.execute).unwrap_or(canonical);
                 let pk = place_key(&r.place);
-                let cursor = cursors.get(&pk).map(|pc| pc.cursor).unwrap_or(base);
-                self.placed.insert(r.key.clone(), Allocation { base: cursor, size: 0 });
+                let cursor = cursors.get(&pk).map(|pc| pc.cursor).unwrap_or(canonical);
+                let offset = cursor - canonical;
+                self.placed.insert(r.key.clone(), Allocation { base: target + offset, size: 0 });
                 continue;
             }
 
-            let alloc = try_allocate(&r.place, r.size, r.align, &mut cursors, reservations)
+            let alloc = try_allocate(&r.place, r.size, r.align, r.execute, &mut cursors, reservations)
                 .ok_or_else(|| LayoutError::OutOfSpace {
                     owner: r.key.0.clone(),
                     region: r.key.1.clone(),

@@ -5,7 +5,7 @@ fun ctx => {
   priority = lib.workgroup.idle,
   features = ["insomniac"],
   regions = {
-    code  = { place = ctx.places.bulk },
+    code  = { place = ctx.places.code_generic, execute = true },
     stack = { place = ctx.places.fast, size = 256 },
     data  = { place = ctx.places.fast },
   },

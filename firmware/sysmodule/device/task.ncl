@@ -8,7 +8,7 @@ fun ctx => {
     ctx.tasks.sysmodule_rand,
   ],
   regions = {
-    code  = { place = ctx.places.bulk },
+    code  = { place = ctx.places.code_generic, execute = true },
     stack = { place = ctx.places.fast, size = 1024 },
     data  = { place = ctx.places.fast },
   },

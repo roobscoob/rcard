@@ -10,7 +10,7 @@ bare-panics = ["ipc/bare-panics"]
 [dependencies]
 ipc = { path = "../../modules/ipc" }
 sysmodule_rand_api = { path = "api", features = ["bare-panics"] }
-sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
+sysmodule_clocks_api = { path = "../clocks/api", features = ["bare-panics"] }
 userlib.workspace = true
 generated = { path = "../../modules/generated" }
 

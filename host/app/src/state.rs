@@ -738,7 +738,10 @@ impl BuildHandle {
         // hide the field.
         let (started_at, finished_at) =
             match fw.metadata.build.as_ref().and_then(|b| b.build_duration_ms) {
-                Some(ms) => (now - std::time::Duration::from_millis(ms), Some(now)),
+                Some(ms) => {
+                    let dur = std::time::Duration::from_millis(ms);
+                    (now.checked_sub(dur).unwrap_or(now), Some(now))
+                }
                 None => (now, Some(now)),
             };
         let mut crates: Vec<CrateProgress> = Vec::new();

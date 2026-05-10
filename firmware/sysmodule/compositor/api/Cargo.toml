@@ -11,6 +11,8 @@ host = ["ipc/host"]
 ipc = { path = "../../../modules/ipc" }
 rcard_log.workspace = true
 zerocopy = { version = "0.8", features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard-schema = { version = "0.2", default-features = false, features = ["derive"] }
 
 [target.'cfg(target_os = "none")'.dependencies]
 userlib.workspace = true

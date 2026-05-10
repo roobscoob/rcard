@@ -55,5 +55,10 @@ let miB = fun n => n * 1024 * 1024 in
     #ptc2        = { base = 0x4000C000, size = 0x1000 },
     #lpsys_aon   = { base = 0x40040000, size = 0x1000 },
     #bt_rfc      = { base = 0x40082000, size = 0x1000 },
+
+    i2c1        = { base = 0x5009C000, size = 0x1000 },
+    i2c2        = { base = 0x5009D000, size = 0x1000 },
+    i2c3        = { base = 0x5009E000, size = 0x1000 },
+    i2c4        = { base = 0x5009F000, size = 0x1000 },
   },
 }

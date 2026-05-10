@@ -27,6 +27,6 @@ fun memory =>
     logs     = flash.logs     & { unmapped = true },
     fs_main  = flash.fs_main  & { unmapped = true },
 
-    # Opt-in XIP-from-NOR. Discouraged.
-    xip_rom = memory.mpi1,
+    # XIP code placement for sysmodules that don't need RAM-resident .text
+    code_generic = memory.sram_bulk,
   }
