@@ -5,23 +5,24 @@ fun ctx => {
   priority = lib.workgroup.sysmodule,
   uses_peripherals = [
     "hpsys_aon",
-    "lpsys_sram",
     "mailbox1",
-
-    ## all of this shit got kitchen sinked
-    "mailbox2",
+    "lpsys",
+    "lpsys_sram",
     # "lpsys_rcc",
     # "patch",
     # "ptc2",
     # "bt_rfc",
     # "lpsys_aon",
+    # "mailbox2",
   ],
   depends_on = [
     ctx.tasks.sysmodule_log,
+    ctx.tasks.sysmodule_reactor,
   ],
   regions = {
     code  = { place = ctx.places.bulk },
-    stack = { place = ctx.places.fast, size = lib.kiB 20 },
+    # TODO: optimize stack
+    stack = { place = ctx.places.fast, size = lib.kiB 8 },
     data  = { place = ctx.places.bulk },
   },
 }

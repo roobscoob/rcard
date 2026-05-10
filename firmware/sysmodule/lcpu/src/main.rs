@@ -29,7 +29,7 @@ sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 /// Notification bit the kernel posts when MAILBOX2_CH1 IRQ fires for
 /// this task. Resolved at codegen time from `mailbox2.irqs.ch1` in the
 /// chip ncl + `uses_peripherals` in our task ncl.
-const MAILBOX2_BIT: u32 = generated::irq_bit!(sysmodule_lcpu, mailbox2_ch1);
+const MAILBOX2_BIT: u32 = generated::irq_bit!(sysmodule_lcpu, lpsys_mailbox2_ch1);
 
 /// Stack scratch for moving lease bytes through the mailbox. 256 B is
 /// the IPC message size limit so any one lease/reply fits in one pass.
@@ -291,16 +291,16 @@ fn wait_for_warmup() -> Result<(), LcpuInitError> {
 /// minus the holder/atomic clears (init() does those after).
 fn bringup_teardown() {
     if let Err(e) = bringup::lcpu_reset_and_halt() {
-        warn!("lcpu: teardown reset_and_halt failed: {:?}", e);
+        warn!("teardown reset_and_halt failed: {:?}", e);
     }
 }
 
 #[unsafe(export_name = "main")]
 fn main() -> ! {
-    info!("lcpu: starting");
+    info!("starting");
     ipc::server! {
         Lcpu: LcpuResource,
-        @irq(mailbox2_ch1) => || {
+        @irq(lpsys_mailbox2_ch1) => || {
             // Drain MISR / clear ICR.
             mailbox::ack_mailbox2_irq();
             // Post to reactor
