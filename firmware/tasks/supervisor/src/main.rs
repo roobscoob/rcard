@@ -44,26 +44,17 @@ fn usart_init() {
 
 fn usart_write_bytes(msg: &[u8]) {
     let u = usart();
+    // Acquire EXR lock: reading busy==0 atomically sets it to 1.
+    while u.exr().read().busy() {}
     for &b in msg {
-        // Acquire: spin until BUSY clears (read atomically sets it).
-        while u.exr().read().busy() {}
-
         while !u.isr().read().txe() {}
         u.tdr().write(|w| w.0 = b as u32);
-        while !u.isr().read().tc() {}   // must complete before we drop the lock
-
-        // Release.
-        u.exr().write(|w| w.set_busy(true));
     }
+    // Wait for transmission to fully complete before releasing.
+    while !u.isr().read().tc() {}
+    // Release EXR lock: write 1 to busy to unlock.
+    u.exr().write(|w| w.set_busy(true));
 }
-
-// fn usart_write_bytes(msg: &[u8]) {
-//     let u = usart();
-//     for &b in msg {
-//         while !u.isr().read().txe() {}
-//         u.tdr().write(|w| w.0 = b as u32);
-//     }
-// }
 
 fn usart_write_u32(mut val: u32) {
     if val == 0 {
@@ -394,7 +385,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 
 #[export_name = "main"]
 fn main() -> ! {
-    // usart_init();
+    usart_init();
     usart_write_tick_prefix();
     usart_write_bytes(b"supervisor: Awake\r\n");
 
