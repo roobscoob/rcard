@@ -63,13 +63,14 @@ pub unsafe fn apply_pin_config() {
     rmw(0x5000_B078, 0x3F, 0x07); // PINR: atim1 ch1 = PA07
                                   // PA08 -> haptic_en gpio out (FSEL=0, pull=down)
     rmw(0x5000_3054, 0x7F, 0x10);
-    // PA09 -> usart2 tx (FSEL=4, pull=down)
-    rmw(0x5000_3058, 0x7F, 0x14);
-    rmw(0x5000_B05C, 0x3F, 0x09); // PINR: usart2 tx = PA09
-                                  // PA10 -> usart2 rx (FSEL=4, pull=up, IE)
-    rmw(0x5000_305C, 0x7F, 0x74);
-    rmw(0x5000_B05C, 0x3F00, 0x0A00); // PINR: usart2 rx = PA10
-                                      // PA12 -> mpi2 cs (FSEL=1, pull=up)
+    // HACK: PA09/PA10 left unconfigured — usart2 is muxed to PA29/PA28
+    // below. Driving USART2_TX from PA09 in parallel was suspected of
+    // contention.
+    // // PA09 -> usart2 tx (FSEL=4, pull=down)
+    // rmw(0x5000_3058, 0x7F, 0x14);
+    // // PA10 -> usart2 rx (FSEL=4, pull=up, IE)
+    // rmw(0x5000_305C, 0x7F, 0x74);
+    // PA12 -> mpi2 cs (FSEL=1, pull=up)
     rmw(0x5000_3064, 0x7F, 0x31);
     // PA13 -> mpi2 dio1 (FSEL=1, pull=down, IE)
     rmw(0x5000_3068, 0x7F, 0x51);
@@ -95,9 +96,15 @@ pub unsafe fn apply_pin_config() {
     rmw(0x5000_309C, 0x7F, 0x70);
     // PA27 -> touch_int gpio in (FSEL=0, pull=up, IE)
     rmw(0x5000_30A0, 0x7F, 0x70);
-    // PA28 -> ws2812_en gpio out (FSEL=0, pull=down)
-    rmw(0x5000_30A4, 0x7F, 0x10);
-    // PA30 -> i2c3 sda (FSEL=4, pull=down, IE)
+    // PA28 -> usart2 rx (FSEL=4, pull=up, IE)
+    // HACK: was ws2812_en gpio out (FSEL=0, pull=down).
+    rmw(0x5000_30A4, 0x7F, 0x74);
+    rmw(0x5000_B05C, 0x3F00, 0x1C00); // PINR: usart2 rx = PA28
+                                      // PA29 -> usart2 tx (FSEL=4, pull=down)
+                                      // HACK: previously unconfigured.
+    rmw(0x5000_30A8, 0x7F, 0x14);
+    rmw(0x5000_B05C, 0x3F, 0x1D); // PINR: usart2 tx = PA29
+                                  // PA30 -> i2c3 sda (FSEL=4, pull=down, IE)
     rmw(0x5000_30AC, 0x7F, 0x54);
     rmw(0x5000_B050, 0x3F00, 0x1E00); // PINR: i2c3 sda = PA30
                                       // PA31 -> i2c3 scl (FSEL=4, pull=down, IE)

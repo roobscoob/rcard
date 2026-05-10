@@ -42,7 +42,9 @@ let miB = fun n => n * 1024 * 1024 in
 
     # bs cause we outta region
     # called mailbox2 cause build system hates me
-    mailbox2 = { base = 0x40000000, size = 0x80000, irqs = { ch1 = 58 } },
+    # 1 MiB covers LPSYS_RCC/MAILBOX2/PATCH/PTC2/LPSYS_AON + BT_RFC/PHY/MAC
+    # plus the CFO phase scratch at 0x4008_2790.
+    mailbox2 = { base = 0x40000000, size = 0x100000, irqs = { ch1 = 58 } },
 
     mailbox1    = { base = 0x50082000, size = 0x1000 },
     pmuc        = { base = 0x500CA000, size = 0x1000 },

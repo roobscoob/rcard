@@ -43,10 +43,7 @@ const WARMUP_MAX_WAKES: u32 = 100;
 struct LcpuResource;
 
 impl Lcpu for LcpuResource {
-    fn init(
-        _meta: ipc::Meta,
-        bd_addr: [u8; 6],
-    ) -> Result<Self, LcpuInitError> {
+    fn init(_meta: ipc::Meta, bd_addr: [u8; 6]) -> Result<Self, LcpuInitError> {
         info!("bringup starting");
 
         match do_bringup(bd_addr) {
@@ -78,9 +75,7 @@ impl Lcpu for LcpuResource {
         }
 
         let mut local = [0u8; SCRATCH_LEN];
-        let n = data
-            .read_range(0, &mut local[..total])
-            .unwrap_or(0);
+        let n = data.read_range(0, &mut local[..total]).unwrap_or(0);
         if n != total {
             // Partial read of the lease — treat as the lease being
             // shorter than its declared length.
@@ -163,6 +158,48 @@ fn do_bringup(bd_addr: [u8; 6]) -> Result<(), LcpuInitError> {
 
     // Phase 8 — release LCPU.
     bringup::release_lcpu();
+
+    // Give LCPU a moment to start its ROM, then sample state.
+    // ~1M cycles @ 240 MHz ≈ 4 ms.
+    cortex_m::asm::delay(1_000_000);
+    {
+        let aon = sifli_pac::LPSYS_AON;
+        let pmr = aon.pmr().read();
+        let slp = aon.slp_ctrl().read();
+        let issr = aon.issr().read();
+        info!(
+            "post-release: CPUWAIT={} SLEEP_STATUS={} LP_ACTIVE={}",
+            pmr.cpuwait() as u8,
+            slp.sleep_status() as u8,
+            issr.lp_active() as u8,
+        );
+    }
+
+    // Poll for ~200 ms to see if LCPU writes anything. We dump
+    // MAILBOX2.MISR (raises the IRQ when non-zero) and the LCPU→HCPU
+    // CircularBuf header so we can tell whether LCPU has posted bytes
+    // and/or rung the doorbell.
+    for tick in 0..10u32 {
+        cortex_m::asm::delay(5_000_000); // ~20 ms each pass
+        let misr = sifli_pac::MAILBOX2.misr(0).read().0;
+        let cb = addr::LCPU2HCPU_MB_CH1 as *const circular_buf::CircularBuf;
+        let (rd_ptr, wr_ptr, size, rd_idx, wr_idx) = unsafe {
+            (
+                core::ptr::read_volatile(core::ptr::addr_of!((*cb).rd_buffer_ptr)) as u32,
+                core::ptr::read_volatile(core::ptr::addr_of!((*cb).wr_buffer_ptr)) as u32,
+                core::ptr::read_volatile(core::ptr::addr_of!((*cb).buffer_size)) as i32,
+                core::ptr::read_volatile(core::ptr::addr_of!((*cb).read_idx_mirror)),
+                core::ptr::read_volatile(core::ptr::addr_of!((*cb).write_idx_mirror)),
+            )
+        };
+        info!(
+            "tick {}: MISR={} rx_cb size={} rd_ptr={} wr_ptr={} rd_idx_mirror={} wr_idx_mirror={}",
+            tick, misr, size, rd_ptr, wr_ptr, rd_idx, wr_idx,
+        );
+        if misr != 0 || wr_idx != 0 {
+            break;
+        }
+    }
     info!("phase 8 LCPU released; waiting for warmup");
 
     // Phase 9 — wait for the warmup HCI event. We block on the IRQ
@@ -219,10 +256,7 @@ fn wait_for_warmup() -> Result<(), LcpuInitError> {
         }
 
         if header[0] != 0x04 {
-            warn!(
-                "warmup frame had bad H4 type {}, expected 0x04",
-                header[0]
-            );
+            warn!("warmup frame had bad H4 type {}, expected 0x04", header[0]);
             return Err(LcpuInitError::WarmupBadFrame);
         }
 
@@ -264,14 +298,13 @@ fn bringup_teardown() {
 #[unsafe(export_name = "main")]
 fn main() -> ! {
     info!("lcpu: starting");
-    // ipc::server! {   
-    //     Lcpu: LcpuResource,
-    //     @irq(mailbox2_ch1) => || {
-    //         // Drain MISR / clear ICR.
-    //         mailbox::ack_mailbox2_irq();
-    //         // Post to reactor
-    //         Reactor::refresh(generated::notifications::GROUP_ID_LCPU_DATA, 0, 50, OverflowStrategy::Reject);
-    //     },
-    // }
-    loop { }
+    ipc::server! {
+        Lcpu: LcpuResource,
+        @irq(mailbox2_ch1) => || {
+            // Drain MISR / clear ICR.
+            mailbox::ack_mailbox2_irq();
+            // Post to reactor
+            Reactor::refresh(generated::notifications::GROUP_ID_LCPU_DATA, 0, 50, OverflowStrategy::Reject);
+        },
+    }
 }

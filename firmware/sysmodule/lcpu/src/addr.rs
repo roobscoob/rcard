@@ -7,8 +7,15 @@
 //! Sourced from sifli-rs `sifli-hal/data/sf32lb52x/sram_layout.toml`.
 
 /// HCPU→LCPU virtual-address translation: an HCPU SRAM address `X`
-/// appears to LCPU at `X + HCPU_TO_LCPU_OFFSET`.
+/// appears to LCPU at `X + HCPU_TO_LCPU_OFFSET`. Used when LCPU needs
+/// to read HCPU-side memory (e.g. the HCPU→LCPU mailbox TX buffer).
 pub const HCPU_TO_LCPU_OFFSET: usize = 0x0A00_0000;
+
+/// Offset between the HCPU and LCPU views of LPSYS_RAM. The LCPU sees
+/// LPSYS_RAM at its native base (`0x0040_0000`); HCPU sees the same
+/// physical memory at `0x2040_0000`. To convert an HCPU LPSYS_RAM
+/// pointer into the LCPU's view, *subtract* this offset.
+pub const LPSYS_RAM_HCPU_OFFSET: usize = 0x2000_0000;
 
 /// LCPU SRAM base in HCPU virtual address space.
 pub const LPSYS_RAM_BASE: usize = 0x2040_0000;
@@ -27,13 +34,16 @@ pub const ROM_CONFIG_SIZE_LETTER: usize = 0xCC;
 pub const PATCH_BUF_START: usize = 0x2040_5000;
 pub const PATCH_CODE_START: usize = 0x2040_500C;
 /// LCPU-view of `PATCH_CODE_START`. Used inside the PACH header so the
-/// LCPU ROM resolves the code at its own translated address.
-pub const PATCH_CODE_START_LCPU: u32 = (PATCH_CODE_START - HCPU_TO_LCPU_OFFSET) as u32;
+/// LCPU ROM resolves the code at its own translated address. LPSYS_RAM
+/// is shared physical memory — LCPU sees it `LPSYS_RAM_HCPU_OFFSET`
+/// lower than HCPU does, so subtract.
+pub const PATCH_CODE_START_LCPU: u32 = (PATCH_CODE_START - LPSYS_RAM_HCPU_OFFSET) as u32;
 pub const PATCH_CODE_SIZE: usize = 0x2FF4;
 
 /// LCPU→HCPU mailbox CH1 ring buffer (HCPU view).
-/// LCPU writes here; HCPU reads.
-pub const LCPU2HCPU_MB_CH1: usize = 0x2040_5C00;
+/// LCPU writes here; HCPU reads. Letter-rev address — A3 uses
+/// `0x2040_5C00` instead.
+pub const LCPU2HCPU_MB_CH1: usize = 0x2040_2800;
 
 /// IPC ring-buffer size (header + payload). 512 B per SDK convention.
 pub const IPC_MB_BUF_SIZE: usize = 0x200;

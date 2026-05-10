@@ -34,7 +34,7 @@ struct TxRing {
     payload: [u8; addr::IPC_MB_BUF_SIZE - core::mem::size_of::<CircularBuf>()],
 }
 
-#[unsafe(link_section = ".data")]
+// #[unsafe(link_section = ".data")]
 static mut HCPU_TX: TxRing = TxRing {
     header: CircularBuf {
         rd_buffer_ptr: core::ptr::null_mut(),
@@ -58,8 +58,7 @@ pub fn tx_ring_hcpu_addr() -> u32 {
 /// Idempotent — re-initializing zeroes the indices.
 pub fn init_tx_ring() {
     let cb_ptr = (&raw mut HCPU_TX) as *mut CircularBuf;
-    let payload_size =
-        (addr::IPC_MB_BUF_SIZE - core::mem::size_of::<CircularBuf>()) as i16;
+    let payload_size = (addr::IPC_MB_BUF_SIZE - core::mem::size_of::<CircularBuf>()) as i16;
 
     // wr_buffer_ptr stores the HCPU view of the payload (we write here).
     let pool_wr = unsafe { (&raw mut HCPU_TX.payload) as *mut u8 };

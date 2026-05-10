@@ -16,9 +16,12 @@ fun ctx => {
     # "bt_rfc",
     # "lpsys_aon",
   ],
+  depends_on = [
+    ctx.tasks.sysmodule_log,
+  ],
   regions = {
     code  = { place = ctx.places.bulk },
     stack = { place = ctx.places.fast, size = lib.kiB 20 },
-    data  = { place = ctx.places.fast },
+    data  = { place = ctx.places.bulk },
   },
 }
