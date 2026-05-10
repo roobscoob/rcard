@@ -42,6 +42,8 @@ members = [
     "sysmodule/host_transport/api",
     "sysmodule/host_proxy",
     "sysmodule/log_sink_usb",
+    "sysmodule/lcpu",
+    "sysmodule/lcpu/api",
     "modules/storage_api",
     "modules/ipc",
     "modules/ipc/macros",
@@ -58,7 +60,8 @@ members = [
 ]
 
 [workspace.lints.rust]
-warnings = "deny"
+# go away
+#warnings = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

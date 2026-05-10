@@ -28,6 +28,7 @@ fun args =>
       usart_event  = { min_priority = 15, max_priority = 15 },
       host_request = { min_priority = 20, max_priority = 20 },
       present      = { min_priority = 25, max_priority = 25 },
+      lcpu_data    = { min_priority = 50, max_priority = 50 },
     },
 
     trusted_senders = [
@@ -63,6 +64,5 @@ fun args =>
       # Include the USB log sink sysmodule so that the host can receive
       # logs from the stub firmware over USB.
       args.tasks.sysmodule_log_sink_usb,
-
     ],
   }
