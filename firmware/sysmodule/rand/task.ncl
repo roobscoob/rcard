@@ -3,12 +3,8 @@ let lib = import "../../lib.ncl" in
 fun ctx => {
   crate_info = import "./Cargo.toml",
   priority = lib.workgroup.core_sysmodule,
-<<<<<<< HEAD
-  uses_peripherals = ["trng", "hpsys_rcc"],
-=======
   depends_on = [ctx.tasks.sysmodule_clocks],
   uses_peripherals = ["trng"],
->>>>>>> main
   regions = {
     code  = { place = ctx.places.code_generic, execute = true },
     stack = { place = ctx.places.fast, size = lib.kiB 1 },
