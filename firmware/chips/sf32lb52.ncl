@@ -60,5 +60,6 @@ let miB = fun n => n * 1024 * 1024 in
     i2c2        = { base = 0x5009D000, size = 0x1000 },
     i2c3        = { base = 0x5009E000, size = 0x1000 },
     i2c4        = { base = 0x5009F000, size = 0x1000 },
+    gptim2      = { base = 0x500B0000, size = 0x1000, irqs = { irq = 71 } },
   },
 }

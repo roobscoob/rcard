@@ -20,6 +20,7 @@ impl Clocks for ClocksImpl {
             Peripheral::Trng => rcc.enr1().modify(|w| w.set_trng(true)),
             Peripheral::I2c2 => rcc.enr1().modify(|w| w.set_i2c2(true)),
             Peripheral::I2c3 => rcc.enr2().modify(|w| w.set_i2c3(true)),
+            Peripheral::Gptim2 => rcc.enr1().modify(|w| w.set_gptim2(true)),
         }
         Ok(())
     }
@@ -34,6 +35,7 @@ impl Clocks for ClocksImpl {
             Peripheral::Trng => rcc.enr1().modify(|w| w.set_trng(false)),
             Peripheral::I2c2 => rcc.enr1().modify(|w| w.set_i2c2(false)),
             Peripheral::I2c3 => rcc.enr2().modify(|w| w.set_i2c3(false)),
+            Peripheral::Gptim2 => rcc.enr1().modify(|w| w.set_gptim2(false)),
         }
         Ok(())
     }
@@ -75,6 +77,11 @@ impl Clocks for ClocksImpl {
                 rcc.rstr2().modify(|w| w.set_i2c3(true));
                 compiler_fence(Ordering::SeqCst);
                 rcc.rstr2().modify(|w| w.set_i2c3(false));
+            }
+            Peripheral::Gptim2 => {
+                rcc.rstr1().modify(|w| w.set_gptim2(true));
+                compiler_fence(Ordering::SeqCst);
+                rcc.rstr1().modify(|w| w.set_gptim2(false));
             }
         }
         Ok(())

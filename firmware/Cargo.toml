@@ -31,6 +31,8 @@ members = [
     "sysmodule/mpi/api",
     "sysmodule/cap1208",
     "sysmodule/cap1208/api",
+    "sysmodule/drv2603",
+    "sysmodule/drv2603/api",
     "sysmodule/log_sink_storage",
     "sysmodule/usb",
     "sysmodule/usb/api",

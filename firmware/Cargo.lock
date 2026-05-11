@@ -287,6 +287,7 @@ dependencies = [
  "rcard-log-macros",
  "sysmodule_cap1208_api",
  "sysmodule_compositor_api",
+ "sysmodule_drv2603_api",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
  "userlib",
@@ -1056,6 +1057,34 @@ dependencies = [
 
 [[package]]
 name = "sysmodule_display_api"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "postcard-schema",
+ "rcard-log",
+ "rcard-log-macros",
+ "serde",
+ "userlib",
+ "zerocopy",
+]
+
+[[package]]
+name = "sysmodule_drv2603"
+version = "0.1.0"
+dependencies = [
+ "generated",
+ "ipc",
+ "rcard-log",
+ "rcard-log-macros",
+ "sifli-pac",
+ "sysmodule_clocks_api",
+ "sysmodule_drv2603_api",
+ "sysmodule_log_api",
+ "userlib",
+]
+
+[[package]]
+name = "sysmodule_drv2603_api"
 version = "0.1.0"
 dependencies = [
  "ipc",

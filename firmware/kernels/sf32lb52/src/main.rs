@@ -110,9 +110,9 @@ pub unsafe fn apply_pin_config() {
     rmw(0x5000_3048, 0x7F, 0x11);
     // PA06 -> lcdc spi dio1 (FSEL=1, pull=down)
     rmw(0x5000_304C, 0x7F, 0x11);
-    // PA07 -> atim1 ch1 (FSEL=5, pull=down)
+    // PA07 -> gptim2 ch1 (FSEL=5, pull=down)
     rmw(0x5000_3050, 0x7F, 0x15);
-    rmw(0x5000_B078, 0x3F, 0x07); // PINR: atim1 ch1 = PA07
+    rmw(0x5000_B068, 0x3F, 0x07); // PINR: gptim2 ch1 = PA07
                                   // PA08 -> haptic_en gpio out (FSEL=0, pull=down)
     rmw(0x5000_3054, 0x7F, 0x10);
     // PA09 -> usart2 tx (FSEL=4, pull=down)

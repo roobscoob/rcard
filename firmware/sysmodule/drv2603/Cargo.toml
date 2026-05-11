@@ -1,0 +1,27 @@
+[package]
+name = "sysmodule_drv2603"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["bare-panics"]
+bare-panics = ["ipc/bare-panics"]
+
+[dependencies]
+generated = { path = "../../modules/generated" }
+ipc = { path = "../../modules/ipc" }
+sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
+rcard-log = { path = "../../../shared/log", features = ["writer"] }
+rcard-log-macros = { path = "../../../shared/log/macros" }
+sysmodule_drv2603_api = { path = "api" }
+sysmodule_clocks_api = { path = "../clocks/api", features = ["bare-panics"] }
+sysmodule_log_api = { path = "../log/api" }
+userlib.workspace = true
+
+[[bin]]
+name = "sysmodule_drv2603"
+test = false
+bench = false
+
+[lints]
+workspace = true
