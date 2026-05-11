@@ -187,7 +187,7 @@ impl<'a, const MAX_RESOURCES: usize> Server<'a, MAX_RESOURCES> {
         }
     }
 
-    fn dispatch_message(&mut self, msg: &crate::kern::Message<'_>) {
+    pub fn dispatch_message(&mut self, msg: &crate::kern::Message<'_>) {
         self.check_client_generation(msg.sender);
 
         if !(self.acl_fn)(msg.sender.task_index()) {

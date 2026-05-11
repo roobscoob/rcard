@@ -12,6 +12,7 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
+sysmodule_bluetooth_api::bind_bluetooth!(Bt = SLOTS.sysmodule_bluetooth);
 sysmodule_cap1208_api::bind_cap1208!(Cap1208 = SLOTS.sysmodule_cap1208);
 sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
 sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
@@ -269,6 +270,20 @@ fn main() -> ! {
         clicking: false,
         click_start: 0,
     }));
+
+    // BLE init
+    let mut name_buf = [0u8; 32];
+    let name = b"Charm";
+    name_buf[..name.len()].copy_from_slice(name);
+    let bd_addr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+    match Bt::init(bd_addr, name_buf, name.len() as u8) {
+        Ok(Ok(bt)) => {
+            info!("fob: BLE initialized");
+            let _ = bt.start_advertising();
+        }
+        Ok(Err(e)) => info!("fob: BLE init error: {}", e),
+        Err(e) => info!("fob: BLE IPC error: {}", e),
+    }
 
     info!("fob: touch bar display running, starting haptic sweep");
 

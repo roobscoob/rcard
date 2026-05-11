@@ -6,6 +6,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse_macro_input;
 
+mod async_server_macro;
 mod client;
 mod lease;
 mod metadata_json;
@@ -179,6 +180,32 @@ pub fn server(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as server_macro::ServerInput);
 
     server_macro::gen_server(&input).into()
+}
+
+// ===========================================================================
+// ipc::async_server!(...)
+// ===========================================================================
+
+/// Construct and run an IPC server with an integrated async executor.
+///
+/// Same syntax as `ipc::server!` plus `@async => [expr, ...]` to declare
+/// async futures that are polled cooperatively alongside IPC dispatch.
+///
+/// Futures live on main's stack frame (which never returns). The macro
+/// generates direct inline polling — no type erasure, no allocation.
+///
+/// ```ignore
+/// ipc::async_server! {
+///     Bluetooth: BluetoothResource,
+///     @irq(lpsys_mailbox2_ch1) => || { ack(); signal(); },
+///     @async => [ble_host()],
+/// }
+/// ```
+#[proc_macro]
+pub fn async_server(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as async_server_macro::AsyncServerInput);
+
+    async_server_macro::gen_async_server(&input).into()
 }
 
 // ===========================================================================

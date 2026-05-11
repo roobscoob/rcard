@@ -19,6 +19,9 @@ host = ["postcard-schema/alloc", "postcard-schema/use-std"]
 # boot). Task-level `bare-panics` only affects macro-generated call
 # sites; this flag covers panics that live inside the ipc rlib.
 bare-panics = []
+# Cooperative async executor for sysmodules that need to run async
+# futures (e.g. BLE host via trouble) alongside synchronous IPC dispatch.
+executor = ["dep:embassy-sync", "dep:embassy-time-driver", "dep:critical-section"]
 
 [dependencies]
 zerocopy = { version = "0.8.40", features = ["derive"] }
@@ -34,6 +37,9 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 userlib.workspace = true
 generated = { path = "../generated" }
 rcard-log = { path = "../../../shared/log", features = ["userlib", "writer"] }
+critical-section = { version = "1.2", optional = true, default-features = false, features = ["restore-state-none"] }
+embassy-sync = { version = "0.7", optional = true, default-features = false }
+embassy-time-driver = { version = "0.2", optional = true, default-features = false, features = ["tick-hz-1_000"] }
 
 # Host-only: plain rcard-log without the userlib feature, so the panic
 # macro still resolves on host builds. The `__rcard_log` re-export

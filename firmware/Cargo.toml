@@ -46,6 +46,8 @@ members = [
     "sysmodule/log_sink_usb",
     "sysmodule/lcpu",
     "sysmodule/lcpu/api",
+    "sysmodule/bluetooth",
+    "sysmodule/bluetooth/api",
     "modules/storage_api",
     "modules/ipc",
     "modules/ipc/macros",

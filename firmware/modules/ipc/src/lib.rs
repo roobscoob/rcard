@@ -12,6 +12,9 @@ pub mod kern;
 pub mod dispatch;
 #[cfg(target_os = "none")]
 pub mod call;
+#[cfg(target_os = "none")]
+#[cfg(feature = "executor")]
+pub mod executor;
 
 pub mod wire;
 
@@ -91,7 +94,7 @@ pub use handle::{
 #[cfg(target_os = "none")]
 pub use handle::Meta;
 pub use ipc_macros::{
-    __check_uses, allocation, interface, notification_handler, resource, server,
+    __check_uses, allocation, async_server, interface, notification_handler, resource, server,
 };
 #[cfg(target_os = "none")]
 pub use call::{call_send, call_send_unified, ipc_buf, parse_reply_envelope};
