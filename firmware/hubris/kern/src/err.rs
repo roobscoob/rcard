@@ -96,6 +96,16 @@ impl InteractFault {
         }
     }
 
+    /// Discharges both sides of this fault by forcing them on the given tasks.
+    pub fn apply_both(self, tasks: &mut [Task], src: usize, dst: usize) {
+        if let Some(f) = self.src {
+            let _ = task::force_fault(tasks, src, f);
+        }
+        if let Some(f) = self.dst {
+            let _ = task::force_fault(tasks, dst, f);
+        }
+    }
+
     /// Discharges the `dst` side of this fault, if any, by forcing it on the
     /// given task. Returns the `src` side.
     ///

@@ -7,17 +7,21 @@
 use core::ops::Range;
 
 use abi::{
-    FaultInfo, FaultSource, Generation, ReplyFaultReason, SchedState, TaskId,
-    TaskState, ULease, UsageError,
+    FaultInfo, FaultSource, Generation, ReplyFaultReason, RestoreMode,
+    SchedState, TaskId, TaskState, ULease, UsageError,
 };
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
+use abi::{BitSliceIter, HibernatedRegionsBitfield};
+
+use crate::descs::HibernationRegionDesc;
 use crate::descs::{
     Priority, RegionAttributes, RegionDesc, TaskDesc, TaskFlags,
     REGIONS_PER_TASK,
 };
 use crate::err::UserError;
-use crate::startup::HUBRIS_FAULT_NOTIFICATION;
+use crate::hibernate::SuspensionBuffer;
+use crate::startup::{with_hibernation_regions, HUBRIS_FAULT_NOTIFICATION};
 use crate::time::Timestamp;
 use crate::umem::USlice;
 
@@ -49,6 +53,9 @@ pub struct Task {
     /// Pointer to the ROM descriptor used to create this task, so it can be
     /// restarted.
     descriptor: &'static TaskDesc,
+
+    /// Reply buffer used for suspension
+    suspension_buffer: Option<SuspensionBuffer>,
 }
 
 impl Task {
@@ -69,19 +76,9 @@ impl Task {
             notifications: 0,
             save: crate::arch::SavedState::default(),
             timer: crate::task::TimerState::default(),
-        }
-    }
 
-    /// Tests whether this task has read access to `slice` as normal memory.
-    /// This is used to validate kernel accessses to the memory.
-    ///
-    /// This is shorthand for `can_access(slice, READ, DMA)`.
-    ///
-    /// This function is `must_use` because calling it without checking its
-    /// return value is incredibly suspicious.
-    #[must_use]
-    fn can_read<T>(&self, slice: &USlice<T>) -> bool {
-        self.can_access(slice, RegionAttributes::READ, RegionAttributes::DMA)
+            suspension_buffer: None,
+        }
     }
 
     /// Obtains access to the memory backing `slice` as a Rust slice, assuming
@@ -89,7 +86,7 @@ impl Task {
     /// memory from the kernel in validated form.
     ///
     /// This will treat memory marked `DEVICE` or `DMA` as inaccessible; see
-    /// `can_access` for more details.
+    /// `assert_access` for more details.
     pub fn try_read<'a, T>(
         &'a self,
         slice: &'a USlice<T>,
@@ -97,17 +94,16 @@ impl Task {
     where
         T: FromBytes + Immutable + KnownLayout,
     {
-        if self.can_read(slice) {
-            // Safety: assume_readable requires us to have validated that the
-            // slice refers to normal task memory, which we did on the previous
-            // line.
-            unsafe { Ok(slice.assume_readable()) }
-        } else {
-            Err(FaultInfo::MemoryAccess {
-                address: Some(slice.base_addr() as u32),
-                source: FaultSource::Kernel,
-            })
-        }
+        self.assert_access(
+            slice,
+            RegionAttributes::READ,
+            RegionAttributes::DMA,
+        )?;
+
+        // Safety: assume_readable requires us to have validated that the
+        // slice refers to normal task memory, which we did on the previous
+        // line.
+        unsafe { Ok(slice.assume_readable()) }
     }
 
     /// Obtains access to the memory backing `slice` as a Rust raw pointer
@@ -121,7 +117,7 @@ impl Task {
     /// instead.
     ///
     /// Like `try_read` this will treat memory marked `DEVICE` as inaccessible;
-    /// see `can_access` for more details.
+    /// see `assert_access` for more details.
     pub fn try_read_dma<'a, T>(
         &'a self,
         slice: &'a USlice<T>,
@@ -129,33 +125,16 @@ impl Task {
     where
         T: FromBytes + Immutable + KnownLayout,
     {
-        if self.can_access(
+        self.assert_access(
             slice,
             RegionAttributes::READ,
             RegionAttributes::empty(),
-        ) {
-            // Safety: assume_readable_raw requires us to have validated that
-            // the slice refers to normal task memory, which we did on the
-            // previous line.
-            unsafe { Ok(slice.assume_readable_raw()) }
-        } else {
-            Err(FaultInfo::MemoryAccess {
-                address: Some(slice.base_addr() as u32),
-                source: FaultSource::Kernel,
-            })
-        }
-    }
+        )?;
 
-    /// Tests whether this task has write access to `slice` as normal memory.
-    /// This is used to validate kernel accessses to the memory.
-    ///
-    /// This is shorthand for `can_access(slice, WRITE, DMA)`.
-    ///
-    /// This function is `must_use` because calling it without checking its
-    /// return value is incredibly suspicious.
-    #[must_use]
-    fn can_write<T>(&self, slice: &USlice<T>) -> bool {
-        self.can_access(slice, RegionAttributes::WRITE, RegionAttributes::DMA)
+        // Safety: assume_readable_raw requires us to have validated that
+        // the slice refers to normal task memory, which we did on the
+        // previous line.
+        unsafe { Ok(slice.assume_readable_raw()) }
     }
 
     /// Obtains access to the memory backing `slice` as a Rust slice, assuming
@@ -163,7 +142,7 @@ impl Task {
     /// memory from the kernel in validated form.
     ///
     /// This will treat memory marked `DEVICE` or `DMA` as inaccessible; see
-    /// `can_access` for more details.
+    /// `assert_access` for more details.
     pub fn try_write<'a, T>(
         &'a mut self,
         slice: &'a mut USlice<T>,
@@ -171,20 +150,37 @@ impl Task {
     where
         T: FromBytes + Immutable + KnownLayout,
     {
-        if self.can_write(slice) {
-            // Safety: assume_writable requires us to have validated that the
-            // slice refers to normal task memory, which we did on the previous
-            // line.
-            unsafe { Ok(slice.assume_writable()) }
-        } else {
-            Err(FaultInfo::MemoryAccess {
-                address: Some(slice.base_addr() as u32),
-                source: FaultSource::Kernel,
-            })
+        self.assert_access(
+            slice,
+            RegionAttributes::WRITE,
+            RegionAttributes::DMA,
+        )?;
+
+        // Safety: assume_writable requires us to have validated that the
+        // slice refers to normal task memory, which we did on the previous
+        // line.
+        unsafe { Ok(slice.assume_writable()) }
+    }
+
+    /// Calls `body` with an iterator over the regions that are currently
+    /// hibernated for this task. If the task is not suspended (or has no
+    /// hibernated regions), `body` receives an empty iterator and the
+    /// hibernation region table is never acquired.
+    pub fn with_hibernated_regions<R>(
+        &self,
+        body: impl FnOnce(BitSliceIter<'_, HibernationRegionDesc>) -> R,
+    ) -> R {
+        match self.state {
+            TaskState::Suspended {
+                hibernated_regions, ..
+            } => with_hibernation_regions(|regions| {
+                body(hibernated_regions.iter(regions))
+            }),
+            _ => body(BitSliceIter::empty()),
         }
     }
 
-    /// Tests whether this task has access to `slice` as normal memory with
+    /// Asserts that this task has access to `slice` as normal memory with
     /// *all* of the given `desired` attributes, and none of the `forbidden`
     /// attributes. This is used to validate kernel accesses to the memory.
     ///
@@ -202,26 +198,42 @@ impl Task {
     /// A normal call would pass something like `RegionAttributes::READ`.
     ///
     /// Note that all tasks can "access" any empty slice.
-    ///
-    /// This function is `must_use` because calling it without checking its
-    /// return value is incredibly suspicious.
-    #[must_use]
-    fn can_access<T>(
+    fn assert_access<T>(
         &self,
         slice: &USlice<T>,
         desired: RegionAttributes,
         forbidden: RegionAttributes,
-    ) -> bool {
+    ) -> Result<(), FaultInfo> {
         // Forceably include DEVICE in the forbidden set, whether or not the
         // caller thought about it.
         let forbidden = forbidden | RegionAttributes::DEVICE;
 
         // Delegate the actual tests to the kerncore crate, but with our
         // attribute-sensing customization:
-        kerncore::can_access(slice, self.region_table(), |region| {
-            region.attributes.contains(desired)
-                && !region.attributes.intersects(forbidden)
-        })
+        let can_access =
+            kerncore::can_access(slice, self.region_table(), |region| {
+                region.attributes.contains(desired)
+                    && !region.attributes.intersects(forbidden)
+            });
+
+        if !can_access {
+            return Err(FaultInfo::MemoryAccess {
+                address: Some(slice.base_addr() as u32),
+                source: FaultSource::Kernel,
+            });
+        }
+
+        let is_hibernated = self.with_hibernated_regions(|mut regions| {
+            regions.any(|r| r.overlaps_slice(slice))
+        });
+
+        if is_hibernated {
+            return Err(FaultInfo::HibernatedMemoryAccess {
+                address: slice.base_addr() as u32,
+            });
+        }
+
+        Ok(())
     }
 
     /// Posts a set of notification bits (which might be empty) to this task. If
@@ -243,8 +255,9 @@ impl Task {
                 // A bit the task is interested in has newly become set!
                 // Interrupt it.
                 self.save.set_recv_result(TaskId::KERNEL, firing, 0, 0, 0);
-                self.state = TaskState::Healthy(SchedState::Runnable);
-                return true;
+                self.set_healthy_state(SchedState::Runnable);
+
+                return !self.is_suspended();
             }
         }
         false
@@ -315,6 +328,9 @@ impl Task {
     /// This does not honor the `START_AT_BOOT` task flag, because this is not a
     /// system reboot. The task will be left in `Stopped` state. If you would
     /// like to run the task after reinitializing it, you must do so explicitly.
+    ///
+    /// PRECONDITION:
+    /// Task must not be suspended.
     pub fn reinitialize(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.timer = TimerState::default();
@@ -364,9 +380,21 @@ impl Task {
     ///
     /// If you attempt to use this to bring a task out of fault state.
     pub fn set_healthy_state(&mut self, s: SchedState) {
-        let last = core::mem::replace(&mut self.state, s.into());
-        if let TaskState::Faulted { .. } = last {
-            panic!();
+        match &mut self.state {
+            // If we are currently in a healthy or hibernated (healthy) state, update it
+            TaskState::Healthy(state) => *state = s,
+            TaskState::Suspended {
+                original_fault_info: None,
+                original_healthy_state: state,
+                ..
+            } => *state = s,
+
+            // otherwise our invariants are broken, panic.
+            TaskState::Faulted { .. } => panic!(),
+            TaskState::Suspended {
+                original_fault_info: Some(_),
+                ..
+            } => panic!(),
         }
     }
 
@@ -378,6 +406,213 @@ impl Task {
     /// Returns a mutable reference to the saved machine state for the task.
     pub fn save_mut(&mut self) -> &mut crate::arch::SavedState {
         &mut self.save
+    }
+
+    /// Informs a task that a region is now hibernated.
+    pub fn hibernate_region(
+        &mut self,
+        regions: &[HibernationRegionDesc],
+        hibernating: usize,
+    ) {
+        let region = regions[hibernating];
+
+        if !self.region_table().iter().any(|r| region.overlaps(r)) {
+            // This region doesn't overlap any of the task's regions, so we
+            // don't care about it.
+            return;
+        }
+
+        match &mut self.state {
+            TaskState::Healthy(original_healthy_state) => {
+                self.state = TaskState::Suspended {
+                    original_fault_info: None,
+                    original_healthy_state: *original_healthy_state,
+                    hibernated_regions: HibernatedRegionsBitfield::of_region(
+                        hibernating as u32,
+                    ),
+                    debug_request: false,
+                };
+            }
+            TaskState::Faulted {
+                fault,
+                original_state,
+            } => {
+                self.state = TaskState::Suspended {
+                    original_fault_info: Some(*fault),
+                    original_healthy_state: *original_state,
+                    hibernated_regions: HibernatedRegionsBitfield::of_region(
+                        hibernating as u32,
+                    ),
+                    debug_request: false,
+                };
+            }
+            TaskState::Suspended {
+                hibernated_regions, ..
+            } => {
+                hibernated_regions.insert(hibernating as u32);
+            }
+        }
+    }
+
+    /// Informs a task that a region is restored
+    /// Returns `true` if this caused the task to enter a faulted state.
+    pub fn restore_region(
+        &mut self,
+        restoring: usize,
+        mode: RestoreMode,
+    ) -> bool {
+        let TaskState::Suspended {
+            original_fault_info,
+            hibernated_regions,
+            ..
+        } = &mut self.state
+        else {
+            // We don't care.
+            return false;
+        };
+
+        // If we are restoring a region that previously blocked us
+        // and that region was lost, we should fault ourselves.
+        if hibernated_regions.take(restoring as u32)
+            && matches!(mode, RestoreMode::Lost)
+        {
+            match original_fault_info {
+                // if we already had a lost region, just add this one to the set
+                Some(FaultInfo::LostRegion { regions }) => {
+                    regions.insert(restoring as u32)
+                }
+
+                // otherwise, overwrite any original fault info with a lost region
+                // fault for this region
+                other => {
+                    *other = Some(FaultInfo::LostRegion {
+                        regions: HibernatedRegionsBitfield::of_region(
+                            restoring as u32,
+                        ),
+                    })
+                }
+            }
+        }
+
+        self.try_restore()
+    }
+
+    pub fn request_debug(&mut self) {
+        match &mut self.state {
+            TaskState::Healthy(original_healthy_state) => {
+                self.state = TaskState::Suspended {
+                    original_fault_info: None,
+                    original_healthy_state: *original_healthy_state,
+                    hibernated_regions: HibernatedRegionsBitfield::empty(),
+                    debug_request: true,
+                };
+            }
+            TaskState::Faulted {
+                fault,
+                original_state,
+            } => {
+                self.state = TaskState::Suspended {
+                    original_fault_info: Some(*fault),
+                    original_healthy_state: *original_state,
+                    hibernated_regions: HibernatedRegionsBitfield::empty(),
+                    debug_request: true,
+                };
+            }
+            TaskState::Suspended { debug_request, .. } => {
+                *debug_request = true;
+            }
+        }
+    }
+
+    /// Returns `true` if this caused the task to enter a faulted state.
+    pub fn disable_debug(&mut self) -> bool {
+        let TaskState::Suspended { debug_request, .. } = &mut self.state else {
+            // We don't care.
+            return false;
+        };
+
+        *debug_request = false;
+
+        self.try_restore()
+    }
+
+    /// Returns `true` if the task transitioned to a faulted state.
+    fn try_restore(&mut self) -> bool {
+        let TaskState::Suspended {
+            original_fault_info,
+            original_healthy_state,
+            hibernated_regions,
+            debug_request,
+        } = self.state
+        else {
+            return false;
+        };
+
+        if !hibernated_regions.is_empty() || debug_request {
+            return false;
+        }
+
+        // Alright! Time to restore.
+
+        // ASSERT: debug_request = false
+        //         hibernated_regions = empty
+
+        let buffer = self.suspension_buffer.take();
+
+        self.state = match (original_fault_info, original_healthy_state, buffer)
+        {
+            // If we have a fault, restore to faulted state with that fault.
+            (Some(fault), healthy_state, _) => TaskState::Faulted {
+                fault,
+                original_state: healthy_state,
+            },
+
+            // If we have a pending reply to action, restore to a healthy state
+            // and apply the reply
+            (None, SchedState::InSuspendedReply(_), Some(buffer)) => {
+                match self.save().as_send_args().response {
+                    Err(e) => TaskState::Faulted {
+                        fault: FaultInfo::SyscallUsage(e),
+                        original_state: original_healthy_state,
+                    },
+                    Ok(mut dest_slice) => {
+                        match self.try_write(&mut dest_slice) {
+                            Err(fault) => TaskState::Faulted {
+                                fault,
+                                original_state: original_healthy_state,
+                            },
+                            Ok(dest) => {
+                                let len = buffer.len().min(dest.len());
+                                dest[..len].copy_from_slice(&buffer[..len]);
+                                TaskState::Healthy(SchedState::Runnable)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we've encountered a strange state, kernel panic
+            (None, SchedState::InSuspendedReply(_), None) => {
+                panic!("Task in InSuspendedReply state but has no pending reply buffer")
+            }
+            (None, _, Some(_)) => {
+                // while we do expect the Healthy -> Faulted transition
+                // while InSuspendedReply, we don't expect to be able to
+                // be able to restore from a fault during suspension,
+                // or to be able to change our healthy state while
+                // InSuspendedReply.
+                panic!("Task has pending reply buffer but is in a healthy non-reply state")
+            }
+
+            // Otherwise, just restore to the original healthy state.
+            (None, healthy_state, None) => TaskState::Healthy(healthy_state),
+        };
+
+        matches!(self.state, TaskState::Faulted { .. })
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        matches!(self.state, TaskState::Suspended { .. })
     }
 }
 
@@ -894,6 +1129,7 @@ pub fn force_fault(
     fault: FaultInfo,
 ) -> NextTask {
     let task = &mut tasks[index];
+
     task.state = match task.state {
         TaskState::Healthy(sched) => TaskState::Faulted {
             original_state: sched,
@@ -907,9 +1143,22 @@ pub fn force_fault(
                 original_state,
             }
         }
+        TaskState::Suspended {
+            original_healthy_state,
+            debug_request,
+            hibernated_regions,
+            original_fault_info: _,
+        } => TaskState::Suspended {
+            original_healthy_state,
+            original_fault_info: Some(fault),
+            hibernated_regions,
+            debug_request,
+        },
     };
-    let supervisor_awoken =
-        tasks[0].post(NotificationSet(HUBRIS_FAULT_NOTIFICATION));
+
+    let supervisor_awoken = !task.is_suspended()
+        && tasks[0].post(NotificationSet(HUBRIS_FAULT_NOTIFICATION));
+
     if supervisor_awoken {
         NextTask::Specific(0)
     } else {
@@ -921,4 +1170,27 @@ pub fn force_fault(
 /// `tasks[index]`.
 pub fn current_id(tasks: &[Task], index: usize) -> TaskId {
     TaskId::for_index_and_gen(index, tasks[index].generation())
+}
+
+/// Reads reply data from the caller's memory and buffers it on the
+/// suspended callee, to be delivered when the callee's region is restored.
+///
+/// Returns the number of bytes buffered, matching `safe_copy`'s contract.
+pub fn set_suspension_reply(
+    tasks: &mut [Task],
+    caller: usize,
+    src_slice: USlice<u8>,
+    callee: usize,
+    _dest_slice: USlice<u8>,
+) -> Result<usize, crate::err::InteractFault> {
+    let data = tasks[caller]
+        .try_read(&src_slice)
+        .map_err(crate::err::InteractFault::in_src)?;
+
+    let buffer = SuspensionBuffer::ok(data)
+        .expect("reply exceeded SuspensionBuffer capacity after size check");
+
+    let len = buffer.len();
+    tasks[callee].suspension_buffer = Some(buffer);
+    Ok(len)
 }

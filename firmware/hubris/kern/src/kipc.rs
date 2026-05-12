@@ -4,13 +4,22 @@
 
 //! Implementation of IPC operations on the virtual kernel task.
 
-use abi::{FaultInfo, Kipcnum, SchedState, TaskState, UsageError};
+use abi::{
+    FaultInfo, HibernateRegionMessageError, Kipcnum, LeaseAttributes,
+    ReadHibernatedRegionMessageError, ReinitTaskError,
+    RestoreRegionMessageError, SchedState, TaskState, UsageError,
+    WriteHibernatedRegionMessageError,
+};
 use core::mem::size_of;
 use unwrap_lite::UnwrapLite;
 
 use crate::arch;
+use crate::descs::{HibernationRegionDesc, TaskFlags};
 use crate::err::UserError;
-use crate::task::{current_id, ArchState, NextTask, Task};
+use crate::syscalls::deliver;
+use crate::task::{
+    check_task_id_against_table, current_id, ArchState, NextTask, Task,
+};
 use crate::umem::{safe_copy, USlice};
 
 /// Message dispatcher.
@@ -46,6 +55,21 @@ pub fn handle_kernel_message(
         Ok(Kipcnum::ReadPanicMessage) => {
             read_panic_message(tasks, caller, args.message?, args.response?)
         }
+
+        Ok(Kipcnum::HibernateRegion) => {
+            hibernate_region(tasks, caller, args.message?, args.response?)
+        }
+        Ok(Kipcnum::ReadHibernatedRegion) => {
+            read_hibernated_region(tasks, caller, args.message?)
+        }
+        Ok(Kipcnum::WriteHibernatedRegion) => {
+            write_hibernated_region(tasks, caller, args.message?)
+        }
+        Ok(Kipcnum::RestoreRegion) => {
+            restore_region(tasks, caller, args.message?)
+        }
+        Ok(Kipcnum::SuspendTask) => suspend_task(tasks, caller, args.message?),
+        Ok(Kipcnum::RestoreTask) => restore_task(tasks, caller, args.message?),
 
         _ => {
             // Task has sent an unknown message to the kernel. That's bad.
@@ -129,6 +153,14 @@ fn reinit_task(
         )));
     }
     let old_id = current_id(tasks, index);
+
+    if tasks[index].is_suspended() {
+        return Err(UserError::Recoverable(
+            ReinitTaskError::TaskSuspended as u32,
+            NextTask::Same,
+        ));
+    }
+
     tasks[index].reinitialize();
     if start {
         tasks[index].set_healthy_state(SchedState::Runnable);
@@ -149,22 +181,28 @@ fn reinit_task(
 
         // We'll skip processing faulted tasks, because we don't want to lose
         // information in their fault records by changing their states.
-        if let TaskState::Healthy(sched) = task.state() {
-            match sched {
+        match task.state() {
+            TaskState::Healthy(
                 SchedState::InRecv(Some(peer))
                 | SchedState::InSend(peer)
-                | SchedState::InReply(peer)
-                    if peer == &old_id =>
-                {
-                    // Please accept our sincere condolences on behalf of the
-                    // kernel.
-                    let code = abi::dead_response_code(new_gen);
+                | SchedState::InReply(peer),
+            )
+            | TaskState::Suspended {
+                original_fault_info: None,
+                original_healthy_state:
+                    SchedState::InRecv(Some(peer))
+                    | SchedState::InSend(peer)
+                    | SchedState::InReply(peer),
+                ..
+            } if peer == &old_id => {
+                // Please accept our sincere condolences on behalf of the
+                // kernel.
+                let code = abi::dead_response_code(new_gen);
 
-                    task.save_mut().set_error_response(code);
-                    task.set_healthy_state(SchedState::Runnable);
-                }
-                _ => (),
+                task.save_mut().set_error_response(code);
+                task.set_healthy_state(SchedState::Runnable);
             }
+            _ => (),
         }
     }
 
@@ -566,7 +604,14 @@ fn read_panic_message(
             // If the caller's buffer was invalid, they take a fault.
             Err(UserError::Unrecoverable(fault))
         }
-        Err(_) => {
+        Err(e) => {
+            if matches!(e.src, Some(FaultInfo::HibernatedMemoryAccess { .. })) {
+                return Err(UserError::Recoverable(
+                    abi::ReadPanicMessageError::PanicBufferHibernated as u32,
+                    NextTask::Same,
+                ));
+            }
+
             // Source region was bad, but it's not the caller's fault; give them
             // a recoverable error.
             Err(UserError::Recoverable(
@@ -575,4 +620,386 @@ fn read_panic_message(
             ))
         }
     }
+}
+
+fn overlaps_protected_memory(
+    region: &HibernationRegionDesc,
+    tasks: &[Task],
+) -> bool {
+    // Check kernel memory
+    for kr in arch::KERNEL_REGIONS {
+        if region.overlaps(*kr) {
+            return true;
+        }
+    }
+
+    // Check supervisor (task 0, always protected) and any PROTECTED tasks
+    for (i, task) in tasks.iter().enumerate() {
+        if i == 0 || task.descriptor().flags.contains(TaskFlags::PROTECTED) {
+            if task.region_table().iter().any(|r| region.overlaps(r)) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn hibernate_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+    response: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let (base, size): (u32, u32) =
+        deserialize_message(&tasks[caller], message)?;
+
+    let result: Result<abi::HibernationEventId, HibernateRegionMessageError> =
+        crate::startup::with_hibernation_regions(|regions| {
+            let (i, region) = regions
+                .iter_mut()
+                .enumerate()
+                .find(|(_, r)| r.base == base && r.size == size)
+                .ok_or(HibernateRegionMessageError::NoMatchingRegion)?;
+
+            if overlaps_protected_memory(region, tasks) {
+                return Err(HibernateRegionMessageError::ProtectedMemory);
+            }
+
+            let event_id = region.hibernate(i as u8).map_err(|e| match e {
+                crate::descs::SuspendError::AlreadyActive => {
+                    HibernateRegionMessageError::AlreadyHibernated
+                }
+                crate::descs::SuspendError::GenerationOverflow => {
+                    HibernateRegionMessageError::GenerationOverflow
+                }
+            })?;
+
+            for task in tasks.iter_mut() {
+                task.hibernate_region(regions, i);
+            }
+
+            Ok(event_id)
+        });
+
+    match result {
+        Ok(event_id) => {
+            let response_len =
+                serialize_response(&mut tasks[caller], response, &event_id)?;
+            tasks[caller]
+                .save_mut()
+                .set_send_response_and_length(0, response_len);
+            Ok(NextTask::Same)
+        }
+        Err(e) => Err(UserError::Recoverable(e as u32, NextTask::Same)),
+    }
+}
+
+fn read_hibernated_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let (addr, len): (u32, u32) = deserialize_message(&tasks[caller], message)?;
+
+    let contained = crate::startup::with_hibernation_regions(|regions| {
+        regions
+            .iter()
+            .any(|r| r.active && r.contains_span(addr, len))
+    });
+    if !contained {
+        return Err(UserError::Recoverable(
+            ReadHibernatedRegionMessageError::NotHibernated as u32,
+            NextTask::Same,
+        ));
+    }
+
+    let send_args = tasks[caller].save().as_send_args();
+    let lease_table = send_args
+        .lease_table
+        .map_err(|e| UserError::Unrecoverable(FaultInfo::SyscallUsage(e)))?;
+    let leases = tasks[caller].try_read(&lease_table)?;
+    let lease = leases.get(0).cloned().ok_or(UserError::Recoverable(
+        ReadHibernatedRegionMessageError::MissingWritebackLease as u32,
+        NextTask::Same,
+    ))?;
+
+    if !lease.attributes.contains(LeaseAttributes::WRITE) {
+        return Err(UserError::Recoverable(
+            ReadHibernatedRegionMessageError::WritebackLeaseNotWritable as u32,
+            NextTask::Same,
+        ));
+    }
+
+    let mut lease_slice = USlice::from(&lease);
+    let dest = tasks[caller].try_write(&mut lease_slice)?;
+
+    let copy_len = (len as usize).min(dest.len());
+    // Safety: we validated addr..addr+len is within an active hibernation
+    // region. The kernel has unrestricted memory access.
+    let src =
+        unsafe { core::slice::from_raw_parts(addr as *const u8, copy_len) };
+    dest[..copy_len].copy_from_slice(src);
+
+    tasks[caller]
+        .save_mut()
+        .set_send_response_and_length(0, copy_len);
+    Ok(NextTask::Same)
+}
+
+fn write_hibernated_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let (addr, len): (u32, u32) = deserialize_message(&tasks[caller], message)?;
+
+    let contained = crate::startup::with_hibernation_regions(|regions| {
+        regions
+            .iter()
+            .any(|r| r.active && r.contains_span(addr, len))
+    });
+    if !contained {
+        return Err(UserError::Recoverable(
+            WriteHibernatedRegionMessageError::NotHibernated as u32,
+            NextTask::Same,
+        ));
+    }
+
+    let send_args = tasks[caller].save().as_send_args();
+    let lease_table = send_args
+        .lease_table
+        .map_err(|e| UserError::Unrecoverable(FaultInfo::SyscallUsage(e)))?;
+    let leases = tasks[caller].try_read(&lease_table)?;
+    let lease = leases.get(0).cloned().ok_or(UserError::Recoverable(
+        WriteHibernatedRegionMessageError::MissingSourceLease as u32,
+        NextTask::Same,
+    ))?;
+
+    if !lease.attributes.contains(LeaseAttributes::READ) {
+        return Err(UserError::Recoverable(
+            WriteHibernatedRegionMessageError::SourceLeaseNotReadable as u32,
+            NextTask::Same,
+        ));
+    }
+
+    let lease_slice = USlice::from(&lease);
+    let src = tasks[caller].try_read(&lease_slice)?;
+
+    let copy_len = (len as usize).min(src.len());
+    // Safety: we validated addr..addr+len is within an active hibernation
+    // region. The kernel has unrestricted memory access.
+    let dest =
+        unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, copy_len) };
+    dest[..copy_len].copy_from_slice(&src[..copy_len]);
+
+    tasks[caller]
+        .save_mut()
+        .set_send_response_and_length(0, copy_len);
+    Ok(NextTask::Same)
+}
+
+/// After restoring tasks from suspension, reconcile IPC state.
+///
+/// Tasks restored to InRecv may have senders already blocked in InSend,
+/// and tasks restored to InSend may have peers already blocked in InRecv.
+/// Since neither side will execute a syscall to trigger delivery, we do
+/// it here.
+fn reconcile_ipc(tasks: &mut [Task]) {
+    // We iterate by index because deliver needs &mut [Task].
+    // Delivery mutates both tasks' states, so a task matched in one
+    // iteration won't re-match in a later one.
+    for i in 0..tasks.len() {
+        let caller_id = current_id(tasks, i);
+
+        match *tasks[i].state() {
+            // Task is waiting for a message. Look for a matching sender.
+            TaskState::Healthy(SchedState::InRecv(specific_sender)) => {
+                if let Some(sender) =
+                    find_sender(tasks, i, caller_id, specific_sender)
+                {
+                    match deliver(tasks, sender, i) {
+                        Ok(()) => {}
+                        Err(interact) => interact.apply_both(tasks, sender, i),
+                    }
+                }
+            }
+
+            // Task is trying to send. Check if the peer can accept.
+            // The index can't be out of range (validated at SEND entry),
+            // and a stale generation (peer restarted) is already handled
+            // by reinit_task's walk of suspended tasks.
+            TaskState::Healthy(SchedState::InSend(peer_id)) => {
+                if let Ok(peer) = check_task_id_against_table(tasks, peer_id) {
+                    if tasks[peer].state().can_accept_message_from(caller_id) {
+                        match crate::syscalls::deliver(tasks, i, peer) {
+                            Ok(()) => {}
+                            Err(interact) => {
+                                interact.apply_both(tasks, i, peer)
+                            }
+                        }
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+}
+
+/// Find the highest-priority sender targeting `receiver_id`, respecting
+/// closed-receive constraints.
+fn find_sender(
+    tasks: &[Task],
+    receiver: usize,
+    receiver_id: abi::TaskId,
+    specific_sender: Option<abi::TaskId>,
+) -> Option<usize> {
+    match specific_sender {
+        Some(sender_id) => {
+            let sender = sender_id.index();
+            if sender < tasks.len()
+                && tasks[sender].state().is_sending_to(receiver_id)
+            {
+                Some(sender)
+            } else {
+                None
+            }
+        }
+        None => crate::task::priority_scan(receiver, tasks, |t| {
+            t.state().is_sending_to(receiver_id)
+        })
+        .map(|(idx, _)| idx),
+    }
+}
+
+fn restore_region(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let (event_id, mode): (abi::HibernationEventId, abi::RestoreMode) =
+        deserialize_message(&tasks[caller], message)?;
+
+    let index = event_id.index() as usize;
+
+    // Validate and deactivate the region inside the lock.
+    let result = crate::startup::with_hibernation_regions(|regions| {
+        let region = regions
+            .get_mut(index)
+            .ok_or(RestoreRegionMessageError::InvalidEventId)?;
+        region
+            .restore(event_id)
+            .map_err(|_| RestoreRegionMessageError::InvalidEventId)
+    });
+
+    if let Err(e) = result {
+        return Err(UserError::Recoverable(e as u32, NextTask::Same));
+    }
+
+    // Walk tasks outside the lock. Restore_region may trigger try_restore,
+    // which can re-acquire the hibernation regions lock via assert_access.
+    let mut any_faulted = false;
+    for task in tasks.iter_mut() {
+        any_faulted |= task.restore_region(index, mode);
+    }
+
+    if any_faulted {
+        let _ = tasks[0].post(crate::task::NotificationSet(
+            crate::startup::HUBRIS_FAULT_NOTIFICATION,
+        ));
+    }
+
+    // Reconcile IPC state: restored tasks may be in InRecv or InSend
+    // with a matching peer already blocked on the other side.
+    reconcile_ipc(tasks);
+
+    tasks[caller].save_mut().set_send_response_and_length(0, 0);
+    Ok(NextTask::Same)
+}
+
+fn suspend_task(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let index: u32 = deserialize_message(&tasks[caller], message)?;
+    let index = index as usize;
+
+    if index == 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::IllegalTask,
+        )));
+    }
+    if index >= tasks.len() {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::TaskOutOfRange,
+        )));
+    }
+
+    tasks[index].request_debug();
+    tasks[caller].save_mut().set_send_response_and_length(0, 0);
+    Ok(NextTask::Same)
+}
+
+fn restore_task(
+    tasks: &mut [Task],
+    caller: usize,
+    message: USlice<u8>,
+) -> Result<NextTask, UserError> {
+    if caller != 0 {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::NotSupervisor,
+        )));
+    }
+
+    let index: u32 = deserialize_message(&tasks[caller], message)?;
+    let index = index as usize;
+
+    if index >= tasks.len() {
+        return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            UsageError::TaskOutOfRange,
+        )));
+    }
+
+    if tasks[index].disable_debug() {
+        let _ = tasks[0].post(crate::task::NotificationSet(
+            crate::startup::HUBRIS_FAULT_NOTIFICATION,
+        ));
+    }
+
+    reconcile_ipc(tasks);
+
+    tasks[caller].save_mut().set_send_response_and_length(0, 0);
+    Ok(NextTask::Same)
 }
