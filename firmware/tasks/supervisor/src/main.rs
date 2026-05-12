@@ -3,7 +3,7 @@
 
 use core::mem::MaybeUninit;
 
-use hubris_abi::{FaultInfo, FaultSource, SchedState, TaskState};
+use hubris_abi::{FaultInfo, FaultSource, HibernatedRegionsBitfield, SchedState, TaskState};
 use sifli_pac::usart::vals::M;
 
 use generated::tasks::TASK_NAMES;
@@ -218,7 +218,27 @@ fn usart_write_sched_state(state: &SchedState) {
             usart_write_bytes(b")");
         }
         SchedState::InRecv(None) => usart_write_bytes(b"InRecv(*)"),
+        SchedState::InSuspendedReply(tid) => {
+            usart_write_bytes(b"InSuspendedReply(");
+            usart_write_task_id(*tid);
+            usart_write_bytes(b")");
+        }
     }
+}
+
+fn usart_write_hibernated_regions(bits: &HibernatedRegionsBitfield) {
+    usart_write_bytes(b"[");
+    let mut first = true;
+    for i in 0..32u32 {
+        if bits.contains(i) {
+            if !first {
+                usart_write_bytes(b",");
+            }
+            usart_write_u32(i);
+            first = false;
+        }
+    }
+    usart_write_bytes(b"]");
 }
 
 fn usart_write_fault_info(fault: &FaultInfo) {
@@ -278,6 +298,16 @@ fn usart_write_fault_info(fault: &FaultInfo) {
             usart_write_u32(*reason as u32);
             usart_write_bytes(b")");
         }
+        FaultInfo::LostRegion { regions } => {
+            usart_write_bytes(b"LostRegion(");
+            usart_write_hibernated_regions(regions);
+            usart_write_bytes(b")");
+        }
+        FaultInfo::HibernatedMemoryAccess { address } => {
+            usart_write_bytes(b"HibernatedMemoryAccess(");
+            usart_write_hex(*address);
+            usart_write_bytes(b")");
+        }
     }
 }
 
@@ -292,6 +322,25 @@ fn usart_write_task_state(state: &TaskState) {
             usart_write_fault_info(fault);
             usart_write_bytes(b", was ");
             usart_write_sched_state(original_state);
+            usart_write_bytes(b")");
+        }
+        TaskState::Suspended {
+            original_healthy_state,
+            original_fault_info,
+            hibernated_regions,
+            debug_request,
+        } => {
+            usart_write_bytes(b"Suspended(was ");
+            usart_write_sched_state(original_healthy_state);
+            if let Some(fault) = original_fault_info {
+                usart_write_bytes(b", prior fault ");
+                usart_write_fault_info(fault);
+            }
+            usart_write_bytes(b", hibernated=");
+            usart_write_hibernated_regions(hibernated_regions);
+            if *debug_request {
+                usart_write_bytes(b", debug");
+            }
             usart_write_bytes(b")");
         }
     }
