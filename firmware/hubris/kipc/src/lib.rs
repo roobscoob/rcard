@@ -6,7 +6,8 @@
 use core::{num::NonZeroUsize, sync::atomic::Ordering};
 
 use abi::Kipcnum;
-pub use abi::TaskState;
+pub use abi::{HibernationEventId, RestoreMode, TaskState};
+use userlib::Lease;
 
 /// Reads the scheduling/fault status of the task with the given index.
 pub fn read_task_status(task_index: usize) -> TaskState {
@@ -82,4 +83,141 @@ pub fn reset() -> ! {
     loop {
         core::sync::atomic::compiler_fence(Ordering::SeqCst);
     }
+}
+
+/// Asks the kernel to hibernate the memory region `(base, size)`. The
+/// region must exactly match one of the predefined hibernation regions.
+///
+/// Returns the `HibernationEventId` that must later be presented to
+/// [`restore_region`] to bring the region back. Errors are surfaced as
+/// the raw `HibernateRegionMessageError` discriminant.
+pub fn hibernate_region(base: u32, size: u32) -> Result<HibernationEventId, u32> {
+    // ssmarshal encodes (u32, u32) as 8 bytes; the response is a single
+    // u32 inside `HibernationEventId`.
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&base.to_le_bytes());
+    buf[4..].copy_from_slice(&size.to_le_bytes());
+
+    let (rc, len) = userlib::sys_send_to_kernel(
+        Kipcnum::HibernateRegion as u16,
+        &mut buf,
+        8,
+        &mut [],
+    );
+    if rc != userlib::ResponseCode::SUCCESS {
+        return Err(rc.0);
+    }
+    match ssmarshal::deserialize::<HibernationEventId>(&buf[..len]) {
+        Ok((id, _)) => Ok(id),
+        Err(_) => Err(u32::MAX),
+    }
+}
+
+/// Reads `len` bytes out of an active hibernated region starting at
+/// `addr` into `dest`. The kernel uses a writable lease at lease index 0
+/// to write the data back out to the supervisor.
+///
+/// Returns the number of bytes actually copied. The kernel will clamp
+/// the copy to the smaller of `len` and `dest.len()`.
+pub fn read_hibernated_region(
+    addr: u32,
+    len: u32,
+    dest: &mut [u8],
+) -> Result<usize, u32> {
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&addr.to_le_bytes());
+    buf[4..].copy_from_slice(&len.to_le_bytes());
+
+    let mut leases = [Lease::write_only(dest)];
+    let (rc, copied) = userlib::sys_send_to_kernel(
+        Kipcnum::ReadHibernatedRegion as u16,
+        &mut buf,
+        8,
+        &mut leases,
+    );
+    if rc == userlib::ResponseCode::SUCCESS {
+        Ok(copied)
+    } else {
+        Err(rc.0)
+    }
+}
+
+/// Writes `src` into an active hibernated region starting at `addr`,
+/// up to `len` bytes. The kernel uses a readable lease at lease index 0
+/// to pull bytes out of the supervisor.
+///
+/// Returns the number of bytes actually copied.
+pub fn write_hibernated_region(
+    addr: u32,
+    len: u32,
+    src: &[u8],
+) -> Result<usize, u32> {
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&addr.to_le_bytes());
+    buf[4..].copy_from_slice(&len.to_le_bytes());
+
+    let mut leases = [Lease::read_only(src)];
+    let (rc, copied) = userlib::sys_send_to_kernel(
+        Kipcnum::WriteHibernatedRegion as u16,
+        &mut buf,
+        8,
+        &mut leases,
+    );
+    if rc == userlib::ResponseCode::SUCCESS {
+        Ok(copied)
+    } else {
+        Err(rc.0)
+    }
+}
+
+/// Restores a hibernated region identified by `event_id`. `mode` selects
+/// whether tasks blocked on the region resume cleanly or take a
+/// `LostRegion` fault.
+pub fn restore_region(
+    event_id: HibernationEventId,
+    mode: RestoreMode,
+) -> Result<(), u32> {
+    // ssmarshal serializes `HibernationEventId(u32)` as 4 bytes and
+    // `RestoreMode` (#[repr(u32)] enum) as 4 bytes.
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&event_id.0.to_le_bytes());
+    buf[4..].copy_from_slice(&(mode as u32).to_le_bytes());
+
+    let (rc, _) = userlib::sys_send_to_kernel(
+        Kipcnum::RestoreRegion as u16,
+        &mut buf,
+        8,
+        &mut [],
+    );
+    if rc == userlib::ResponseCode::SUCCESS {
+        Ok(())
+    } else {
+        Err(rc.0)
+    }
+}
+
+/// Asks the kernel to suspend the task at the given index (e.g. for
+/// debugger attach). The kernel rejects suspending the supervisor.
+pub fn suspend_task(task_index: usize) {
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&(task_index as u32).to_le_bytes());
+    let _ = userlib::sys_send_to_kernel(
+        Kipcnum::SuspendTask as u16,
+        &mut buf,
+        4,
+        &mut [],
+    );
+}
+
+/// Clears the debug-suspend flag on the task at the given index. If the
+/// task is no longer blocked on any hibernated region, it will resume.
+pub fn restore_task(task_index: usize) {
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&(task_index as u32).to_le_bytes());
+    let _ = userlib::sys_send_to_kernel(
+        Kipcnum::RestoreTask as u16,
+        &mut buf,
+        4,
+        &mut [],
+    );
 }
