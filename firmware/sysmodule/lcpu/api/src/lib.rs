@@ -27,6 +27,10 @@ pub enum LcpuInitError {
     WarmupBadFrame = 3,
     /// Patch installer rejected the bundled patch blob.
     PatchInstallFailed = 4,
+    /// `HPSYS_CFG.IDR.REVID` did not match any known A3 / Letter range.
+    UnsupportedChipRevision = 5,
+    /// Embedded LCPU firmware blob exceeds the A3 LPSYS RAM region.
+    FirmwareTooLarge = 6,
 }
 
 /// Failures of [`Lcpu::send_hci`].

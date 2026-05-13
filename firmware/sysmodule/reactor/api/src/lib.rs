@@ -66,6 +66,7 @@ pub enum OverflowStrategy {
     serde::Serialize,
     serde::Deserialize,
     postcard_schema::Schema,
+    rcard_log::Format,
 )]
 #[repr(u8)]
 pub enum ReactorError {

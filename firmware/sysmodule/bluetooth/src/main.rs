@@ -34,9 +34,15 @@ static ADV_REQUEST: ipc::executor::Signal<()> = ipc::executor::Signal::new();
 struct SyncCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for SyncCell<T> {}
 impl<T: Copy> SyncCell<T> {
-    const fn new(val: T) -> Self { Self(UnsafeCell::new(val)) }
-    fn get(&self) -> T { unsafe { *self.0.get() } }
-    fn set(&self, val: T) { unsafe { *self.0.get() = val } }
+    const fn new(val: T) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> T {
+        unsafe { *self.0.get() }
+    }
+    fn set(&self, val: T) {
+        unsafe { *self.0.get() = val }
+    }
 }
 
 static DEVICE_NAME: SyncCell<[u8; 32]> = SyncCell::new([0u8; 32]);
@@ -97,7 +103,14 @@ impl Bluetooth for BluetoothResource {
 
         let lcpu = match Lcpu::init(bd_addr) {
             Ok(Ok(h)) => h,
-            _ => return Err(BtError::LcpuInitFailed),
+            Ok(Err(t)) => {
+                error!("lcpu init l2: {}", t);
+                return Err(BtError::LcpuInitFailed);
+            }
+            Err(t) => {
+                error!("lcpu init l1: {}", t);
+                return Err(BtError::LcpuInitFailed);
+            }
         };
         let _ = LCPU_HANDLE.set(lcpu);
         LCPU_READY.store(1, Ordering::Release);
@@ -128,15 +141,13 @@ impl Bluetooth for BluetoothResource {
     }
 
     fn read_characteristic(&mut self, _meta: ipc::Meta) -> CharValue {
-        CharValue { data: [0u8; 20], len: 0 }
+        CharValue {
+            data: [0u8; 20],
+            len: 0,
+        }
     }
 
-    fn notify(
-        &mut self,
-        _meta: ipc::Meta,
-        _data: [u8; 20],
-        _len: u8,
-    ) -> Result<(), BtError> {
+    fn notify(&mut self, _meta: ipc::Meta, _data: [u8; 20], _len: u8) -> Result<(), BtError> {
         if get_connection_state() != ConnectionState::Connected {
             return Err(BtError::NotConnected);
         }
@@ -161,6 +172,7 @@ impl Drop for BluetoothResource {
 
 #[ipc::notification_handler(lcpu_data)]
 fn handle_lcpu_data(_sender: u16, _code: u32) {
+    info!("yall we got some data");
     transport::HCI_RX_SIGNAL.signal(());
 }
 

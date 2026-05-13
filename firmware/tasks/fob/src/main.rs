@@ -12,7 +12,7 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
-sysmodule_bluetooth_api::bind_bluetooth!(Bt = SLOTS.sysmodule_bluetooth);
+sysmodule_lcpu_api::bind_lcpu!(Lcpu = SLOTS.sysmodule_lcpu);
 sysmodule_cap1208_api::bind_cap1208!(Cap1208 = SLOTS.sysmodule_cap1208);
 sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
 sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
@@ -55,7 +55,9 @@ const DIGITS: [[u8; 7]; 11] = [
 ];
 
 fn draw_char(buf: &mut [u8; FB_BYTES], ch: usize, x0: usize, y0: usize) {
-    if ch > 10 { return; }
+    if ch > 10 {
+        return;
+    }
     let glyph = &DIGITS[ch];
     let mut row = 0;
     while row < FONT_H {
@@ -180,118 +182,106 @@ struct TouchState {
     click_start: u64,
 }
 
-static STATE: OnceCell<GlobalState<TouchState>> = OnceCell::new();
+static LCPU_REF: OnceCell<Lcpu> = OnceCell::new();
 
-#[ipc::notification_handler(present)]
-fn handle_present(_sender: u16, _code: u32) {
-    STATE
-        .get()
-        .log_expect("touch state not initialized")
-        .with(|s| {
-            let now = userlib::sys_get_timer().now;
+#[ipc::notification_handler(lcpu_data)]
+fn handle_lcpu_data(_sender: u16, _code: u32) {
+    info!("got incoming lcpu packet...");
+    let mut buf = [0u8; 256];
 
-            // Triangle wave 0→1→0 over SWEEP_PERIOD_MS controls click rate
-            let phase = (now % SWEEP_PERIOD_MS) as f32 / SWEEP_HALF_MS;
-            let rate = if phase <= 1.0 { phase } else { 2.0 - phase };
-
-            // rate 0→1 maps to interval MAX→MIN (slow to fast)
-            let interval_ms = INTERVAL_MAX_MS - rate * (INTERVAL_MAX_MS - INTERVAL_MIN_MS);
-
-            // End click after CLICK_DURATION_MS
-            if s.clicking && now - s.click_start >= CLICK_DURATION_MS {
-                let _ = Haptic::stop();
-                s.clicking = false;
-            }
-
-            // Fire a new click when interval has elapsed
-            if !s.clicking && now - s.last_click >= interval_ms as u64 {
-                let _ = Haptic::drive(1.0);
-                s.clicking = true;
-                s.click_start = now;
-                s.last_click = now;
-            }
-
-            let top = match s.cap_a.read() {
-                Ok(Ok(v)) => v,
-                _ => return,
-            };
-            let bottom = match s.cap_b.read() {
-                Ok(Ok(v)) => v,
-                _ => return,
-            };
-
-            draw_bars(&mut s.buf, &top, &bottom);
-            draw_percentage(&mut s.buf, (rate * 100.0) as u32);
-            let _ = s.fb.write(&s.buf);
-        })
-        .log_expect("reentrant touch state access");
+    LCPU_REF.get().unwrap().recv_hci(&mut buf);
 }
 
 #[export_name = "main"]
 fn main() -> ! {
     info!("fob: awake");
 
-    let config = Cap1208Config {
-        enabled_channels: 0xFF,
-        signal: SignalConfig::new(AnalogGain::X2, DigitalShift::X1),
-        sampling: SamplingConfig::fastest(Averaging::Avg4, Duration::Us640),
-        recalibration: RecalibrationConfig::every(RecalRate::Samples32)
-            .with_touch_duration(TouchRecalDuration::Disabled)
-            .with_below_baseline(BelowBaseline::Count32),
-    };
+    let lcpu = Lcpu::init([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+        .log_expect("ipc fail")
+        .log_expect("lcpu bringup fail");
 
-    let cap_a = Cap1208::open(Device::A, config)
-        .log_expect("cap1208 A IPC")
-        .log_expect("cap1208 A open");
+    info!("sending hci packet");
+    lcpu.send_hci(&[0x01, 0x01, 0x10, 0x00])
+        .log_expect("ipc fail")
+        .log_expect("hci send fail");
 
-    let cap_b = Cap1208::open(Device::B, config)
-        .log_expect("cap1208 B IPC")
-        .log_expect("cap1208 B open");
+    LCPU_REF.set(lcpu);
 
-    info!("fob: touch sensors open");
+    // wirehead the lcpu task directly
 
-    let buf = [0u8; FB_BYTES];
-    let info = FrameBufferInfo::new(ImageFormat::Mono, SCREEN_W as u32, SCREEN_H as u32);
-    let fb = FrameBuffer::new(info, &buf)
-        .log_expect("fb IPC")
-        .log_expect("fb creation");
-    let fb_id = fb.id().log_expect("fb id");
-    let layer = Layer::new(fb_id, 0, 0, 0, BlendMode::Replace)
-        .log_expect("layer IPC")
-        .log_expect("layer creation");
+    // BLE init. The handle must outlive the loop below — dropping it sends
+    // IMPLICIT_DESTROY to the bluetooth sysmodule, which tears down the
+    // BluetoothResource even though the @spawn'd runner + advertiser keep
+    // running off static state. Bind it to a local that lives for the rest
+    // of main so future IPC calls (notify, stop_advertising, …) still work.
 
-    let _ = STATE.set(GlobalState::new(TouchState {
-        cap_a,
-        cap_b,
-        fb,
-        _layer: layer,
-        buf,
-        last_click: 0,
-        clicking: false,
-        click_start: 0,
-    }));
+    // let mut name_buf = [0u8; 32];
+    // let name = b"Charm";
+    // name_buf[..name.len()].copy_from_slice(name);
+    // let bd_addr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+    // let _bt = match Bt::init(bd_addr, name_buf, name.len() as u8) {
+    //     Ok(Ok(bt)) => {
+    //         info!("fob: BLE initialized");
+    //         let _ = bt.start_advertising();
+    //         Some(bt)
+    //     }
+    //     Ok(Err(e)) => {
+    //         info!("fob: BLE init error: {}", e);
+    //         None
+    //     }
+    //     Err(e) => {
+    //         info!("fob: BLE IPC error: {}", e);
+    //         None
+    //     }
+    // };
 
-    // BLE init
-    let mut name_buf = [0u8; 32];
-    let name = b"Charm";
-    name_buf[..name.len()].copy_from_slice(name);
-    let bd_addr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
-    match Bt::init(bd_addr, name_buf, name.len() as u8) {
-        Ok(Ok(bt)) => {
-            info!("fob: BLE initialized");
-            let _ = bt.start_advertising();
-        }
-        Ok(Err(e)) => info!("fob: BLE init error: {}", e),
-        Err(e) => info!("fob: BLE IPC error: {}", e),
-    }
+    // let config = Cap1208Config {
+    //     enabled_channels: 0xFF,
+    //     signal: SignalConfig::new(AnalogGain::X2, DigitalShift::X1),
+    //     sampling: SamplingConfig::fastest(Averaging::Avg4, Duration::Us640),
+    //     recalibration: RecalibrationConfig::every(RecalRate::Samples32)
+    //         .with_touch_duration(TouchRecalDuration::Disabled)
+    //         .with_below_baseline(BelowBaseline::Count32),
+    // };
 
-    info!("fob: touch bar display running, starting haptic sweep");
+    // let cap_a = Cap1208::open(Device::A, config)
+    //     .log_expect("cap1208 A IPC")
+    //     .log_expect("cap1208 A open");
+
+    // let cap_b = Cap1208::open(Device::B, config)
+    //     .log_expect("cap1208 B IPC")
+    //     .log_expect("cap1208 B open");
+
+    // info!("fob: touch sensors open");
+
+    // let buf = [0u8; FB_BYTES];
+    // let info = FrameBufferInfo::new(ImageFormat::Mono, SCREEN_W as u32, SCREEN_H as u32);
+    // let fb = FrameBuffer::new(info, &buf)
+    //     .log_expect("fb IPC")
+    //     .log_expect("fb creation");
+    // let fb_id = fb.id().log_expect("fb id");
+    // let layer = Layer::new(fb_id, 0, 0, 0, BlendMode::Replace)
+    //     .log_expect("layer IPC")
+    //     .log_expect("layer creation");
+
+    // let _ = STATE.set(GlobalState::new(TouchState {
+    //     cap_a,
+    //     cap_b,
+    //     fb,
+    //     _layer: layer,
+    //     buf,
+    //     last_click: 0,
+    //     clicking: false,
+    //     click_start: 0,
+    // }));
+
+    // info!("fob: touch bar display running, starting haptic sweep");
 
     loop {
         let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
         loop {
             match Reactor::pull() {
-                Ok(Some(notif)) => handle_present(&notif),
+                Ok(Some(notif)) => handle_lcpu_data(&notif),
                 _ => break,
             }
         }

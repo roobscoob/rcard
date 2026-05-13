@@ -312,20 +312,19 @@ pub fn gen_async_server(input: &AsyncServerInput) -> TokenStream2 {
                     if __ready == 0 { break; }
                     #(#poll_branches)*
                 }
-                __executor.timer_queue.arm_kernel_timer();
+                // NB: do NOT call `__executor.timer_queue.arm_kernel_timer()` here.
+                // The kernel timer is owned by the embassy-time `DRIVER`
+                // (`executor/time_driver.rs`), which arms it via `arm_earliest()`
+                // inside every `schedule_wake`. Calling the bespoke `TimerQueue`'s
+                // armer here would disarm it (the local queue is unused — even the
+                // crate's own `Sleep` future delegates to the embassy-time driver).
 
                 // Block until message or notification
                 match ipc::kern::sys_recv_open(&mut __buf, __full_mask) {
                     ipc::kern::MessageOrNotification::Notification(__bits) => {
                         if __bits & ipc::executor::TIMER_BIT != 0 {
-                            // Expire executor-managed timers
-                            let __now = ::userlib::sys_get_timer().now;
-                            let __expired = __executor.timer_queue.expire(__now);
-                            __executor.ready_mask.fetch_or(
-                                __expired,
-                                ::core::sync::atomic::Ordering::Release,
-                            );
-                            // Expire embassy-time driver timers
+                            // Expire embassy-time driver timers — this fires the
+                            // wakers, which set ready_mask bits via the waker vtable.
                             ipc::executor::time_driver::on_timer_tick();
                         }
                         // EXECUTOR_BIT: ready_mask already set by waker

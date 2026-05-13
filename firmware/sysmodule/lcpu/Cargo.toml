@@ -11,6 +11,7 @@ bare-panics = ["ipc/bare-panics"]
 ipc = { path = "../../modules/ipc" }
 sysmodule_log_api = { path = "../log/api" }
 sysmodule_reactor_api = { path = "../reactor/api" }
+sysmodule_syscon_api = { path = "../syscon/api", features = ["bare-panics"] }
 rcard-log = { path = "../../../shared/log" }
 rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_lcpu_api = { path = "api" }

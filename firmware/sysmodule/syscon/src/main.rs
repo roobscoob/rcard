@@ -29,6 +29,16 @@ impl Syscon for SysconImpl {
         }
         Ok(())
     }
+
+    fn chip_id(_meta: ipc::Meta) -> ChipId {
+        let idr = sifli_pac::HPSYS_CFG.idr().read();
+        ChipId {
+            revid: idr.revid(),
+            pid: idr.pid(),
+            cid: idr.cid(),
+            sid: idr.sid(),
+        }
+    }
 }
 
 #[export_name = "main"]

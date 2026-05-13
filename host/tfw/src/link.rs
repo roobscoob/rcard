@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use object::read::elf::{ElfFile32, FileHeader, ProgramHeader};
 use object::Endianness;
+use object::read::elf::{ElfFile32, FileHeader, ProgramHeader};
 
 use crate::compile::CompileArtifact;
 use crate::config::AppConfig;
@@ -57,8 +57,8 @@ pub fn link_image(
     // Group segments by place.
     let mut by_place: BTreeMap<&str, Vec<&Segment>> = BTreeMap::new();
     for seg in &segments {
-        let place_name = find_place(&place_ranges, seg.paddr)
-            .ok_or_else(|| LinkError::UnmappedSegment {
+        let place_name =
+            find_place(&place_ranges, seg.paddr).ok_or_else(|| LinkError::UnmappedSegment {
                 owner: seg.owner.clone(),
                 addr: seg.paddr,
             })?;
@@ -66,7 +66,8 @@ pub fn link_image(
     }
 
     // Kernel entry point = kernel code region base address.
-    let kernel_code = layout.placed
+    let kernel_code = layout
+        .placed
         .get(&("kernel".to_string(), "code".to_string()))
         .ok_or_else(|| LinkError::Other("kernel.code not in layout".into()))?;
     let entry_point = kernel_code.base as u32;
@@ -106,12 +107,18 @@ pub fn link_image(
     // host_end) are host-resident: they get file_offset = (paddr -
     // host_base) so their bytes land at their linker addresses on flash
     // and run XIP. Segments outside this range are packed sequentially.
-    let host_base: Option<u64> = config.boot.as_ref()
-        .and_then(|b| b.image.mappings.first()
-            .map(|m| m.address + b.image.offset.unwrap_or(0)));
-    let host_end: Option<u64> = config.boot.as_ref()
-        .and_then(|b| b.image.mappings.first()
-            .map(|m| m.address + b.image.offset.unwrap_or(0) + b.image.size));
+    let host_base: Option<u64> = config.boot.as_ref().and_then(|b| {
+        b.image
+            .mappings
+            .first()
+            .map(|m| m.address + b.image.offset.unwrap_or(0))
+    });
+    let host_end: Option<u64> = config.boot.as_ref().and_then(|b| {
+        b.image
+            .mappings
+            .first()
+            .map(|m| m.address + b.image.offset.unwrap_or(0) + b.image.size)
+    });
 
     let is_host_resident = |paddr: u64| -> bool {
         host_base.is_some_and(|h| paddr >= h) && host_end.is_some_and(|e| paddr < e)
@@ -147,7 +154,11 @@ pub fn link_image(
         }
 
         let base = segs.first().unwrap().paddr;
-        let end = segs.iter().map(|s| s.paddr + s.data.len() as u64).max().unwrap();
+        let end = segs
+            .iter()
+            .map(|s| s.paddr + s.data.len() as u64)
+            .max()
+            .unwrap();
         let total = (end - base) as usize;
 
         // Merge PT_LOADs in this place into one contiguous blob
@@ -159,12 +170,15 @@ pub fn link_image(
         }
 
         // mem_size: include .bss regions in this place.
-        let (place_start, place_end) = place_ranges.iter()
+        let (place_start, place_end) = place_ranges
+            .iter()
             .find(|(_, name)| *name == place_name)
             .map(|((s, e), _)| (*s, *e))
             .unwrap();
 
-        let mem_end = layout.placed.values()
+        let mem_end = layout
+            .placed
+            .values()
             .filter(|a| a.base >= place_start && a.base < place_end)
             .map(|a| a.base + a.size)
             .max()
@@ -197,7 +211,10 @@ pub fn link_image(
 
         place_layouts.insert(
             place_name.to_string(),
-            PlaceLayout { file_offset, blob_base: base },
+            PlaceLayout {
+                file_offset,
+                blob_base: base,
+            },
         );
 
         builder.add_segment(base as u32, file_offset, &blob, mem_size);
@@ -221,12 +238,13 @@ pub fn measure_flat_binary_size(artifact: &CompileArtifact) -> Result<u32, LinkE
     })?;
 
     let endian = elf.endian();
-    let phdrs = elf.elf_header().program_headers(endian, elf.data()).map_err(|e| {
-        LinkError::Elf {
+    let phdrs = elf
+        .elf_header()
+        .program_headers(endian, elf.data())
+        .map_err(|e| LinkError::Elf {
             crate_name: artifact.crate_name.clone(),
             message: e.to_string(),
-        }
-    })?;
+        })?;
 
     let mut min_addr = u64::MAX;
     let mut max_addr = 0u64;
@@ -304,12 +322,13 @@ fn collect_segments(artifacts: &[CompileArtifact]) -> Result<Vec<Segment>, LinkE
         })?;
 
         let endian = elf.endian();
-        let phdrs = elf.elf_header().program_headers(endian, elf.data()).map_err(|e| {
-            LinkError::Elf {
+        let phdrs = elf
+            .elf_header()
+            .program_headers(endian, elf.data())
+            .map_err(|e| LinkError::Elf {
                 crate_name: artifact.crate_name.clone(),
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         for header in phdrs {
             if header.p_type(endian) != object::elf::PT_LOAD {
