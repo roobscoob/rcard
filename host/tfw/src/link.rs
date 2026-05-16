@@ -26,7 +26,15 @@ pub struct PlaceLayout {
 ///
 /// Groups all PT_LOAD segments by place (using the layout's address ranges),
 /// merges segments within each place into one contiguous blob, and writes
-/// a `places.bin` using the `rcard_places` format.
+/// the result using the `rcard_places` format.
+///
+/// `filename` controls the output name (e.g. `"places.bin"` or
+/// `"places_b.bin"`).
+///
+/// `image_place` overrides `config.boot.image` for XIP host-range
+/// detection. Pass `None` to use the config default (slot A). For
+/// slot B, pass `Some(&boot.image_b)` so that re-linked segments at
+/// firmware_b addresses are recognised as host-resident.
 ///
 /// Returns the path to the written file plus a `place_name → PlaceLayout`
 /// map so downstream consumers (notably `pack::build_ftab_from_config`)
@@ -38,14 +46,32 @@ pub fn link_image(
     config: &AppConfig,
     layout: &Layout,
     out_dir: &Path,
+    filename: &str,
+    image_place: Option<&crate::config::Place>,
     emit: crate::build::EventFn<'_>,
 ) -> Result<(PathBuf, BTreeMap<String, PlaceLayout>), LinkError> {
     std::fs::create_dir_all(out_dir).map_err(LinkError::Io)?;
 
-    let places_path = out_dir.join("places.bin");
+    let places_path = out_dir.join(filename);
 
     // Build a lookup: (cpu_base, cpu_end) → place_name for all CPU-mapped places.
-    let place_ranges = build_place_ranges(config);
+    let mut place_ranges = build_place_ranges(config);
+
+    // When linking for a non-default slot (e.g. slot B), add the
+    // image place's address range so re-linked segments are mapped.
+    let image_place_ref = image_place.or(config.boot.as_ref().map(|b| &b.image));
+    if let Some(ip) = image_place {
+        let ip_name = ip.name.clone().unwrap_or_else(|| "image_b".into());
+        let offset = ip.offset.unwrap_or(0);
+        for mapping in &ip.mappings {
+            let start = mapping.address + offset;
+            let end = start + ip.size;
+            if !place_ranges.iter().any(|((s, _), _)| *s == start) {
+                place_ranges.push(((start, end), ip_name.clone()));
+            }
+        }
+        place_ranges.sort_by_key(|((s, _), _)| *s);
+    }
 
     // Collect all PT_LOAD segments from all ELFs.
     let segments = collect_segments(artifacts)?;
@@ -73,6 +99,21 @@ pub fn link_image(
 
     // Build the places binary.
     let mut builder = rcard_places::PlacesBuilder::new(entry_point);
+
+    if let Some(ref ver_str) = config.version {
+        let parts: Vec<u16> = ver_str
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if parts.len() >= 3 {
+            builder.set_version(parts[0], parts[1], parts[2]);
+        }
+    }
+    let flash_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    builder.set_flash_timestamp(flash_ts);
 
     // Places that back filesystem mounts — marked PART_MANAGED so the
     // storage sysmodule rejects direct acquires from non-fs tasks.
@@ -102,16 +143,18 @@ pub fn link_image(
     }
 
     // CPU address range of the flash region hosting places.bin, derived
-    // from boot.image. Segments whose addresses fall within [host_base,
-    // host_end) are host-resident: they get file_offset = (paddr -
-    // host_base) so their bytes land at their linker addresses on flash
-    // and run XIP. Segments outside this range are packed sequentially.
-    let host_base: Option<u64> = config.boot.as_ref()
-        .and_then(|b| b.image.mappings.first()
-            .map(|m| m.address + b.image.offset.unwrap_or(0)));
-    let host_end: Option<u64> = config.boot.as_ref()
-        .and_then(|b| b.image.mappings.first()
-            .map(|m| m.address + b.image.offset.unwrap_or(0) + b.image.size));
+    // from the image place (defaulting to boot.image for slot A, or
+    // the explicit override for slot B). Segments whose addresses fall
+    // within [host_base, host_end) are host-resident: they get
+    // file_offset = (paddr - host_base) so their bytes land at their
+    // linker addresses on flash and run XIP. Segments outside this
+    // range are packed sequentially.
+    let host_base: Option<u64> = image_place_ref
+        .and_then(|ip| ip.mappings.first()
+            .map(|m| m.address + ip.offset.unwrap_or(0)));
+    let host_end: Option<u64> = image_place_ref
+        .and_then(|ip| ip.mappings.first()
+            .map(|m| m.address + ip.offset.unwrap_or(0) + ip.size));
 
     let is_host_resident = |paddr: u64| -> bool {
         host_base.is_some_and(|h| paddr >= h) && host_end.is_some_and(|e| paddr < e)
@@ -265,7 +308,7 @@ struct Segment {
 }
 
 /// Build a sorted list of (cpu_start, cpu_end) → place_name for all CPU-mapped places.
-fn build_place_ranges(config: &AppConfig) -> Vec<((u64, u64), &str)> {
+fn build_place_ranges(config: &AppConfig) -> Vec<((u64, u64), String)> {
     let mut ranges = Vec::new();
     for (name, place) in &config.places {
         if place.unmapped || place.mappings.is_empty() {
@@ -275,7 +318,7 @@ fn build_place_ranges(config: &AppConfig) -> Vec<((u64, u64), &str)> {
         for mapping in &place.mappings {
             let start = mapping.address + offset;
             let end = start + place.size;
-            ranges.push(((start, end), name.as_str()));
+            ranges.push(((start, end), name.clone()));
         }
     }
     ranges.sort_by_key(|((s, _), _)| *s);
@@ -283,7 +326,7 @@ fn build_place_ranges(config: &AppConfig) -> Vec<((u64, u64), &str)> {
 }
 
 /// Find which place a physical address belongs to.
-fn find_place<'a>(ranges: &'a [((u64, u64), &str)], addr: u64) -> Option<&'a str> {
+fn find_place<'a>(ranges: &'a [((u64, u64), String)], addr: u64) -> Option<&'a str> {
     for ((start, end), name) in ranges {
         if addr >= *start && addr < *end {
             return Some(name);

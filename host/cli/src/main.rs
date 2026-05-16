@@ -33,7 +33,19 @@ enum Command {
         /// Output .tfw archive path.
         #[arg(long, default_value = "build/output.tfw")]
         out: PathBuf,
+
+        /// Output format: json (machine-readable event stream) or md (LLM-digestible summary).
+        /// Omit for interactive TUI output.
+        #[arg(long, value_enum)]
+        output_format: Option<commands::build::OutputFormat>,
     },
+
+    /// Show firmware sizes and memory layout from a .tfw archive.
+    Measure {
+        /// Path to .tfw firmware archive.
+        tfw: PathBuf,
+    },
+
 }
 
 /// Resolve a short name like "fob" to a path like "fob.ncl" or "boards/bentoboard.ncl".
@@ -84,11 +96,15 @@ async fn main() {
             layout,
             firmware_dir,
             out,
+            output_format,
         } => {
             let config_path = resolve_ncl(&firmware_dir, "apps", &config, "config");
             let board_path = resolve_ncl(&firmware_dir, "boards", &board, "board");
             let layout_path = resolve_ncl(&firmware_dir, "layouts", &layout, "layout");
-            commands::build::run(firmware_dir, config_path, board_path, layout_path, out).await
+            commands::build::run(firmware_dir, config_path, board_path, layout_path, out, output_format).await
+        }
+        Command::Measure { tfw } => {
+            commands::measure::run(tfw);
         }
     }
 }

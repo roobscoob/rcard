@@ -2493,15 +2493,13 @@ fn discover_ncl_names(firmware_dir: &Path, subdir: &str) -> Vec<String> {
     names
 }
 
-/// Write the target firmware (places.bin + ftab.bin) to the fob's flash
-/// over IPC. Called after the RAMboot stub comes up — at that point the
-/// stub is the only code running and has exclusive access to both
-/// partitions.
+/// A/B-aware firmware flash over IPC.
 ///
-/// Order is places → ftab deliberately: the ftab (sec_config) is the
-/// BOOTROM's entry pointer, so writing it last makes the flash commit
-/// atomic from the BOOTROM's perspective — either the new image is
-/// fully staged or the old one is still being pointed at.
+/// Reads the current firmware from both flash slots (firmware_a,
+/// firmware_b), uses `select_firmware` to find the active slot, then
+/// writes the new firmware to the *inactive* slot — keeping the
+/// active one as a fallback. The ftab is written last so the flash
+/// commit is atomic from the BOOTROM's perspective.
 async fn run_flash(
     device_id: DeviceId,
     archive_bytes: Vec<u8>,
@@ -2543,19 +2541,75 @@ async fn run_flash(
         Some(buf)
     };
 
-    let Some(places) = read_entry(&mut archive, "places.bin") else {
+    let Some(places_a) = read_entry(&mut archive, "places.bin") else {
         fail("archive missing places.bin".into());
         return;
     };
+    let places_b = read_entry(&mut archive, "places_b.bin");
     let Some(ftab) = read_entry(&mut archive, "ftab.bin") else {
         fail("archive missing ftab.bin".into());
         return;
     };
     drop(archive);
 
-    if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, "firmware", &places).await {
-        eprintln!("[flash] firmware partition FAILED: {e}");
-        fail(format!("firmware partition: {e}"));
+    // ── A/B slot selection ──────────────────────────────────────────
+    //
+    // Read current firmware from both slots, parse footers, and use
+    // select_firmware to find the active slot. Write the new firmware
+    // to the *other* slot so the active one stays as a fallback.
+
+    let cur_a = read_partition(device_id, &registry, &cmd_tx, "firmware_a").await;
+    let cur_b = read_partition(device_id, &registry, &cmd_tx, "firmware_b").await;
+
+    let parsed_a = cur_a.as_ref().and_then(|d| rcard_places::PlacesImage::parse(d).ok());
+    let parsed_b = cur_b.as_ref().and_then(|d| rcard_places::PlacesImage::parse(d).ok());
+
+    let (target_partition, target_data) = match (&parsed_a, &parsed_b) {
+        (Some(a), Some(b)) => {
+            match rcard_places::select_firmware(a, b) {
+                Ok((rcard_places::Slot::A, reason)) => {
+                    eprintln!("[flash] slot A is active ({reason:?}), writing slot B");
+                    if let Some(ref data) = places_b {
+                        ("firmware_b", data.as_slice())
+                    } else {
+                        eprintln!("[flash] no places_b.bin in archive, writing slot A instead");
+                        ("firmware_a", places_a.as_slice())
+                    }
+                }
+                Ok((rcard_places::Slot::B, reason)) => {
+                    eprintln!("[flash] slot B is active ({reason:?}), writing slot A");
+                    ("firmware_a", places_a.as_slice())
+                }
+                Err(e) => {
+                    eprintln!("[flash] both slots concerned ({e:?}), writing slot A");
+                    ("firmware_a", places_a.as_slice())
+                }
+            }
+        }
+        (Some(_), None) => {
+            eprintln!("[flash] slot A valid, slot B empty — writing slot B");
+            if let Some(ref data) = places_b {
+                ("firmware_b", data.as_slice())
+            } else {
+                eprintln!("[flash] no places_b.bin in archive, writing slot A");
+                ("firmware_a", places_a.as_slice())
+            }
+        }
+        (None, Some(_)) => {
+            eprintln!("[flash] slot B valid, slot A empty — writing slot A");
+            ("firmware_a", places_a.as_slice())
+        }
+        (None, None) => {
+            eprintln!("[flash] both slots empty — writing slot A");
+            ("firmware_a", places_a.as_slice())
+        }
+    };
+
+    // ── Write firmware then ftab ────────────────────────────────────
+
+    if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, target_partition, target_data).await {
+        eprintln!("[flash] {target_partition} FAILED: {e}");
+        fail(format!("{target_partition}: {e}"));
         return;
     }
     if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, "boot", &ftab).await {
@@ -2563,7 +2617,12 @@ async fn run_flash(
         fail(format!("boot partition: {e}"));
         return;
     }
-    eprintln!("[flash] DONE ({} + {} bytes)", places.len(), ftab.len());
+    eprintln!(
+        "[flash] DONE — wrote {} to {target_partition} ({} bytes) + boot ({} bytes)",
+        if target_partition == "firmware_a" { "places.bin" } else { "places_b.bin" },
+        target_data.len(),
+        ftab.len(),
+    );
 
     // Reset the device so it boots into the newly flashed firmware.
     if let Ok(encoded) = registry.encode_call(
@@ -2581,6 +2640,63 @@ async fn run_flash(
     }
 
     let _ = cmd_tx.send(crate::bridge::Command::FlashComplete { device_id });
+}
+
+/// Read the full contents of a partition via IPC. Returns `None` if the
+/// partition can't be acquired or read (e.g. doesn't exist on this device).
+async fn read_partition(
+    device_id: DeviceId,
+    registry: &std::sync::Arc<ipc_runtime::Registry>,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::bridge::Command>,
+    partition_name: &str,
+) -> Option<Vec<u8>> {
+    use ipc_runtime::IpcValue;
+
+    let mut padded = [0u8; 16];
+    let name_bytes = partition_name.as_bytes();
+    if name_bytes.len() > 16 { return None; }
+    padded[..name_bytes.len()].copy_from_slice(name_bytes);
+    let name_arr = IpcValue::Tuple(padded.iter().map(|b| IpcValue::U8(*b)).collect());
+    let acquire_args = IpcValue::Struct(indexmap::indexmap! {
+        "name".into() => name_arr,
+    });
+
+    let partition = crate::ipc_handle::acquire(
+        device_id, registry, cmd_tx,
+        "Partition", "acquire", acquire_args,
+    ).await.ok()?;
+
+    let geometry = partition
+        .call("geometry", IpcValue::Struct(indexmap::IndexMap::new()))
+        .await.ok()?;
+    let part_size = geometry_field(&geometry, "total_size")? as usize;
+    if part_size == 0 { return None; }
+
+    eprintln!("[flash] reading {partition_name:?} ({part_size} bytes)");
+
+    const CHUNK: usize = 4096;
+    let mut data = Vec::with_capacity(part_size);
+    let mut offset = 0usize;
+    while offset < part_size {
+        let end = (offset + CHUNK).min(part_size);
+        let chunk_len = end - offset;
+        let read_args = IpcValue::Struct(indexmap::indexmap! {
+            "offset".into() => IpcValue::U32(offset as u32),
+            "buf".into()    => IpcValue::Bytes(vec![0u8; chunk_len]),
+        });
+        let (_reply, writeback) = match partition.call_with_writeback("read", read_args).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[flash] read {partition_name:?} @ {offset:#x} failed: {e}");
+                return None;
+            }
+        };
+        data.extend_from_slice(&writeback);
+        offset = end;
+    }
+
+    drop(partition);
+    Some(data)
 }
 
 /// Acquire `partition_name`, erase enough to cover `data.len()`, then

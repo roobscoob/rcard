@@ -31,7 +31,7 @@ let miB = fun n => n * 1024 * 1024 in
     pinctrl     = { base = 0x50003000, size = 0x1000 },
     hpsys_cfg   = { base = 0x5000B000, size = 0x1000 },
     hpsys_aon   = { base = 0x500C0000, size = 0x1000, renode = { model = "Miscellaneous.SF32LB52_HPSYS_AON" } },
-    pmuc        = { base = 0x500CA000, size = 0x1000 },
+    pmuc        = { base = 0x500CA000, size = 0x1000, irqs = { irq = 48 } },
     lcdc        = { base = 0x50008000, size = 0x128, renode = { model = "Display.SF32LB52_LCDC" } },
     sdmmc1      = { base = 0x50045000, size = 0x400, irqs = { irq = 57 } },
     usbc        = { base = 0x50047000, size = 0x1000, irqs = { irq = 92 } },

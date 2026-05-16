@@ -16,6 +16,7 @@ rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
 sysmodule_clocks_api = { path = "../clocks/api", features = ["bare-panics"] }
 sysmodule_mpi_api = { path = "api" }
+sysmodule_region_hibernation_api = { path = "../region_hibernation/api", features = ["bare-panics"] }
 userlib.workspace = true
 
 [[bin]]

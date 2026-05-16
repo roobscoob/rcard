@@ -35,10 +35,10 @@ const IMG_COUNT: usize = DFU_FLASH_PARTITION - DFU_FLASH_IMG_LCPU;
 
 /// Our-own-use slot within `ftab[]`. The BOOTROM only reads ftab[0] (self)
 /// and ftab[DFU_FLASH_IMG_BL] (bootloader), so indices 1, 2, 4..16 are
-/// free for app-specific metadata. Stub `get_layout` reads this entry to
-/// locate the on-flash places.bin (base + exact byte length) without
-/// having to scan for the `'PLCB'` footer magic.
-pub const FTAB_PLACES_SLOT: usize = 14;
+/// free for app-specific metadata. The bootloader reads both slots to
+/// select the best firmware image at boot.
+pub const FTAB_PLACES_SLOT_A: usize = 14;
+pub const FTAB_PLACES_SLOT_B: usize = 15;
 
 const CORE_MAX: usize = 4;
 const CORE_BL: usize = 1;
@@ -115,8 +115,9 @@ fn build_ftab(
     loader_flash_src: u32,
     loader_xip_dest: u32,
     loader_size: u32,
-    places_base: u32,
-    places_size: u32,
+    places_a_base: u32,
+    places_a_size: u32,
+    places_b: Option<(u32, u32)>,
 ) -> Vec<u8> {
     // Start with "erased flash" everywhere, then overwrite only the fields
     // the BOOTROM actually reads. Matches original semantics of
@@ -144,15 +145,23 @@ fn build_ftab(
         flags: 0,
     };
 
-    // ftab[FTAB_PLACES_SLOT]: our own pointer to places.bin. Unused by
-    // the BOOTROM; consumed by the stub's `FlashLayout::get_layout` to
-    // locate the PLCB footer without scanning.
-    sec.ftab[FTAB_PLACES_SLOT] = FlashTable {
-        base: places_base,
-        size: places_size,
+    // ftab[FTAB_PLACES_SLOT_A]: slot A places.bin location.
+    sec.ftab[FTAB_PLACES_SLOT_A] = FlashTable {
+        base: places_a_base,
+        size: places_a_size,
         xip_base: 0,
         flags: 0,
     };
+
+    // ftab[FTAB_PLACES_SLOT_B]: slot B places.bin location (if A/B enabled).
+    if let Some((b_base, b_size)) = places_b {
+        sec.ftab[FTAB_PLACES_SLOT_B] = FlashTable {
+            base: b_base,
+            size: b_size,
+            xip_base: 0,
+            flags: 0,
+        };
+    }
 
     // imgs[BL]: only length/blksize/flags are meaningful. key/sig/ver stay
     // 0xFF — flags=0 (no DFU_FLAG_ENC) means `dfu_boot_img_in_flash` takes
@@ -196,7 +205,8 @@ fn build_ftab_from_config(
     layout: &Layout,
     place_layouts: &BTreeMap<String, PlaceLayout>,
     bootloader_bin_size: u32,
-    places_bin_size: u32,
+    places_a_size: u32,
+    places_b_size: Option<u32>,
 ) -> Option<Vec<u8>> {
     let boot = config.boot.as_ref()?;
 
@@ -209,15 +219,26 @@ fn build_ftab_from_config(
         .unwrap_or(0x12000000) as u32;
     let ftab_flash_addr = flash_base + ftab_offset as u32;
 
-    // Base of the places-hosting partition. Same mapping resolution as
-    // the ftab address — first CPU mapping plus the place's offset.
-    let image_place = &boot.image;
-    let image_flash_base = image_place
+    // Slot A flash address.
+    let image_a = &boot.image;
+    let image_a_flash_base = image_a
         .mappings
         .first()
         .map(|m| m.address)
         .unwrap_or(0x12000000) as u32;
-    let places_flash_addr = image_flash_base + image_place.offset.unwrap_or(0) as u32;
+    let places_a_flash_addr = image_a_flash_base + image_a.offset.unwrap_or(0) as u32;
+
+    // Slot B flash address (if A/B enabled).
+    let places_b = boot.image_b.as_ref().and_then(|image_b| {
+        let b_size = places_b_size?;
+        let b_flash_base = image_b
+            .mappings
+            .first()
+            .map(|m| m.address)
+            .unwrap_or(0x12000000) as u32;
+        let b_flash_addr = b_flash_base + image_b.offset.unwrap_or(0) as u32;
+        Some((b_flash_addr, b_size))
+    });
 
     // SRAM destination: the bootloader's linker base.
     let bootloader_alloc = layout
@@ -229,7 +250,7 @@ fn build_ftab_from_config(
     // the bootloader's bytes physically landed in places.bin.
     let bl_place_name = crate::layout::find_place_name(config, bootloader_alloc.base)?;
     let pl = place_layouts.get(&bl_place_name)?;
-    let loader_flash_src = (places_flash_addr as u64
+    let loader_flash_src = (places_a_flash_addr as u64
         + pl.file_offset as u64
         + (bootloader_alloc.base - pl.blob_base)) as u32;
 
@@ -238,8 +259,9 @@ fn build_ftab_from_config(
         loader_flash_src,
         loader_xip_dest,
         bootloader_bin_size,
-        places_flash_addr,
-        places_bin_size,
+        places_a_flash_addr,
+        places_a_size,
+        places_b,
     ))
 }
 
@@ -260,6 +282,7 @@ pub fn pack(
     artifacts: &[CompileArtifact],
     places_bin: &Path,
     place_layouts: &BTreeMap<String, PlaceLayout>,
+    places_b_bin: Option<&Path>,
     bootloader_size: u32,
     log_metadata: Option<&Path>,
     ipc_metadata: Option<&Path>,
@@ -274,18 +297,32 @@ pub fn pack(
     let mut zip = ZipWriter::new(file);
     let opts = SimpleFileOptions::default();
 
-    // places.bin
+    // places.bin (slot A)
     let places_data = std::fs::read(places_bin).map_err(PackError::Io)?;
-    let places_bin_size: u32 = places_data
+    let places_a_size: u32 = places_data
         .len()
         .try_into()
         .map_err(|_| PackError::Other("places.bin size exceeds u32".into()))?;
     zip.start_file("places.bin", opts).map_err(PackError::Zip)?;
     zip.write_all(&places_data).map_err(PackError::Io)?;
 
+    // places_b.bin (slot B, if A/B enabled)
+    let places_b_size: Option<u32> = if let Some(b_path) = places_b_bin {
+        let b_data = std::fs::read(b_path).map_err(PackError::Io)?;
+        let b_size: u32 = b_data
+            .len()
+            .try_into()
+            .map_err(|_| PackError::Other("places_b.bin size exceeds u32".into()))?;
+        zip.start_file("places_b.bin", opts).map_err(PackError::Zip)?;
+        zip.write_all(&b_data).map_err(PackError::Io)?;
+        Some(b_size)
+    } else {
+        None
+    };
+
     // ftab.bin (if boot config exists)
     if let Some(ftab) =
-        build_ftab_from_config(config, layout, place_layouts, bootloader_size, places_bin_size)
+        build_ftab_from_config(config, layout, place_layouts, bootloader_size, places_a_size, places_b_size)
     {
         zip.start_file("ftab.bin", opts).map_err(PackError::Zip)?;
         zip.write_all(&ftab).map_err(PackError::Io)?;

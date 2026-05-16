@@ -1428,6 +1428,7 @@ pub fn pend_software_irq(
 
 #[repr(u8)]
 #[allow(dead_code)]
+#[derive(Copy, Clone)]
 #[cfg(any(armv7m, armv8m))]
 enum FaultType {
     MemoryManagement = 4,
@@ -1756,6 +1757,21 @@ unsafe extern "C" fn handle_fault(
         )
     };
     let from_thread_mode = exc_return & 0b1000 != 0;
+
+    if idx == 0 {
+        // Diagnostic: emit fault info on USART so silent task faults are visible.
+        klog("SUPERVISOR FAULT");
+        klog_hex("  task=", idx as u32);
+        klog_hex("  type=", fault_type as u8 as u32);
+        klog_hex("  CFSR=", cfsr.bits());
+        klog_hex("  PSP=", psp);
+        if cfsr.contains(Cfsr::MMARVALID) {
+            klog_hex("  MMFAR=", scb.mmfar.read());
+        }
+        if cfsr.contains(Cfsr::BFARVALID) {
+            klog_hex("  BFAR=", scb.bfar.read());
+        }
+    }
 
     if !from_thread_mode {
         // Uh. This fault originates from the kernel. Let's try to make the

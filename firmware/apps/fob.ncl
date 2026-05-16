@@ -17,15 +17,23 @@ fun args =>
     places = args.places,
     memory = args.board.memory,
     peripheral_map = args.board.peripheral_map,
-    boot = {
-      ftab = args.places.boot,
-      image = args.places.firmware,
-    },
+    boot =
+      if std.record.has_field "firmware_b" args.places then
+        {
+          ftab = args.places.boot,
+          image = args.places.firmware_a,
+          image_b = args.places.firmware_b,
+        }
+      else if std.record.has_field "firmware_a" args.places then
+        { ftab = args.places.boot, image = args.places.firmware_a }
+      else
+        { ftab = args.places.boot, image = args.places.firmware },
 
     notifications = {
       logs         = { min_priority = 0,  max_priority = 10 },
       usb_event    = { min_priority = 15, max_priority = 15 },
       usart_event  = { min_priority = 15, max_priority = 15 },
+      power_event  = { min_priority = 15, max_priority = 15 },
       host_request = { min_priority = 20, max_priority = 20 },
       present      = { min_priority = 25, max_priority = 25 },
       lcpu_data    = { min_priority = 50, max_priority = 50 },
@@ -48,6 +56,7 @@ fun args =>
       args.tasks.supervisor,
       args.tasks.idle,
       args.tasks.fob,
+      args.tasks.sysmodule_power,
 
       ## You can think of the following as 'host dependencies'
 

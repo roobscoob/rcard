@@ -10,8 +10,8 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 sysmodule_clocks_api::bind_clocks!(Clocks = SLOTS.sysmodule_clocks);
 
-/// PA08 — HAPTIC_EN (active-high enable for DRV2603)
-const HAPTIC_EN_BIT: u32 = 1 << 8;
+/// PA07 — HAPTIC_EN (active-high enable for DRV2603)
+const HAPTIC_EN_BIT: u32 = 1 << 7;
 
 fn tim() -> sifli_pac::gptim::Gptim {
     sifli_pac::GPTIM2

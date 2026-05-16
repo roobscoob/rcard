@@ -7,7 +7,7 @@ fun ctx => {
   depends_on = [
     ctx.tasks.sysmodule_log,
     ctx.tasks.sysmodule_clocks,
-    ctx.tasks.sysmodule_syscon,
+    ctx.tasks.sysmodule_power,
   ],
   regions = {
     code  = { place = ctx.places.code_generic, execute = true },

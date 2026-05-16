@@ -1,5 +1,5 @@
 [package]
-name = "sysmodule_syscon"
+name = "sysmodule_mpr121"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,17 +8,19 @@ default = ["bare-panics"]
 bare-panics = ["ipc/bare-panics"]
 
 [dependencies]
+generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc" }
-sysmodule_syscon_api = { path = "api", features = ["bare-panics"] }
-sysmodule_log_api = { path = "../log/api" }
 sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
 rcard-log = { path = "../../../shared/log", features = ["writer"] }
 rcard-log-macros = { path = "../../../shared/log/macros" }
+sysmodule_mpr121_api = { path = "api" }
+sysmodule_clocks_api = { path = "../clocks/api", features = ["bare-panics"] }
+sysmodule_log_api = { path = "../log/api" }
+sysmodule_power_api = { path = "../power/api", features = ["bare-panics"] }
 userlib.workspace = true
-generated = { path = "../../modules/generated" }
 
 [[bin]]
-name = "sysmodule_syscon"
+name = "sysmodule_mpr121"
 test = false
 bench = false
 

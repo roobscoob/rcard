@@ -1,5 +1,5 @@
 [package]
-name = "sysmodule_syscon_api"
+name = "sysmodule_region_hibernation_api"
 version = "0.1.0"
 edition = "2021"
 

@@ -1,0 +1,25 @@
+[package]
+name = "sysmodule_region_hibernation"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["bare-panics"]
+bare-panics = ["ipc/bare-panics"]
+
+[dependencies]
+ipc = { path = "../../modules/ipc" }
+sysmodule_region_hibernation_api = { path = "api", features = ["bare-panics"] }
+sysmodule_log_api = { path = "../log/api", features = ["bare-panics"] }
+rcard-log = { path = "../../../shared/log" }
+rcard-log-macros = { path = "../../../shared/log/macros" }
+userlib.workspace = true
+generated = { path = "../../modules/generated" }
+
+[[bin]]
+name = "sysmodule_region_hibernation"
+test = false
+bench = false
+
+[lints]
+workspace = true

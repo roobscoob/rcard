@@ -5,10 +5,11 @@ fun ctx => {
   priority = lib.workgroup.app,
   depends_on = [
     ctx.tasks.sysmodule_bluetooth,
-    ctx.tasks.sysmodule_cap1208,
+    ctx.tasks.sysmodule_mpr121,
     ctx.tasks.sysmodule_compositor,
     ctx.tasks.sysmodule_drv2603,
     ctx.tasks.sysmodule_log,
+    ctx.tasks.sysmodule_power,
     ctx.tasks.sysmodule_reactor,
   ],
   uses_notifications = ["present"],

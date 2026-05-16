@@ -110,11 +110,11 @@ pub unsafe fn apply_pin_config() {
     rmw(0x5000_3048, 0x7F, 0x11);
     // PA06 -> lcdc spi dio1 (FSEL=1, pull=down)
     rmw(0x5000_304C, 0x7F, 0x11);
-    // PA07 -> gptim2 ch1 (FSEL=5, pull=down)
-    rmw(0x5000_3050, 0x7F, 0x15);
-    rmw(0x5000_B068, 0x3F, 0x07); // PINR: gptim2 ch1 = PA07
-                                  // PA08 -> haptic_en gpio out (FSEL=0, pull=down)
-    rmw(0x5000_3054, 0x7F, 0x10);
+    // PA07 -> haptic_en gpio out (FSEL=0, pull=down)
+    rmw(0x5000_3050, 0x7F, 0x10);
+    // PA08 -> gptim2 ch1 (FSEL=5, pull=down)
+    rmw(0x5000_3054, 0x7F, 0x15);
+    rmw(0x5000_B068, 0x3F, 0x08); // PINR: gptim2 ch1 = PA08
     // PA09 -> usart2 tx (FSEL=4, pull=down)
     rmw(0x5000_3058, 0x7F, 0x14);
     rmw(0x5000_B05C, 0x3F, 0x09); // PINR: usart2 tx = PA09
@@ -149,18 +149,18 @@ pub unsafe fn apply_pin_config() {
     rmw(0x5000_30A0, 0x7F, 0x70);
     // PA28 -> ws2812_en gpio out (FSEL=0, pull=down)
     rmw(0x5000_30A4, 0x7F, 0x10);
-    // PA30 -> i2c3 sda (FSEL=4 = PA_I2C_UART, pull=up, IE)
+    // PA30 -> i2c3 scl (FSEL=4 = PA_I2C_UART, pull=up, IE)
     rmw(0x5000_30AC, 0x7F, 0x74);
-    rmw(0x5000_B050, 0x3F00, 0x1E00); // PINR: i2c3 sda = PA30
-                                      // PA31 -> i2c3 scl (FSEL=4, pull=up, IE)
+    // PA31 -> i2c3 sda (FSEL=4, pull=up, IE)
     rmw(0x5000_30B0, 0x7F, 0x74);
-    rmw(0x5000_B050, 0x3F, 0x1F); // PINR: i2c3 scl = PA31
-                                  // PA32 -> i2c2 sda (FSEL=4, pull=up, IE)
+    rmw(0x5000_B050, 0x3F, 0x1E); // PINR: i2c3 scl = PA30
+    rmw(0x5000_B050, 0x3F00, 0x1F00); // PINR: i2c3 sda = PA31
+    // PA32 -> i2c2 scl (FSEL=4, pull=up, IE)
     rmw(0x5000_30B4, 0x7F, 0x74);
-    rmw(0x5000_B04C, 0x3F00, 0x2000); // PINR: i2c2 sda = PA32
-                                      // PA33 -> i2c2 scl (FSEL=4, pull=up, IE)
+    // PA33 -> i2c2 sda (FSEL=4, pull=up, IE)
     rmw(0x5000_30B8, 0x7F, 0x74);
-    rmw(0x5000_B04C, 0x3F, 0x21); // PINR: i2c2 scl = PA33
+    rmw(0x5000_B04C, 0x3F, 0x20); // PINR: i2c2 scl = PA32
+    rmw(0x5000_B04C, 0x3F00, 0x2100); // PINR: i2c2 sda = PA33
     // I2C pads need output enable (DOESR = write-1-to-set)
     // DOESR0: PA30 (bit 30), PA31 (bit 31)
     let doesr0 = 0x500A_0014 as *mut u32;

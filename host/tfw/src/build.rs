@@ -627,8 +627,9 @@ pub fn build(
 
     emit(BuildEvent::Build(BuildState::Packing));
 
+    // ── Link slot A ───────────────────────────────────────────────
     let (final_bin, place_layouts) =
-        crate::link::link_image(&artifacts, &config, &layout, &img_dir, emit)
+        crate::link::link_image(&artifacts, &config, &layout, &img_dir, "places.bin", None, emit)
             .map_err(BuildError::Link)?;
 
     let bootloader_size = artifacts
@@ -643,6 +644,25 @@ pub fn build(
     emit(BuildEvent::Image(ResourceUpdate::State(
         ImageState::Assembled { size: bin_size },
     )));
+
+    // ── Link slot B (if A/B enabled) ──────────────────────────────
+    let final_bin_b: Option<std::path::PathBuf> = if config.boot.as_ref()
+        .and_then(|b| b.image_b.as_ref()).is_some()
+    {
+        let b_artifacts = crate::compile::relink_for_slot_b(
+            &config, &layout, &artifacts, &linker_dir, &work_dir, emit,
+        ).map_err(BuildError::Compile)?;
+
+        let image_b = config.boot.as_ref().unwrap().image_b.as_ref().unwrap();
+        let (b_bin, _b_place_layouts) = crate::link::link_image(
+            &b_artifacts, &config, &layout, &img_dir,
+            "places_b.bin", Some(image_b), emit,
+        ).map_err(BuildError::Link)?;
+
+        Some(b_bin)
+    } else {
+        None
+    };
 
     let mut build_meta = crate::build_metadata::BuildMetadata::from_build(
         &build_id,
@@ -665,6 +685,7 @@ pub fn build(
         &artifacts,
         &final_bin,
         &place_layouts,
+        final_bin_b.as_deref(),
         bootloader_size,
         Some(&log_metadata_path),
         Some(&ipc_metadata_path),

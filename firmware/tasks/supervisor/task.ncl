@@ -8,10 +8,10 @@ fun ctx => {
   # Peer reference exposes `generated::peers::PEERS.sysmodule_log` at codegen
   # time so `handle_emit_log` can ACL its caller against the known
   # sysmodule_log task index. Tolerated `None` if a build excludes log.
-  peers = ["sysmodule_log"],
+  peers = ["sysmodule_log", "sysmodule_region_hibernation"],
   regions = {
     code  = { place = ctx.places.code_generic, execute = true },
-    stack = { place = ctx.places.fast, size = 512 },
+    stack = { place = ctx.places.fast, size = 1024 },
     data  = { place = ctx.places.fast },
   },
 }

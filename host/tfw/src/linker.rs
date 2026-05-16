@@ -149,6 +149,7 @@ SECTIONS
   .vector_table ORIGIN(FLASH) :
   {
     __start_vector = .;
+    __vector_table = .;
     LONG(_stack_start);
     KEEP(*(.vector_table.reset_vector));
     __reset_vector = .;
@@ -180,6 +181,7 @@ SECTIONS
 
   .stack (NOLOAD) : ALIGN(8) {
     _stack_base = .;
+    _stack_end = .;
     . = ORIGIN(STACK) + LENGTH(STACK);
     _stack_start = .;
   } > STACK

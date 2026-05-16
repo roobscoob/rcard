@@ -843,12 +843,24 @@ fn generate_kconfig(
 ) -> Result<String, CompileError> {
     let priorities = compute_priorities(task_names);
 
+    let hibernation_regions: Vec<_> = config.memory.values()
+        .filter(|dev| !dev.mappings.is_empty())
+        .filter_map(|dev| {
+            let m = dev.mappings.first()?;
+            Some(build_kconfig::HibernationRegionConfig {
+                base: m.address as u32,
+                size: dev.size as u32,
+            })
+        })
+        .collect();
+
     let mut kconfig = build_kconfig::KernelConfig {
         features: vec!["stack_watermark".to_string()],
         extern_regions: BTreeMap::new(),
         tasks: Vec::new(),
         shared_regions: BTreeMap::new(),
         irqs: BTreeMap::new(),
+        hibernation_regions,
     };
 
     // Register peripherals as shared regions (Device memory).
@@ -1045,6 +1057,160 @@ fn find_manifest(
         .ok_or_else(|| CompileError::ManifestNotFound {
             crate_name: crate_name.to_string(),
         })
+}
+
+// ── Slot B re-linking ────────────────────────────────────────────────────────
+
+/// Re-link tasks whose code falls in `image_a`'s address range at
+/// `image_b`'s addresses instead.  RAM-resident tasks (kernel,
+/// bootloader, tasks in bulk/fast/scratch) are returned unchanged.
+///
+/// Only the linker is re-invoked — cargo build artifacts are reused
+/// from `work_dir/partial/`, so the cost is one `run_linker` call per
+/// affected task (~1s each).
+pub fn relink_for_slot_b(
+    config: &AppConfig,
+    layout: &Layout,
+    artifacts: &[CompileArtifact],
+    linker_dir: &Path,
+    work_dir: &Path,
+    emit: crate::build::EventFn<'_>,
+) -> Result<Vec<CompileArtifact>, CompileError> {
+    use crate::build::{BuildEvent, CrateKind, CrateState, ResourceUpdate};
+
+    let boot = config.boot.as_ref()
+        .ok_or_else(|| CompileError::Other("slot B re-link requires boot config".into()))?;
+    let image_b = boot.image_b.as_ref()
+        .ok_or_else(|| CompileError::Other("slot B re-link requires boot.image_b".into()))?;
+
+    let host_a = &boot.image;
+    let a_base = layout::resolve_cpu_address(host_a, true)
+        .or_else(|| layout::resolve_cpu_address(host_a, false))
+        .ok_or_else(|| CompileError::Other("image_a has no CPU mapping".into()))?;
+    let a_end = a_base + host_a.size;
+
+    let b_base = layout::resolve_cpu_address(image_b, true)
+        .or_else(|| layout::resolve_cpu_address(image_b, false))
+        .ok_or_else(|| CompileError::Other("image_b has no CPU mapping".into()))?;
+    let delta = b_base as i64 - a_base as i64;
+
+    let linker = find_linker()?;
+    let partial_dir = work_dir.join("partial");
+    let final_b_dir = work_dir.join("final_b");
+    std::fs::create_dir_all(&final_b_dir).map_err(CompileError::Io)?;
+
+    let all_tasks = layout::collect_tasks(config);
+
+    let mut out = Vec::with_capacity(artifacts.len());
+
+    for artifact in artifacts {
+        if artifact.kind != ArtifactKind::Task {
+            out.push(CompileArtifact {
+                crate_name: artifact.crate_name.clone(),
+                elf_path: artifact.elf_path.clone(),
+                kind: artifact.kind,
+            });
+            continue;
+        }
+
+        let code_key = (artifact.crate_name.clone(), "code".to_string());
+        let code_alloc = layout.placed.get(&code_key);
+        let in_host_range = code_alloc
+            .is_some_and(|a| a.base >= a_base && a.base < a_end);
+
+        if !in_host_range {
+            out.push(CompileArtifact {
+                crate_name: artifact.crate_name.clone(),
+                elf_path: artifact.elf_path.clone(),
+                kind: artifact.kind,
+            });
+            continue;
+        }
+
+        let task_name = &artifact.crate_name;
+
+        emit(BuildEvent::Crate {
+            name: task_name.clone(),
+            kind: CrateKind::Task,
+            update: ResourceUpdate::State(CrateState::Linking),
+        });
+
+        let task = all_tasks.get(task_name.as_str())
+            .ok_or_else(|| CompileError::Other(
+                format!("task {task_name} not found in config"),
+            ))?;
+
+        let memory_x = generate_slot_b_memory_x(
+            task_name, task, layout,
+            (a_base, a_end), delta,
+        );
+        let mem_dir = final_b_dir.join(format!("{task_name}_mem"));
+        std::fs::create_dir_all(&mem_dir).map_err(CompileError::Io)?;
+        std::fs::write(mem_dir.join("memory.x"), &memory_x)
+            .map_err(CompileError::Io)?;
+
+        let partial_obj = partial_dir.join(task_name);
+        let final_elf = final_b_dir.join(task_name);
+        let link_script = linker_dir.join(task_name).join("link.x");
+
+        run_linker(&linker, &partial_obj, &final_elf, &link_script, &mem_dir)?;
+
+        emit(BuildEvent::Crate {
+            name: task_name.clone(),
+            kind: CrateKind::Task,
+            update: ResourceUpdate::State(CrateState::Linked),
+        });
+
+        out.push(CompileArtifact {
+            crate_name: task_name.clone(),
+            elf_path: final_elf,
+            kind: ArtifactKind::Task,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Generate `memory.x` for slot B: identical to the slot A layout
+/// except allocations in the host place (firmware_a) are shifted by
+/// `delta` bytes to land in firmware_b's address range.
+fn generate_slot_b_memory_x(
+    task_name: &str,
+    task: &TaskConfig,
+    layout: &Layout,
+    host_range: (u64, u64),
+    delta: i64,
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("MEMORY\n{\n");
+
+    for (region_name, _req) in &task.regions {
+        let key = (task_name.to_string(), region_name.clone());
+        let linker_name = match region_name.as_str() {
+            "code" => "FLASH",
+            "data" => "RAM",
+            "stack" => "STACK",
+            other => &other.to_uppercase(),
+        };
+        let attrs = if region_name == "code" { "rx" } else { "rw" };
+
+        if let Some(alloc) = layout.placed.get(&key) {
+            let base = if alloc.base >= host_range.0 && alloc.base < host_range.1 {
+                (alloc.base as i64 + delta) as u64
+            } else {
+                alloc.base
+            };
+            writeln!(
+                out,
+                "  {linker_name} ({attrs}) : ORIGIN = {base:#010x}, LENGTH = {:#x}",
+                alloc.size
+            )
+            .unwrap();
+        }
+    }
+
+    out.push_str("}\n");
+    out
 }
 
 #[derive(Debug, thiserror::Error)]

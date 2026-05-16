@@ -13,7 +13,7 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 
 sysmodule_clocks_api::bind_clocks!(Clocks = SLOTS.sysmodule_clocks);
-sysmodule_syscon_api::bind_syscon!(Syscon = SLOTS.sysmodule_syscon);
+sysmodule_power_api::bind_power!(Power = SLOTS.sysmodule_power);
 
 fn lcdc() -> sifli_pac::lcdc::Lcdc {
     sifli_pac::LCDC1
@@ -186,7 +186,7 @@ impl Display for DisplayResource {
         // wait for the display's power supply to stabilize before sending commands; empirically
         // ~10ms is sufficient
 
-        let _ = Syscon::enable_ldo(sysmodule_syscon_api::Ldo::Vdd33Ldo3);
+        let _ = Power::enable_ldo(sysmodule_power_api::Ldo::Vdd33Ldo3);
 
         wait_ms(10);
 

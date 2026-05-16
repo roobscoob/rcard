@@ -41,6 +41,10 @@ pub enum MpiOpenError {
     /// subsequent op, corrupting reads/writes/erases silently, so
     /// open() refuses rather than press on.
     AddressModeSwitchFailed = 5,
+    /// Failed to hibernate the XIP region before entering indirect mode.
+    /// Without hibernation, tasks XIP'ing from this flash would fault
+    /// during any SPI transaction.
+    HibernationFailed = 6,
 }
 
 /// Runtime failures during normal MPI operations (read/write/erase/...).

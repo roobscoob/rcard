@@ -18,6 +18,13 @@ const OP_DROP_REPORT: u16 = 0xDEAD;
 /// are rejected with a visible breadcrumb on the wire.
 const OP_EMIT_LOG: u16 = 0xE10C;
 
+/// Well-known operation codes for region hibernation, forwarded from
+/// `sysmodule_region_hibernation`.
+const OP_HIBERNATE_REGION: u16 = 0x4801;
+const OP_RESTORE_REGION: u16 = 0x4802;
+const OP_READ_HIBERNATED: u16 = 0x4803;
+const OP_WRITE_HIBERNATED: u16 = 0x4804;
+
 /// Maximum bytes a single `OP_EMIT_LOG` message will write to USART1.
 /// Anything beyond this is silently truncated. Sized to comfortably hold
 /// the `hello uid=… build=…\r\n` payload (~80 bytes) plus a margin.
@@ -186,6 +193,141 @@ fn handle_emit_log(sender: userlib::TaskId, data: &[u8]) {
     // SAFETY: n <= data.len() by construction above.
     usart_write_bytes(unsafe { data.get_unchecked(..n) });
     userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
+}
+
+fn acl_check_hibernation(sender: userlib::TaskId) -> bool {
+    generated::peers::PEERS
+        .sysmodule_region_hibernation
+        .map_or(false, |id| sender.task_index() == id.task_index())
+}
+
+fn read_u32_pair(data: &[u8]) -> Option<(u32, u32)> {
+    let a = u32::from_le_bytes(*data.first_chunk::<4>()?);
+    let b = u32::from_le_bytes(*data.get(4..)?.first_chunk::<4>()?);
+    Some((a, b))
+}
+
+// Inline kipc calls to avoid ssmarshal (which pulls in panic paths
+// that trip the supervisor_must_not_panic linker guard).
+
+fn handle_hibernate_region(sender: userlib::TaskId, data: &[u8]) {
+    if !acl_check_hibernation(sender) {
+        usart_write_tick_prefix();
+        usart_write_bytes(b"supervisor: rejected hibernate from wrong sender\r\n");
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFE), &[]);
+        return;
+    }
+    let Some((base, size)) = read_u32_pair(data) else {
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFF), &[]);
+        return;
+    };
+
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&base.to_le_bytes());
+    buf[4..].copy_from_slice(&size.to_le_bytes());
+    let (rc, _) = userlib::sys_send_to_kernel(
+        hubris_abi::Kipcnum::HibernateRegion as u16,
+        &mut buf, 8, &mut [],
+    );
+    if rc == userlib::ResponseCode::SUCCESS {
+        // Event ID is written back into buf[..4] by the kernel.
+        userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &buf[..4]);
+    } else {
+        userlib::sys_reply(sender, userlib::ResponseCode(rc.0), &[]);
+    }
+}
+
+fn handle_restore_region(sender: userlib::TaskId, data: &[u8]) {
+    if !acl_check_hibernation(sender) {
+        usart_write_tick_prefix();
+        usart_write_bytes(b"supervisor: rejected restore from wrong sender\r\n");
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFE), &[]);
+        return;
+    }
+    let Some((id_raw, mode_raw)) = read_u32_pair(data) else {
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFF), &[]);
+        return;
+    };
+
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&id_raw.to_le_bytes());
+    buf[4..].copy_from_slice(&mode_raw.to_le_bytes());
+    let (rc, _) = userlib::sys_send_to_kernel(
+        hubris_abi::Kipcnum::RestoreRegion as u16,
+        &mut buf, 8, &mut [],
+    );
+    if rc == userlib::ResponseCode::SUCCESS {
+        userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &[]);
+    } else {
+        userlib::sys_reply(sender, userlib::ResponseCode(rc.0), &[]);
+    }
+}
+
+fn handle_read_hibernated(sender: userlib::TaskId, data: &[u8]) {
+    if !acl_check_hibernation(sender) {
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFE), &[]);
+        return;
+    }
+    let Some((addr, len)) = read_u32_pair(data) else {
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFF), &[]);
+        return;
+    };
+
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&addr.to_le_bytes());
+    buf[4..].copy_from_slice(&len.to_le_bytes());
+
+    let mut local = [0u8; 256];
+    let n = (len as usize).min(local.len());
+    let mut leases = [userlib::Lease::write_only(&mut local[..n])];
+    let (rc, copied) = userlib::sys_send_to_kernel(
+        hubris_abi::Kipcnum::ReadHibernatedRegion as u16,
+        &mut buf, 8, &mut leases,
+    );
+    drop(leases);
+    let copied = copied.min(n);
+    if rc == userlib::ResponseCode::SUCCESS {
+        userlib::sys_borrow_write(sender, 0, 0, &local[..copied]);
+        let reply = (copied as u32).to_le_bytes();
+        userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &reply);
+    } else {
+        userlib::sys_reply(sender, userlib::ResponseCode(rc.0), &[]);
+    }
+}
+
+fn handle_write_hibernated(sender: userlib::TaskId, data: &[u8]) {
+    if !acl_check_hibernation(sender) {
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFE), &[]);
+        return;
+    }
+    let Some((addr, len)) = read_u32_pair(data) else {
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFF), &[]);
+        return;
+    };
+
+    let mut local = [0u8; 256];
+    let n = (len as usize).min(local.len());
+    if let Some(read) = userlib::sys_borrow_read(sender, 0, 0, &mut local[..n]) {
+        let read = read.min(n);
+        let mut buf = [0u8; 8];
+        buf[..4].copy_from_slice(&addr.to_le_bytes());
+        buf[4..].copy_from_slice(&(read as u32).to_le_bytes());
+        let mut leases = [userlib::Lease::read_only(&local[..read])];
+        let (rc, copied) = userlib::sys_send_to_kernel(
+            hubris_abi::Kipcnum::WriteHibernatedRegion as u16,
+            &mut buf, 8, &mut leases,
+        );
+        drop(leases);
+        let copied = copied.min(read);
+        if rc == userlib::ResponseCode::SUCCESS {
+            let reply = (copied as u32).to_le_bytes();
+            userlib::sys_reply(sender, userlib::ResponseCode::SUCCESS, &reply);
+        } else {
+            userlib::sys_reply(sender, userlib::ResponseCode(rc.0), &[]);
+        }
+    } else {
+        userlib::sys_reply(sender, userlib::ResponseCode(0xFF), &[]);
+    }
 }
 
 // NOTE: print_task_state / print_all_task_states call kipc::read_task_status
@@ -462,6 +604,46 @@ fn main() -> ! {
                         usart_write_tick_prefix();
                         usart_write_bytes(b"supervisor: malformed emit_log\r\n");
                         userlib::sys_reply(msg.sender, userlib::ResponseCode::SUCCESS, &[]);
+                    }
+                } else if msg.operation == OP_HIBERNATE_REGION {
+                    if let Ok(data) = msg.data {
+                        handle_hibernate_region(msg.sender, data);
+                    } else {
+                        userlib::sys_reply(
+                            msg.sender,
+                            userlib::ResponseCode(0xFF),
+                            &[],
+                        );
+                    }
+                } else if msg.operation == OP_RESTORE_REGION {
+                    if let Ok(data) = msg.data {
+                        handle_restore_region(msg.sender, data);
+                    } else {
+                        userlib::sys_reply(
+                            msg.sender,
+                            userlib::ResponseCode(0xFF),
+                            &[],
+                        );
+                    }
+                } else if msg.operation == OP_READ_HIBERNATED {
+                    if let Ok(data) = msg.data {
+                        handle_read_hibernated(msg.sender, data);
+                    } else {
+                        userlib::sys_reply(
+                            msg.sender,
+                            userlib::ResponseCode(0xFF),
+                            &[],
+                        );
+                    }
+                } else if msg.operation == OP_WRITE_HIBERNATED {
+                    if let Ok(data) = msg.data {
+                        handle_write_hibernated(msg.sender, data);
+                    } else {
+                        userlib::sys_reply(
+                            msg.sender,
+                            userlib::ResponseCode(0xFF),
+                            &[],
+                        );
                     }
                 } else {
                     usart_write_tick_prefix();

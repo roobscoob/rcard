@@ -144,6 +144,11 @@ pub fn compute_reservations(config: &AppConfig) -> Reservations {
         if resolve_cpu_address(host, false).is_some() {
             out.insert(place_key(host), PLCB_TRAILER_RESERVATION);
         }
+        if let Some(host_b) = &boot.image_b {
+            if resolve_cpu_address(host_b, false).is_some() {
+                out.insert(place_key(host_b), PLCB_TRAILER_RESERVATION);
+            }
+        }
     }
     out
 }
@@ -342,12 +347,15 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
         }
 
         let alloc = try_allocate(place, size, align, false, &mut cursors, reservations)
-            .ok_or_else(|| LayoutError::OutOfSpace {
+            .ok_or_else(|| LayoutError::OutOfSpace(OutOfSpaceDetail {
                 owner: format!("shared:{}", group_name),
                 region: group_name.clone(),
                 needed: size,
                 available: remaining_in_place(place, &cursors),
-            })?;
+                place_name: place.name.clone().unwrap_or_else(|| "?".into()),
+                place_size: place.size,
+                occupants: occupants_in_place(&placed, place),
+            }))?;
 
         for key in &group.members {
             placed.insert(key.clone(), alloc.clone());
@@ -379,12 +387,15 @@ pub fn solve(config: &AppConfig, reservations: &Reservations) -> Result<Layout, 
         let align = req.align.unwrap_or(4);
 
         let alloc = try_allocate(place, size, align, req.execute, &mut cursors, reservations)
-            .ok_or_else(|| LayoutError::OutOfSpace {
+            .ok_or_else(|| LayoutError::OutOfSpace(OutOfSpaceDetail {
                 owner: key.0.clone(),
                 region: key.1.clone(),
                 needed: size,
                 available: remaining_in_place(place, &cursors),
-            })?;
+                place_name: place.name.clone().unwrap_or_else(|| "?".into()),
+                place_size: place.size,
+                occupants: occupants_in_place(&placed, place),
+            }))?;
 
         placed.insert(key.clone(), alloc);
     }
@@ -543,12 +554,15 @@ impl Layout {
             }
 
             let alloc = try_allocate(&r.place, r.size, r.align, r.execute, &mut cursors, reservations)
-                .ok_or_else(|| LayoutError::OutOfSpace {
+                .ok_or_else(|| LayoutError::OutOfSpace(OutOfSpaceDetail {
                     owner: r.key.0.clone(),
                     region: r.key.1.clone(),
                     needed: r.size,
                     available: remaining_in_place(&r.place, &cursors),
-                })?;
+                    place_name: r.place.name.clone().unwrap_or_else(|| "?".into()),
+                    place_size: r.place.size,
+                    occupants: occupants_in_place(&self.placed, &r.place),
+                }))?;
 
             self.placed.insert(r.key.clone(), alloc);
         }
@@ -625,16 +639,122 @@ pub fn ordered_task_names<'a>(all_tasks: &BTreeMap<&'a str, &TaskConfig>) -> Vec
     entries.into_iter().map(|(name, _, _)| name).collect()
 }
 
-#[derive(Debug, thiserror::Error)]
+// ---------------------------------------------------------------------------
+// Out-of-space detail
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct PlaceOccupant {
+    pub owner: String,
+    pub region: String,
+    pub size: u64,
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn occupants_in_place(
+    placed: &BTreeMap<RegionKey, Allocation>,
+    place: &Place,
+) -> Vec<PlaceOccupant> {
+    let offset = place.offset.unwrap_or(0);
+    let mut out: Vec<PlaceOccupant> = placed
+        .iter()
+        .filter(|(_, alloc)| {
+            alloc.size > 0
+                && place.mappings.iter().any(|m| {
+                    let start = m.address + offset;
+                    let end = start + place.size;
+                    alloc.base >= start && alloc.base < end
+                })
+        })
+        .map(|((owner, region), alloc)| PlaceOccupant {
+            owner: owner.clone(),
+            region: region.clone(),
+            size: alloc.size,
+        })
+        .collect();
+    out.sort_by(|a, b| b.size.cmp(&a.size));
+    out
+}
+
+#[derive(Debug)]
+pub struct OutOfSpaceDetail {
+    pub owner: String,
+    pub region: String,
+    pub needed: u64,
+    pub available: u64,
+    pub place_name: String,
+    pub place_size: u64,
+    pub occupants: Vec<PlaceOccupant>,
+}
+
+impl std::fmt::Display for OutOfSpaceDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}: need {}, only {} available in {} ({} total)",
+            self.owner,
+            self.region,
+            human_size(self.needed),
+            human_size(self.available),
+            self.place_name,
+            human_size(self.place_size),
+        )?;
+        if !self.occupants.is_empty() {
+            let name_w = self
+                .occupants
+                .iter()
+                .map(|o| o.owner.len() + 1 + o.region.len())
+                .max()
+                .unwrap_or(10);
+            for o in &self.occupants {
+                let label = format!("{}.{}", o.owner, o.region);
+                write!(f, "\n    {:<w$}  {:>10}", label, human_size(o.size), w = name_w)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
 pub enum LayoutError {
-    #[error("{owner}.{region}: place has no CPU mapping")]
     NoMapping { owner: String, region: String },
-    #[error("{owner}.{region}: need {needed} bytes, {available} available")]
-    OutOfSpace { owner: String, region: String, needed: u64, available: u64 },
-    #[error("{owner}.{region}: deferred region was not measured")]
+    OutOfSpace(OutOfSpaceDetail),
     DeferredNotMeasured { owner: String, region: String },
-    #[error("shared group \"{group}\": {owner}.{region} conflicts on {field}")]
     SharedConflict { group: String, field: String, owner: String, region: String },
-    #[error("shared group \"{group}\": no member specifies {field}")]
     SharedMissing { group: String, field: String },
 }
+
+impl std::fmt::Display for LayoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoMapping { owner, region } => {
+                write!(f, "{owner}.{region}: place has no CPU mapping")
+            }
+            Self::OutOfSpace(detail) => detail.fmt(f),
+            Self::DeferredNotMeasured { owner, region } => {
+                write!(f, "{owner}.{region}: deferred region was not measured")
+            }
+            Self::SharedConflict { group, field, owner, region } => {
+                write!(f, "shared group \"{group}\": {owner}.{region} conflicts on {field}")
+            }
+            Self::SharedMissing { group, field } => {
+                write!(f, "shared group \"{group}\": no member specifies {field}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LayoutError {}

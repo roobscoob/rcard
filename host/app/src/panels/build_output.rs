@@ -1795,9 +1795,13 @@ fn diagnostics_section(ui: &mut egui::Ui, build: &BuildHandle) {
                 .stroke(egui::Stroke::new(1.0, theme::ERROR.gamma_multiply(0.25)))
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
+                    let mut lines = err.lines();
+                    let headline = lines.next().unwrap_or(err);
+                    let detail_lines: Vec<&str> = lines.collect();
                     ui.horizontal(|ui| {
+                        let stripe_h = 18.0 + 14.0 * (1 + detail_lines.len()) as f32;
                         let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(3.0, 34.0), egui::Sense::hover());
+                            ui.allocate_exact_size(egui::vec2(3.0, stripe_h), egui::Sense::hover());
                         ui.painter().rect_filled(
                             rect,
                             egui::CornerRadius::same(1),
@@ -1813,13 +1817,21 @@ fn diagnostics_section(ui: &mut egui::Ui, build: &BuildHandle) {
                             );
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(err)
+                                    egui::RichText::new(headline)
                                         .monospace()
                                         .size(11.0)
                                         .color(theme::TEXT_SECONDARY),
                                 )
                                 .wrap(),
                             );
+                            for line in &detail_lines {
+                                ui.label(
+                                    egui::RichText::new(*line)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(theme::TEXT_DIM),
+                                );
+                            }
                         });
                     });
                 });

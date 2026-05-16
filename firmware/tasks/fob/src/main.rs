@@ -4,8 +4,8 @@
 use generated::slots::SLOTS;
 use once_cell::{GlobalState, OnceCell};
 use rcard_log::{info, OptionExt, ResultExt};
-use sysmodule_cap1208_api::*;
 use sysmodule_compositor_api::{BlendMode, FrameBufferInfo, ImageFormat};
+use sysmodule_mpr121_api::*;
 use sysmodule_reactor_api::NOTIFICATION_BIT;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -13,10 +13,11 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
 sysmodule_bluetooth_api::bind_bluetooth!(Bt = SLOTS.sysmodule_bluetooth);
-sysmodule_cap1208_api::bind_cap1208!(Cap1208 = SLOTS.sysmodule_cap1208);
+sysmodule_mpr121_api::bind_mpr121!(Mpr121 = SLOTS.sysmodule_mpr121);
 sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
 sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
 sysmodule_drv2603_api::bind_drv2603!(Haptic = SLOTS.sysmodule_drv2603);
+sysmodule_power_api::bind_power!(Power = SLOTS.sysmodule_power);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
 const SCREEN_W: usize = 128;
@@ -26,8 +27,8 @@ const PITCH: usize = SCREEN_W / 8;
 const FB_BYTES: usize = PITCH * SCREEN_H;
 
 const NUM_CHANNELS: usize = 8;
-const BAR_STRIDE: usize = SCREEN_W / NUM_CHANNELS; // 16 px per bar
-const BAR_WIDTH: usize = BAR_STRIDE - 2; // 14 px bar, 2 px gap
+const BAR_STRIDE: usize = SCREEN_W / NUM_CHANNELS;
+const BAR_WIDTH: usize = BAR_STRIDE - 2;
 
 fn set_pixel(buf: &mut [u8; FB_BYTES], x: usize, y: usize) {
     if x < SCREEN_W && y < SCREEN_H {
@@ -55,7 +56,9 @@ const DIGITS: [[u8; 7]; 11] = [
 ];
 
 fn draw_char(buf: &mut [u8; FB_BYTES], ch: usize, x0: usize, y0: usize) {
-    if ch > 10 { return; }
+    if ch > 10 {
+        return;
+    }
     let glyph = &DIGITS[ch];
     let mut row = 0;
     while row < FONT_H {
@@ -94,36 +97,29 @@ fn draw_percentage(buf: &mut [u8; FB_BYTES], pct: u32) {
     draw_char(buf, 10, x, y_start); // %
 }
 
-fn draw_bars(buf: &mut [u8; FB_BYTES], top: &[i32; 8], bottom: &[i32; 8]) {
+fn draw_bars(buf: &mut [u8; FB_BYTES], top: &[i32; 12], bottom: &[i32; 12]) {
     buf.fill(0);
 
-    // Auto-scale: find min/max across all 16 values
-    let mut min = top[0];
-    let mut max = top[0];
+    let mut min = top[4];
+    let mut max = top[4];
     let mut i = 0;
-    while i < 8 {
-        if top[i] < min {
-            min = top[i];
-        }
-        if top[i] > max {
-            max = top[i];
-        }
-        if bottom[i] < min {
-            min = bottom[i];
-        }
-        if bottom[i] > max {
-            max = bottom[i];
-        }
+    while i < NUM_CHANNELS {
+        let ti = top[4 + i];
+        let bi = bottom[4 + i];
+        if ti < min { min = ti; }
+        if ti > max { max = ti; }
+        if bi < min { min = bi; }
+        if bi > max { max = bi; }
         i += 1;
     }
 
     let range = max - min;
 
-    // Top half: Device A bars grow downward from row 0
+    // Top half: Device B bars grow downward from row 0
     i = 0;
     while i < NUM_CHANNELS {
         let h = if range > 0 {
-            (((top[7 - i] - min) as u32 * HALF_H as u32) / range as u32) as usize
+            (((bottom[4 + i] - min) as u32 * HALF_H as u32) / range as u32) as usize
         } else {
             1
         };
@@ -140,11 +136,11 @@ fn draw_bars(buf: &mut [u8; FB_BYTES], top: &[i32; 8], bottom: &[i32; 8]) {
         i += 1;
     }
 
-    // Bottom half: Device B bars grow upward from row 63
+    // Bottom half: Device A bars grow upward from row 63
     i = 0;
     while i < NUM_CHANNELS {
         let h = if range > 0 {
-            (((bottom[i] - min) as u32 * HALF_H as u32) / range as u32) as usize
+            (((top[11 - i] - min) as u32 * HALF_H as u32) / range as u32) as usize
         } else {
             1
         };
@@ -170,8 +166,8 @@ const INTERVAL_MIN_MS: f32 = 10.0;
 const INTERVAL_MAX_MS: f32 = 500.0;
 
 struct TouchState {
-    cap_a: Cap1208,
-    cap_b: Cap1208,
+    touch_a: Mpr121,
+    touch_b: Mpr121,
     fb: FrameBuffer,
     _layer: Layer,
     buf: [u8; FB_BYTES],
@@ -188,6 +184,11 @@ fn handle_present(_sender: u16, _code: u32) {
         .get()
         .log_expect("touch state not initialized")
         .with(|s| {
+            match Power::charger_status() {
+                Ok(status) => info!("charger: {} vbus={}", status.state, status.vbus_present),
+                Err(e) => info!("charger status failed: {}", e),
+            }
+
             let now = userlib::sys_get_timer().now;
 
             // Triangle wave 0→1→0 over SWEEP_PERIOD_MS controls click rate
@@ -205,17 +206,17 @@ fn handle_present(_sender: u16, _code: u32) {
 
             // Fire a new click when interval has elapsed
             if !s.clicking && now - s.last_click >= interval_ms as u64 {
-                let _ = Haptic::drive(1.0);
+                let _ = Haptic::drive(0.5);
                 s.clicking = true;
                 s.click_start = now;
                 s.last_click = now;
             }
 
-            let top = match s.cap_a.read() {
+            let top = match s.touch_a.read() {
                 Ok(Ok(v)) => v,
                 _ => return,
             };
-            let bottom = match s.cap_b.read() {
+            let bottom = match s.touch_b.read() {
                 Ok(Ok(v)) => v,
                 _ => return,
             };
@@ -231,22 +232,21 @@ fn handle_present(_sender: u16, _code: u32) {
 fn main() -> ! {
     info!("fob: awake");
 
-    let config = Cap1208Config {
-        enabled_channels: 0xFF,
-        signal: SignalConfig::new(AnalogGain::X2, DigitalShift::X1),
-        sampling: SamplingConfig::fastest(Averaging::Avg4, Duration::Us640),
-        recalibration: RecalibrationConfig::every(RecalRate::Samples32)
-            .with_touch_duration(TouchRecalDuration::Disabled)
-            .with_below_baseline(BelowBaseline::Count32),
-    };
+    match Power::charger_force_start() {
+        Ok(Ok(())) => info!("fob: force charging enabled"),
+        Ok(Err(e)) => info!("fob: force charge failed: {}", e),
+        Err(e) => info!("fob: force charge IPC failed: {}", e),
+    }
 
-    let cap_a = Cap1208::open(Device::A, config)
-        .log_expect("cap1208 A IPC")
-        .log_expect("cap1208 A open");
+    let config = Mpr121Config::default_12ch();
 
-    let cap_b = Cap1208::open(Device::B, config)
-        .log_expect("cap1208 B IPC")
-        .log_expect("cap1208 B open");
+    let touch_a = Mpr121::open(Device::A, config)
+        .log_expect("mpr121 A IPC")
+        .log_expect("mpr121 A open");
+
+    let touch_b = Mpr121::open(Device::B, config)
+        .log_expect("mpr121 B IPC")
+        .log_expect("mpr121 B open");
 
     info!("fob: touch sensors open");
 
@@ -261,8 +261,8 @@ fn main() -> ! {
         .log_expect("layer creation");
 
     let _ = STATE.set(GlobalState::new(TouchState {
-        cap_a,
-        cap_b,
+        touch_a,
+        touch_b,
         fb,
         _layer: layer,
         buf,
@@ -270,20 +270,6 @@ fn main() -> ! {
         clicking: false,
         click_start: 0,
     }));
-
-    // BLE init
-    let mut name_buf = [0u8; 32];
-    let name = b"Charm";
-    name_buf[..name.len()].copy_from_slice(name);
-    let bd_addr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
-    match Bt::init(bd_addr, name_buf, name.len() as u8) {
-        Ok(Ok(bt)) => {
-            info!("fob: BLE initialized");
-            let _ = bt.start_advertising();
-        }
-        Ok(Err(e)) => info!("fob: BLE init error: {}", e),
-        Err(e) => info!("fob: BLE IPC error: {}", e),
-    }
 
     info!("fob: touch bar display running, starting haptic sweep");
 

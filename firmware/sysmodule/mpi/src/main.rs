@@ -12,6 +12,9 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(Log);
 sysmodule_clocks_api::bind_clocks!(Clocks = SLOTS.sysmodule_clocks);
+sysmodule_region_hibernation_api::bind_region_hibernation!(
+    Hibernation = SLOTS.sysmodule_region_hibernation
+);
 
 static MPI_IN_USE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
@@ -142,6 +145,7 @@ struct MpiResource {
     index: u8,
     regs: MpiPeri,
     config: MpiConfig,
+    hibernation_guard: Option<Hibernation>,
     /// Address width resolved from BFPT DWORD 1 bits 18:17 + chip
     /// capacity at `open()`. Drives EN4B/EX4B at init, the 3B/4B opcode
     /// choice in every read/write/erase, and the ADSIZE field in CCR1.
@@ -825,15 +829,37 @@ impl Mpi for MpiResource {
             return Err(MpiOpenError::AlreadyOpen);
         }
 
+        // MPI2 shares its flash chip with the XIP path — entering
+        // indirect mode breaks any task executing from that flash.
+        // Hibernate the entire MPI2 memory device so XIP tasks are
+        // suspended for the duration of this session. MPI1 (PSRAM)
+        // is initialised at boot before tasks start, so no hibernation.
+        const MPI2_XIP_BASE: u32 = 0x1200_0000;
+        const MPI2_XIP_SIZE: u32 = 8 * 1024 * 1024;
+
+        let hibernation_guard = if index == 2 {
+            match Hibernation::hibernate(MPI2_XIP_BASE, MPI2_XIP_SIZE) {
+                Ok(Ok(guard)) => Some(guard),
+                Err(e) => {
+                    error!("MPI{}: XIP hibernation failed: {}", index, e);
+                    MPI_IN_USE[(index - 1) as usize].store(false, Ordering::Release);
+                    return Err(MpiOpenError::HibernationFailed);
+                }
+                Ok(Err(e)) => {
+                    error!("MPI{}: XIP hibernation failed: {}", index, e);
+                    MPI_IN_USE[(index - 1) as usize].store(false, Ordering::Release);
+                    return Err(MpiOpenError::HibernationFailed);
+                }
+            }
+        } else {
+            None
+        };
+
         let mut resource = MpiResource {
             index,
             regs,
             config,
-            // Safe defaults: if anything slips between field init and
-            // `init_sfdp`, any address-bearing op with non-zero capacity
-            // will still produce deterministic behavior. SINGLE_STANDARD
-            // is the slowest but most compatible read mode and works on
-            // any SPI NOR.
+            hibernation_guard,
             addr_size: AddrSize::ThreeBytes,
             capacity_bytes: 0,
             read_mode: ResolvedReadMode::SINGLE_STANDARD,
@@ -1228,6 +1254,12 @@ impl Drop for MpiResource {
         self.regs.scr().write(|w| w.set_tcfc(true));
         self.regs.cr().write(|w| w.set_en(false));
         MPI_IN_USE[(self.index - 1) as usize].store(false, Ordering::Release);
+
+        // Restore XIP region after controller is disabled, so the
+        // flash chip is idle before resumed tasks try to XIP from it.
+        if let Some(ref mut guard) = self.hibernation_guard {
+            let _ = guard.restore();
+        }
     }
 }
 
@@ -1351,10 +1383,7 @@ fn validate_mr(regs: MpiPeri, mr_addr: u32, expected: u8, rdcyc: u8, name: &str)
     if got == expected {
         info!("PSRAM {}: {} (ok)", name, got);
     } else {
-        error!(
-            "PSRAM {} mismatch: wrote {}, read {}",
-            name, expected, got
-        );
+        error!("PSRAM {} mismatch: wrote {}, read {}", name, expected, got);
     }
 }
 

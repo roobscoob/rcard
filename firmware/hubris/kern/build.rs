@@ -188,11 +188,9 @@ fn process_config() -> Result<Generated> {
             flag_bits.pop().unwrap()
         } else {
             quote::quote! {
-                unsafe {
-                    TaskFlags::from_bits_unchecked(
-                        #(#flag_bits.bits())|*
-                    )
-                }
+                TaskFlags::from_bits_retain(
+                    #(#flag_bits.bits())|*
+                )
             }
         };
         task_descs.push(quote::quote! {

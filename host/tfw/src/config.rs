@@ -103,10 +103,15 @@ pub struct BootConfig {
     /// boot target is derived from the bootloader's code region
     /// placement in the layout.
     pub ftab: Place,
-    /// Place where `places.bin` (the flashed firmware image) lives. The
-    /// bootloader needs its flash address and size to locate the image
-    /// at boot.
+    /// Place where slot A's `places.bin` lives. The bootloader needs
+    /// its flash address and size to locate the image at boot.
     pub image: Place,
+    /// Place where slot B's `places.bin` lives. When present, enables
+    /// A/B firmware partitioning: the build produces two images linked
+    /// at different flash addresses, and the bootloader selects the
+    /// best slot at boot.
+    #[serde(default)]
+    pub image_b: Option<Place>,
 }
 
 // -- Bootloader --

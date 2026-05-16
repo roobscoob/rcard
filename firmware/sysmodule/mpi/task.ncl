@@ -11,9 +11,12 @@ fun ctx => {
   depends_on = [
     ctx.tasks.sysmodule_log,
     ctx.tasks.sysmodule_clocks,
+    ctx.tasks.sysmodule_region_hibernation,
   ],
   regions = {
-    code  = { place = ctx.places.code_generic, execute = true },
+    # RAM-resident — this sysmodule hibernates MPI2's XIP region at
+    # open(), so its own code must not live on that flash.
+    code  = { place = ctx.places.bulk, execute = true },
     stack = { place = ctx.places.fast, size = 2048 },
     data  = { place = ctx.places.fast },
   },

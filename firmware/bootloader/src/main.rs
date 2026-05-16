@@ -3,11 +3,12 @@
 
 use core::ptr;
 
-use rcard_places::ParseError;
+use rcard_places::{FirmwareState, ParseError, PlacesImage, SelectionReason, Slot};
 
 const FTAB_ADDR: u32 = 0x1200_0000;
 
-const FTAB_SLOT_PLACES: usize = 14;
+const FTAB_SLOT_A: usize = 14;
+const FTAB_SLOT_B: usize = 15;
 
 core::arch::global_asm!(
     ".section .text.start, \"ax\"",
@@ -75,44 +76,124 @@ fn read_ftab_slot(slot: usize) -> (u32, u32) {
     }
 }
 
+fn write_firmware_state(state: FirmwareState) {
+    match state {
+        FirmwareState::Default => usart1_write_bytes(b"Default"),
+        FirmwareState::IntegrityCompromised => {
+            usart1_write_bytes(b"IntegrityCompromised");
+        }
+        FirmwareState::WatchdogConcern => usart1_write_bytes(b"WatchdogConcern"),
+        FirmwareState::KernelConcern => usart1_write_bytes(b"KernelConcern"),
+        FirmwareState::SupervisorConcern => usart1_write_bytes(b"SupervisorConcern"),
+        FirmwareState::RuntimeConcern => usart1_write_bytes(b"RuntimeConcern"),
+    }
+}
+
+fn write_selection_reason(reason: SelectionReason) {
+    match reason {
+        SelectionReason::OtherConcerned(state) => {
+            usart1_write_bytes(b"other slot: ");
+            write_firmware_state(state);
+        }
+        SelectionReason::HigherVersion => {
+            usart1_write_bytes(b"higher version");
+        }
+        SelectionReason::NewerFlash => {
+            usart1_write_bytes(b"newer flash timestamp");
+        }
+        SelectionReason::Tiebreak => {
+            usart1_write_bytes(b"tiebreak");
+        }
+    }
+}
+
+/// Try to parse a places image from an ftab slot. Returns None if the
+/// slot is empty (erased flash) or the image is unparseable.
+unsafe fn try_parse_slot(slot: usize) -> Option<(&'static [u8], PlacesImage<'static>)> {
+    let (base, size) = read_ftab_slot(slot);
+    // Erased flash: base and size are both 0xFFFFFFFF.
+    if base == 0xFFFF_FFFF || size == 0 || size == 0xFFFF_FFFF {
+        return None;
+    }
+    let data = core::slice::from_raw_parts(base as *const u8, size as usize);
+    PlacesImage::parse(data).ok().map(|img| (data, img))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn bootloader_main() -> ! {
     usart1_write_bytes(TICK_ZERO);
     usart1_write_bytes(b"bootloader: awake\r\n");
 
-    let (places_base, places_size) = read_ftab_slot(FTAB_SLOT_PLACES);
-    let places_data = core::slice::from_raw_parts(places_base as *const u8, places_size as usize);
+    // ── A/B firmware selection ────────────────────────────────────
+    let slot_a = try_parse_slot(FTAB_SLOT_A);
+    let slot_b = try_parse_slot(FTAB_SLOT_B);
 
-    let image = match rcard_places::PlacesImage::parse(places_data) {
+    let selected = match (slot_a, slot_b) {
+        (Some((_, ref a)), Some((_, ref b))) => {
+            match rcard_places::select_firmware(a, b) {
+                Ok((slot, reason)) => {
+                    usart1_write_bytes(TICK_ZERO);
+                    usart1_write_bytes(match slot {
+                        Slot::A => b"bootloader: selected slot A (",
+                        Slot::B => b"bootloader: selected slot B (",
+                    });
+                    write_selection_reason(reason);
+                    usart1_write_bytes(b")\r\n");
+                    slot
+                }
+                Err(rcard_places::SelectionError::BothConcerned { a, b }) => {
+                    usart1_write_bytes(TICK_ZERO);
+                    usart1_write_bytes(b"bootloader: FATAL both slots concerned\r\n");
+                    usart1_write_bytes(TICK_ZERO);
+                    usart1_write_bytes(b"  slot A: ");
+                    write_firmware_state(a);
+                    usart1_write_bytes(b"\r\n");
+                    usart1_write_bytes(TICK_ZERO);
+                    usart1_write_bytes(b"  slot B: ");
+                    write_firmware_state(b);
+                    usart1_write_bytes(b"\r\n");
+                    loop { cortex_m::asm::wfi(); }
+                }
+            }
+        }
+        (Some(_), None) => {
+            usart1_write_bytes(TICK_ZERO);
+            usart1_write_bytes(b"bootloader: slot B empty, using A\r\n");
+            Slot::A
+        }
+        (None, Some(_)) => {
+            usart1_write_bytes(TICK_ZERO);
+            usart1_write_bytes(b"bootloader: slot A empty, using B\r\n");
+            Slot::B
+        }
+        (None, None) => {
+            usart1_write_bytes(TICK_ZERO);
+            usart1_write_bytes(b"bootloader: FATAL no valid firmware\r\n");
+            loop { cortex_m::asm::wfi(); }
+        }
+    };
+
+    // Re-parse the selected slot (we need the image for segment iteration).
+    let selected_slot = if selected == Slot::A { FTAB_SLOT_A } else { FTAB_SLOT_B };
+    let (places_base, places_size) = read_ftab_slot(selected_slot);
+    let places_data = core::slice::from_raw_parts(places_base as *const u8, places_size as usize);
+    let image = match PlacesImage::parse(places_data) {
         Ok(img) => img,
         Err(e) => {
             usart1_write_bytes(TICK_ZERO);
             usart1_write_bytes(b"bootloader: bad places.bin: ");
-
             match e {
-                ParseError::TooSmall => {
-                    usart1_write_bytes(b"ParseError::TooSmall\r\n");
-                }
-                ParseError::BadMagic => {
-                    usart1_write_bytes(b"ParseError::BadMagic\r\n");
-                }
-                ParseError::BadVersion => {
-                    usart1_write_bytes(b"ParseError::BadVersion\r\n");
-                }
-                ParseError::SegmentOutOfBounds => {
-                    usart1_write_bytes(b"ParseError::SegmentOutOfBounds\r\n");
-                }
-                ParseError::TablesOutOfBounds => {
-                    usart1_write_bytes(b"ParseError::TablesOutOfBounds\r\n");
-                }
+                ParseError::TooSmall => usart1_write_bytes(b"TooSmall\r\n"),
+                ParseError::BadMagic => usart1_write_bytes(b"BadMagic\r\n"),
+                ParseError::BadVersion => usart1_write_bytes(b"BadVersion\r\n"),
+                ParseError::SegmentOutOfBounds => usart1_write_bytes(b"SegmentOOB\r\n"),
+                ParseError::TablesOutOfBounds => usart1_write_bytes(b"TablesOOB\r\n"),
             }
-
-            loop {
-                cortex_m::asm::wfi();
-            }
+            loop { cortex_m::asm::wfi(); }
         }
     };
 
+    // ── Load segments ────────────────────────────────────────────
     for seg in image.segments() {
         let dest = seg.dest();
 
