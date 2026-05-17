@@ -103,7 +103,7 @@ fn setup_usb() {
             let rcard_cap = rcard_identity_capability(&uid, &session_id);
 
             let identity = DeviceIdentity::builder(&mut bufs.identity, 0x16D0, 0x14EF)
-                .device_class(0xFF, 0x01, 0x00)
+                .device_class(0x00, 0x00, 0x00)
                 .manufacturer("Rose Kodsi-Hall")
                 .product("Charm")
                 .serial(serial)

@@ -97,32 +97,38 @@ fn draw_percentage(buf: &mut [u8; FB_BYTES], pct: u32) {
     draw_char(buf, 10, x, y_start); // %
 }
 
-fn draw_bars(buf: &mut [u8; FB_BYTES], top: &[i32; 12], bottom: &[i32; 12]) {
+fn draw_bars(
+    buf: &mut [u8; FB_BYTES],
+    top: &[i32; 12],
+    top_bl: &[u8; 12],
+    bottom: &[i32; 12],
+    bottom_bl: &[u8; 12],
+) {
     buf.fill(0);
 
-    let mut min = top[4];
-    let mut max = top[4];
+    // Compute delta = (baseline << 2) - filtered for ELE4..11, clamped to >= 0.
+    // All channels sit near zero when untouched regardless of trace length.
+    let mut top_delta = [0i32; NUM_CHANNELS];
+    let mut bottom_delta = [0i32; NUM_CHANNELS];
+    let mut max_delta = 1i32;
+
     let mut i = 0;
     while i < NUM_CHANNELS {
-        let ti = top[4 + i];
-        let bi = bottom[4 + i];
-        if ti < min { min = ti; }
-        if ti > max { max = ti; }
-        if bi < min { min = bi; }
-        if bi > max { max = bi; }
+        let td = ((top_bl[4 + i] as i32) << 2) - top[4 + i];
+        let bd = ((bottom_bl[4 + i] as i32) << 2) - bottom[4 + i];
+        let td = if td > 0 { td } else { 0 };
+        let bd = if bd > 0 { bd } else { 0 };
+        top_delta[i] = td;
+        bottom_delta[i] = bd;
+        if td > max_delta { max_delta = td; }
+        if bd > max_delta { max_delta = bd; }
         i += 1;
     }
-
-    let range = max - min;
 
     // Top half: Device B bars grow downward from row 0
     i = 0;
     while i < NUM_CHANNELS {
-        let h = if range > 0 {
-            (((bottom[4 + i] - min) as u32 * HALF_H as u32) / range as u32) as usize
-        } else {
-            1
-        };
+        let h = ((bottom_delta[i] as u32 * HALF_H as u32) / max_delta as u32) as usize;
         let x0 = i * BAR_STRIDE + 1;
         let mut row = 0;
         while row < h {
@@ -136,14 +142,10 @@ fn draw_bars(buf: &mut [u8; FB_BYTES], top: &[i32; 12], bottom: &[i32; 12]) {
         i += 1;
     }
 
-    // Bottom half: Device A bars grow upward from row 63
+    // Bottom half: Device A bars grow upward from row 63, reversed
     i = 0;
     while i < NUM_CHANNELS {
-        let h = if range > 0 {
-            (((top[11 - i] - min) as u32 * HALF_H as u32) / range as u32) as usize
-        } else {
-            1
-        };
+        let h = ((top_delta[NUM_CHANNELS - 1 - i] as u32 * HALF_H as u32) / max_delta as u32) as usize;
         let x0 = i * BAR_STRIDE + 1;
         let mut row = 0;
         while row < h {
@@ -216,12 +218,20 @@ fn handle_present(_sender: u16, _code: u32) {
                 Ok(Ok(v)) => v,
                 _ => return,
             };
+            let top_bl = match s.touch_a.read_baseline() {
+                Ok(Ok(v)) => v,
+                _ => return,
+            };
             let bottom = match s.touch_b.read() {
                 Ok(Ok(v)) => v,
                 _ => return,
             };
+            let bottom_bl = match s.touch_b.read_baseline() {
+                Ok(Ok(v)) => v,
+                _ => return,
+            };
 
-            draw_bars(&mut s.buf, &top, &bottom);
+            draw_bars(&mut s.buf, &top, &top_bl, &bottom, &bottom_bl);
             draw_percentage(&mut s.buf, (rate * 100.0) as u32);
             let _ = s.fb.write(&s.buf);
         })
@@ -238,7 +248,7 @@ fn main() -> ! {
         Err(e) => info!("fob: force charge IPC failed: {}", e),
     }
 
-    let config = Mpr121Config::default_12ch();
+    let config = Mpr121Config::auto_12ch_3v3();
 
     let touch_a = Mpr121::open(Device::A, config)
         .log_expect("mpr121 A IPC")
