@@ -1,10 +1,15 @@
 //! HCI mailbox transport (qid 0).
 //!
 //! Two ring buffers in shared memory:
-//! - **TX** (HCPU→LCPU): a `CircularBuf` header + 496 B payload owned by
-//!   the lcpu task and statically allocated (`HCPU_TX`). Its address is
-//!   written into ROM-config field +200 (Letter) or post-boot
-//!   `G_ROM_CONFIG_A3` (A3) so LCPU knows where to read.
+//! - **TX** (HCPU→LCPU): a `CircularBuf` header + 492 B payload at the
+//!   fixed peripheral address `0x2007_FE00` (the `HCPU_TX` static, see
+//!   below). Declared as a peripheral region in `chips/sf32lb52.ncl`
+//!   and owned by the lcpu task via `task.ncl`. Peripheral mapping is
+//!   non-cacheable so LCPU's updates to `read_idx_mirror` (via its
+//!   `+HCPU_TO_LCPU_OFFSET` alias) are immediately visible to HCPU —
+//!   previously the region was placed via `#[link_section]` in
+//!   cacheable SRAM and LCPU's writes to the header got masked by
+//!   HCPU's stale D-cache.
 //! - **RX** (LCPU→HCPU): in LPSYS_SRAM at a chip-rev-specific address.
 //!   Letter uses `0x2040_2800`; A3 uses `0x2040_5C00`. Resolved at
 //!   `init_tx_ring(rev)` and stashed in `RX_ADDR`.
@@ -19,7 +24,8 @@
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
 use rcard_log::{info, warn};
-use sifli_pac::{HPSYS_AON, LPSYS_AON, MAILBOX1, MAILBOX2};
+use sifli_pac::{HPSYS_AON, MAILBOX1, MAILBOX2};
+// LPSYS_AON only referenced by the commented-out snapshot helper below.
 
 use sysmodule_syscon_api::ChipRev;
 
@@ -34,33 +40,55 @@ pub const HCI_QID: u8 = 0;
 /// `read_hci` and the diagnostic dump in `main.rs`.
 static RX_ADDR: AtomicUsize = AtomicUsize::new(0);
 
-/// HCPU→LCPU TX ring (header + payload, 512 B total). The struct is
-/// placed in normal HCPU SRAM (the lcpu task's data region); its
-/// runtime address is resolved at link time and written into ROM-config
-/// field +200 so LCPU knows where to read commands from.
+/// Fixed-address handle to the HCPU→LCPU ring. `chips/sf32lb52.ncl`
+/// reserves `0x2007_FE00..+512` as the `hcpu_tx` peripheral region and
+/// `task.ncl` grants it exclusively to the lcpu task. Peripheral mapping
+/// makes the region non-cacheable from HCPU's side so LCPU's updates
+/// (via its `+HCPU_TO_LCPU_OFFSET` alias) stay coherent — previously,
+/// when this lived in cacheable SRAM via `#[link_section]`,
+/// `read_idx_mirror` stayed stale at HCPU because the cache line never
+/// got invalidated.
 #[repr(C, align(4))]
 struct TxRing {
     header: CircularBuf,
     payload: [u8; addr::IPC_MB_BUF_SIZE - core::mem::size_of::<CircularBuf>()],
 }
 
-#[unsafe(link_section = ".hcpu_tx")]
-static mut HCPU_TX: TxRing = TxRing {
-    header: CircularBuf {
-        rd_buffer_ptr: core::ptr::null_mut(),
-        wr_buffer_ptr: core::ptr::null_mut(),
-        read_idx_mirror: 0,
-        write_idx_mirror: 0,
-        buffer_size: 0,
-    },
-    payload: [0u8; addr::IPC_MB_BUF_SIZE - core::mem::size_of::<CircularBuf>()],
-};
+/// Newtype around a raw pointer so we can put it in a `static` (raw
+/// pointers themselves are `!Sync`). A `&'static TxRing` would be the
+/// natural fit, but const-eval's strict-provenance check rejects
+/// constructing a reference from a literal integer address — raw
+/// pointers carry no such restriction.
+#[repr(transparent)]
+struct TxRingPtr(*mut TxRing);
+unsafe impl Sync for TxRingPtr {}
 
-/// HCPU view of the TX ring's header — the address LCPU sees is this
-/// plus `HCPU_TO_LCPU_OFFSET`. Returned by [`tx_ring_hcpu_addr`] and
-/// written into ROM-config +200.
+impl TxRingPtr {
+    /// Raw mutable pointer to the ring.
+    fn ring(&self) -> *mut TxRing {
+        self.0
+    }
+
+    /// Raw mutable pointer to the `CircularBuf` header — it's the first
+    /// field of `TxRing` (`#[repr(C)]`) so they share a base address.
+    fn header(&self) -> *mut CircularBuf {
+        self.0.cast()
+    }
+}
+
+/// SAFETY: `0x2007_FE00` is the base of the `hcpu_tx` peripheral
+/// region declared in `chips/sf32lb52.ncl` and exclusively owned by
+/// this task in `task.ncl`, so the pointer is valid and unaliased for
+/// the lifetime of the program. Dereferences are gated by the single
+/// `unsafe` block in `init_tx_ring` plus the raw-pointer-only accesses
+/// in `write_hci`.
+static HCPU_TX: TxRingPtr = TxRingPtr(0x2007_FE00 as *mut TxRing);
+
+/// HCPU view of the TX ring's header. Written into ROM-config +200
+/// (Letter) / `G_ROM_CONFIG_A3` (A3) so LCPU knows where to read
+/// commands from.
 pub fn tx_ring_hcpu_addr() -> u32 {
-    (&raw const HCPU_TX) as u32
+    HCPU_TX.ring() as u32
 }
 
 /// HCPU view of the RX (LCPU→HCPU) ring. Valid after `init_tx_ring`.
@@ -69,20 +97,26 @@ pub fn rx_ring_hcpu_addr() -> usize {
     RX_ADDR.load(Ordering::Acquire)
 }
 
-/// Initialize the HCPU-side TX ring's `CircularBuf` header and stash
-/// the chip-rev-correct RX ring address. After this, LCPU (via its
-/// translated alias) can immediately read pending writes. Idempotent —
-/// re-initializing zeroes the indices.
+/// Zero the TX ring memory (peripheral SRAM is undefined at reset) and
+/// initialize the `CircularBuf` header so LCPU can immediately read
+/// pending writes via its `+HCPU_TO_LCPU_OFFSET` alias. Also stashes
+/// the rev-correct RX ring address. Idempotent — re-initializing
+/// zeroes the indices.
 pub fn init_tx_ring(rev: ChipRev) {
-    let cb_ptr = (&raw mut HCPU_TX) as *mut CircularBuf;
     let payload_size = (addr::IPC_MB_BUF_SIZE - core::mem::size_of::<CircularBuf>()) as i16;
 
-    // wr_buffer_ptr stores the HCPU view of the payload (we write here).
-    let pool_wr = unsafe { (&raw mut HCPU_TX.payload) as *mut u8 };
-    // rd_buffer_ptr stores the LCPU view (the address LCPU reads from).
-    let pool_rd = (pool_wr as usize + addr::HCPU_TO_LCPU_OFFSET) as *mut u8;
-
+    // SAFETY: HCPU_TX is exclusively owned by this task and not aliased
+    // anywhere else, so we have a single live mutator. The peripheral
+    // memory's contents are undefined at reset; one `write_bytes` clears
+    // both halves of the header (rd/wr indices, pointers, size) before
+    // `wr_init`/`rd_init` re-populate the fields we care about.
     unsafe {
+        let ring = HCPU_TX.ring();
+        core::ptr::write_bytes(ring as *mut u8, 0, core::mem::size_of::<TxRing>());
+
+        let cb_ptr = HCPU_TX.header();
+        let pool_wr = core::ptr::addr_of_mut!((*ring).payload) as *mut u8;
+        let pool_rd = (pool_wr as usize + addr::HCPU_TO_LCPU_OFFSET) as *mut u8;
         cb_ptr.wr_init(pool_wr, payload_size);
         cb_ptr.rd_init(pool_rd);
     }
@@ -102,31 +136,44 @@ pub fn unmask_hci_qid() {
 }
 
 /// Push `data` onto the HCPU→LCPU ring. Returns the number of bytes
-/// written; if 0, the ring was full. Always doorbells when at least one
-/// byte landed — partial frames must be flushed so LCPU can drain them.
+/// written; if 0, the ring was full.
 ///
-/// After the doorbell, spin-polls the ring's `read_idx_mirror` (written
-/// by LCPU as it drains) and `HPSYS_AON.ISSR.lp_active`, logging both
-/// before and after states. This is diagnostic — the wakeup mechanism
-/// is supposed to be self-contained (MAILBOX1 IRQ in LCPU's NVIC wakes
-/// it from WFI), so we want loud visibility if LCPU never consumes.
+/// **Diagnostic mode**: after the doorbell, tight-spin in two phases:
+/// 1. count cycles until `HPSYS_AON.ISSR.lp_active` goes high (LCPU woke);
+/// 2. count cycles until it goes low again (LCPU returned to sleep).
+///
+/// This is to test the theory that LCPU briefly wakes, clears the
+/// MAILBOX1 IRQ pending bit, fails to drain the ring, and returns to
+/// sleep — all before any of our previous periodic snapshots managed to
+/// catch lp_active high.
 pub fn write_hci(data: &[u8]) -> usize {
     if data.is_empty() {
         return 0;
     }
-    let cb_ptr = (&raw mut HCPU_TX) as *mut CircularBuf;
+    info!("write_hci: entered, data.len={}", data.len());
+    let cb_ptr = HCPU_TX.header();
     let cb_const = cb_ptr.cast_const();
 
-    // Snapshot pre-doorbell state.
-    let read_idx_before = unsafe { cb_const.read_idx_mirror() };
-    let lp_active_before = HPSYS_AON.issr().read().lp_active();
+    // TX hdr pre-put — lets us see whether wr_idx/rd_idx are sane before
+    // we touch them, in case prior state left the ring corrupted.
+    unsafe {
+        let rd_im = cb_const.read_idx_mirror();
+        let wr_im = cb_const.write_idx_mirror();
+        let size = cb_const.buffer_size();
+        info!(
+            "write_hci: TX hdr pre-put: rd_idx_mirror={} wr_idx_mirror={} size={}",
+            rd_im, wr_im, size,
+        );
+    }
 
     let n = unsafe { cb_ptr.put(data) };
+    info!("write_hci: post-put n={}", n);
     if n == 0 {
         return 0;
     }
 
-    let write_idx_after_put = unsafe { cb_const.write_idx_mirror() };
+    let lp_active_before = HPSYS_AON.issr().read().lp_active();
+    info!("write_hci: lp_active_before={}", lp_active_before as u8);
 
     // Doorbell: tell LCPU to drain qid 0.
     let qid_mask = 1u32 << HCI_QID;
@@ -134,97 +181,135 @@ pub fn write_hci(data: &[u8]) -> usize {
     MAILBOX1
         .itr(0)
         .write_value(sifli_pac::mailbox::regs::Ixr(qid_mask));
+    info!("write_hci: doorbell written");
 
-    info!(
-        "doorbell: wrote {} bytes; pre-state read_idx={} write_idx={} lp_active={} mbox_misr={}",
-        n,
-        read_idx_before,
-        write_idx_after_put,
-        lp_active_before as u8,
-        MAILBOX1.misr(0).read().0,
-    );
+    // Phase 1: spin until lp_active goes high. Budget ~200 ms at 240 MHz
+    // — the LP domain ramp from cold should be well under 1 ms.
+    // const WAKE_BUDGET: u32 = 50_000_000;
+    // let mut wake_cycles: u32 = 0;
+    // let woke = loop {
+    //     if HPSYS_AON.issr().read().lp_active() {
+    //         break true;
+    //     }
+    //     if wake_cycles >= WAKE_BUDGET {
+    //         break false;
+    //     }
+    //     wake_cycles += 1;
+    // };
+    // info!(
+    //     "write_hci: phase 1 done, woke={} wake_cycles={}",
+    //     woke as u8, wake_cycles
+    // );
 
-    // Periodic snapshot of LCPU state until either it drains the ring
-    // or we exhaust the budget. Each snapshot logs: lp_active (HPSYS,
-    // always readable), MAILBOX1.misr (HPSYS, always readable — bit 0
-    // stays high until LCPU acks the doorbell IRQ), and conditional on
-    // lp_active being high, LPSYS_AON fields (pwr_mode, sleep_status,
-    // pcr value, cpuwait). PCR is the AON-held PC pointer the chip
-    // uses to relaunch LCPU after sleep — if it changes between
-    // snapshots LCPU is being put through sleep/wake cycles; if it
-    // stays put LCPU is running continuously (or stuck).
-    const SNAPSHOT_INTERVAL: u32 = 1_000;
-    const SNAPSHOT_DELAY_CYCLES: u32 = 240; // ~1 µs at 240 MHz → ~1 ms per interval
-    const MAX_SNAPSHOTS: u32 = 30; // ~30 ms total budget
+    // if !woke {
+    //     warn!(
+    //         "wake-phase: lp_active never went high after {} cycles (was {} before doorbell)",
+    //         wake_cycles, lp_active_before as u8,
+    //     );
+    //     return n;
+    // }
 
-    let mut polls = 0u32;
-    let mut snapshots = 0u32;
-    let drained;
-    loop {
-        let read_idx_now = unsafe { cb_const.read_idx_mirror() };
-        if read_idx_now != read_idx_before {
-            info!(
-                "LCPU drained ring after {} polls: read_idx {} -> {}",
-                polls, read_idx_before, read_idx_now,
-            );
-            drained = true;
-            break;
-        }
+    // Phase 2: spin until lp_active goes low again. Shorter budget +
+    // progress log every PROGRESS_INTERVAL iterations so we can tell
+    // "stuck in tight spin" from "stuck downstream of phase 2".
+    // const SLEEP_BUDGET: u32 = 5_000_000;
+    // const PROGRESS_INTERVAL: u32 = 1_000_000;
+    // let mut sleep_cycles: u32 = 0;
+    // let mut last_progress: u32 = 0;
+    // let slept = loop {
+    //     if !HPSYS_AON.issr().read().lp_active() {
+    //         break true;
+    //     }
+    //     if sleep_cycles >= SLEEP_BUDGET {
+    //         break false;
+    //     }
+    //     sleep_cycles += 1;
+    //     if sleep_cycles - last_progress >= PROGRESS_INTERVAL {
+    //         info!(
+    //             "write_hci: phase 2 still spinning, sleep_cycles={}",
+    //             sleep_cycles
+    //         );
+    //         last_progress = sleep_cycles;
+    //     }
+    // };
+    // info!(
+    //     "write_hci: phase 2 done, slept={} sleep_cycles={}",
+    //     slept as u8, sleep_cycles
+    // );
 
-        if polls > 0 && polls % SNAPSHOT_INTERVAL == 0 {
-            log_lcpu_snapshot(snapshots, polls);
-            snapshots += 1;
-            if snapshots >= MAX_SNAPSHOTS {
-                drained = false;
-                break;
-            }
-        }
+    // if slept {
+    //     info!(
+    //         "wake/sleep: wake_cycles={} sleep_cycles={} (lp_active 0->1->0)",
+    //         wake_cycles, sleep_cycles,
+    //     );
+    // } else {
+    //     info!(
+    //         "wake/sleep: wake_cycles={} then lp_active stayed high for {} cycles (budget exhausted)",
+    //         wake_cycles, sleep_cycles,
+    //     );
+    // }
 
-        polls += 1;
-        cortex_m::asm::delay(SNAPSHOT_DELAY_CYCLES);
-    }
-
-    if !drained {
-        warn!(
-            "LCPU never drained the ring after {} polls ({} snapshots)",
-            polls, snapshots,
-        );
-    }
+    // Dump the TX ring header so we can see if LCPU advanced
+    // read_idx_mirror to match the post-put write_idx_mirror.
+    // unsafe {
+    //     let rd_im = cb_const.read_idx_mirror();
+    //     let wr_im = cb_const.write_idx_mirror();
+    //     info!(
+    //         "TX hdr post-doorbell: rd_idx_mirror={} wr_idx_mirror={}",
+    //         rd_im, wr_im,
+    //     );
+    // }
 
     n
 }
 
-/// One-line snapshot of everything the HCPU can observe about LCPU.
-/// LPSYS_AON access is gated on `lp_active`: when the LP domain is
-/// powered down, reads to `0x4004_xxxx` fault. HPSYS_AON and MAILBOX1
-/// are in HPSYS and always readable.
-fn log_lcpu_snapshot(snapshot_idx: u32, polls: u32) {
-    let issr = HPSYS_AON.issr().read();
-    let lp_active = issr.lp_active();
-    let mbox_misr = MAILBOX1.misr(0).read().0;
+// Original diagnostic code retained below for re-enabling once we've
+// characterized the wake/sleep timing.
+//
+// const SNAPSHOT_INTERVAL: u32 = 1_000;
+// const SNAPSHOT_DELAY_CYCLES: u32 = 240; // ~1 µs at 240 MHz → ~1 ms per interval
+// const MAX_SNAPSHOTS: u32 = 30; // ~30 ms total budget
+// let mut polls = 0u32;
+// let mut snapshots = 0u32;
+// loop {
+//     let read_idx_now = unsafe { cb_const.read_idx_mirror() };
+//     if read_idx_now != read_idx_before {
+//         info!("LCPU drained ring after {} polls: read_idx {} -> {}",
+//               polls, read_idx_before, read_idx_now);
+//         break;
+//     }
+//     if polls > 0 && polls % SNAPSHOT_INTERVAL == 0 {
+//         log_lcpu_snapshot(snapshots, polls);
+//         snapshots += 1;
+//         if snapshots >= MAX_SNAPSHOTS { break; }
+//     }
+//     polls += 1;
+//     cortex_m::asm::delay(SNAPSHOT_DELAY_CYCLES);
+// }
 
-    if lp_active {
-        let pmr = LPSYS_AON.pmr().read();
-        let slp = LPSYS_AON.slp_ctrl().read();
-        let pc = LPSYS_AON.pcr().read().pc();
-        info!(
-            "[snap {}, poll {}] lp_active=1 mbox_misr={} pmr_mode={} cpuwait={} sleep_status={} bt_wkup={} aon_pc={}",
-            snapshot_idx,
-            polls,
-            mbox_misr,
-            pmr.mode(),
-            pmr.cpuwait() as u8,
-            slp.sleep_status() as u8,
-            slp.bt_wkup() as u8,
-            pc,
-        );
-    } else {
-        info!(
-            "[snap {}, poll {}] lp_active=0 mbox_misr={} (LP domain off — LPSYS regs skipped)",
-            snapshot_idx, polls, mbox_misr,
-        );
-    }
-}
+// Commented out alongside the diagnostic snapshot loop in `write_hci`.
+// Re-enable together when going back to the periodic-snapshot strategy.
+//
+// /// One-line snapshot of everything the HCPU can observe about LCPU.
+// /// LPSYS_AON access is gated on `lp_active`: when the LP domain is
+// /// powered down, reads to `0x4004_xxxx` fault. HPSYS_AON and MAILBOX1
+// /// are in HPSYS and always readable.
+// fn log_lcpu_snapshot(snapshot_idx: u32, polls: u32) {
+//     let issr = HPSYS_AON.issr().read();
+//     let lp_active = issr.lp_active();
+//     let mbox_misr = MAILBOX1.misr(0).read().0;
+//     if lp_active {
+//         let pmr = LPSYS_AON.pmr().read();
+//         let slp = LPSYS_AON.slp_ctrl().read();
+//         let pc = LPSYS_AON.pcr().read().pc();
+//         info!("[snap {}, poll {}] lp_active=1 mbox_misr={} pmr_mode={} cpuwait={} sleep_status={} bt_wkup={} aon_pc={}",
+//               snapshot_idx, polls, mbox_misr, pmr.mode(), pmr.cpuwait() as u8,
+//               slp.sleep_status() as u8, slp.bt_wkup() as u8, pc);
+//     } else {
+//         info!("[snap {}, poll {}] lp_active=0 mbox_misr={} (LP domain off — LPSYS regs skipped)",
+//               snapshot_idx, polls, mbox_misr);
+//     }
+// }
 
 /// Drain the LCPU→HCPU ring (chip-rev-specific address, set by
 /// `init_tx_ring`) into `out`. Returns the number of bytes copied.
@@ -242,10 +327,26 @@ pub fn read_hci(out: &mut [u8]) -> usize {
         return 0;
     }
     let cb_ptr = rx as *mut CircularBuf;
-    bringup::hold_lcpu_awake();
-    let n = unsafe { cb_ptr.get(out) };
-    bringup::release_lcpu_hold();
-    n
+    let cb_const = cb_ptr.cast_const();
+    let _wake = bringup::WakeLock::new();
+
+    // Diagnostic: dump the LCPU-initialized header so we can see whether
+    // rd_buffer_ptr is in HCPU view (0x2040_xxxx) or LCPU view
+    // (0x0040_xxxx), and whether the indices actually differ. Reads are
+    // volatile so we don't pick up cached/stale values.
+    unsafe {
+        let rd_ptr = cb_const.rd_buffer_ptr() as u32;
+        let wr_ptr = cb_const.wr_buffer_ptr() as u32;
+        let rd_im = cb_const.read_idx_mirror();
+        let wr_im = cb_const.write_idx_mirror();
+        let size = cb_const.buffer_size();
+        info!(
+            "RX hdr @ {}: rd_ptr={} wr_ptr={} rd_idx_mirror={} wr_idx_mirror={} size={}",
+            rx as u32, rd_ptr, wr_ptr, rd_im, wr_im, size,
+        );
+    }
+
+    unsafe { cb_ptr.get(out) }
 }
 
 /// Acknowledge the MAILBOX2_CH1 IRQ for any qids that triggered. Called
@@ -256,7 +357,7 @@ pub fn read_hci(out: &mut [u8]) -> usize {
 /// HCPU while LCPU is in LP sleep, so we briefly assert the wake hold
 /// around the MISR/ICR access.
 pub fn ack_mailbox2_irq() {
-    bringup::hold_lcpu_awake();
+    let _wake = bringup::WakeLock::new();
     let misr = MAILBOX2.misr(0).read().0;
     if misr != 0 {
         MAILBOX2
@@ -264,5 +365,4 @@ pub fn ack_mailbox2_irq() {
             .write_value(sifli_pac::mailbox::regs::Ixr(misr));
         fence(Ordering::SeqCst);
     }
-    bringup::release_lcpu_hold();
 }

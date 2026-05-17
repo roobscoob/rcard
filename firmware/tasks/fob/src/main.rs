@@ -189,7 +189,15 @@ fn handle_lcpu_data(_sender: u16, _code: u32) {
     info!("got incoming lcpu packet...");
     let mut buf = [0u8; 256];
 
-    LCPU_REF.get().unwrap().recv_hci(&mut buf);
+    let lcpu = LCPU_REF.get().unwrap();
+    lcpu.recv_hci(&mut buf);
+
+    info!("then we do it AGAIN");
+
+    info!("sending hci packet");
+    lcpu.send_hci(&[0x01, 0x01, 0x10, 0x00])
+        .log_expect("ipc fail")
+        .log_expect("hci send fail");
 }
 
 #[export_name = "main"]

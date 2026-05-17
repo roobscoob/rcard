@@ -11,9 +11,13 @@ mod addr;
 mod bringup;
 mod circular_buf;
 mod controller;
+mod delay;
+mod dma;
 mod mailbox;
 mod nvds;
 mod patch;
+mod ram_slice;
+mod rf_cal;
 mod rom_config;
 
 // Re-export the api module so submodules can refer to error types via
@@ -27,10 +31,10 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 sysmodule_syscon_api::bind_syscon!(Syscon = SLOTS.sysmodule_syscon);
+sysmodule_efuse_api::bind_efuse!(Efuse = SLOTS.sysmodule_efuse);
 
-/// Stack scratch for moving lease bytes through the mailbox. 256 B is
-/// the IPC message size limit so any one lease/reply fits in one pass.
-const SCRATCH_LEN: usize = 256;
+/// Stack scratch for moving lease bytes through the mailbox.
+const SCRATCH_LEN: usize = 512;
 
 /// Iteration cap for the warmup MISR poll. `WARMUP_POLL_DELAY_CYCLES` of
 /// roughly 100 µs each → ~250 ms total budget; the LCPU usually emits
@@ -66,7 +70,22 @@ impl Lcpu for LcpuResource {
         };
         info!("chip rev: {} (revid={})", rev, chip_id.revid);
 
-        match do_bringup(rev, bd_addr) {
+        // Read the factory Bank1 calibration once via IPC so rf_cal
+        // (phase 7) can apply EDR PA BM adjustments. None on IPC
+        // failure or `edr_cal_done` clear — rf_cal degrades gracefully.
+        let efuse_cal = match Efuse::read_calibration() {
+            Ok(Ok(cal)) => Some(cal),
+            Ok(Err(e)) => {
+                warn!("efuse read_calibration domain err: {} — skipping", e);
+                None
+            }
+            Err(e) => {
+                warn!("efuse read_calibration ipc err: {} — skipping", e);
+                None
+            }
+        };
+
+        match do_bringup(rev, bd_addr, efuse_cal.as_ref()) {
             Ok(()) => {}
             Err(e) => {
                 error!("bringup failed: {}", e);
@@ -92,9 +111,7 @@ impl Lcpu for LcpuResource {
             return Ok(());
         }
         if total > SCRATCH_LEN {
-            info!("sad! (len>=256)");
-            // The IPC layer caps a single message at 256 B, but be
-            // explicit so the error path is unambiguous.
+            info!("sad! (len>=512)");
             return Err(HciSendError::TooLarge);
         }
 
@@ -150,10 +167,13 @@ impl Lcpu for LcpuResource {
 
 impl Drop for LcpuResource {
     fn drop(&mut self) {
-        // Release the hp2lp_req hold (no-op if it wasn't asserted).
-        bringup::release_lcpu_hold();
         // Put LCPU back in reset. Errors here are unrecoverable but we
         // can't propagate them through Drop — log and continue.
+        //
+        // No explicit wake-hold cleanup: `WakeLock` is refcounted RAII,
+        // so every acquire in this task is paired with a Drop. If the
+        // refcount is nonzero here, something leaked a guard — that's a
+        // bug to find, not paper over.
         if let Err(e) = bringup::lcpu_reset_and_halt() {
             warn!("Drop reset_and_halt failed: {}", e);
         }
@@ -161,9 +181,17 @@ impl Drop for LcpuResource {
     }
 }
 
-/// Run phases 1, 2, 3, 4, [5,] 6, 8, 9, 10 of the recipe. Phase 5 (A3
-/// firmware load) runs on A3 only. Phase 7 (RF cal) is still skipped.
-fn do_bringup(rev: ChipRev, bd_addr: [u8; 6]) -> Result<(), LcpuInitError> {
+/// Run phases 1, 2, 3, 4, [5,] 6, 7, 8, 9, 10 of the recipe.
+///
+/// - Phase 5 (A3 firmware load) runs on A3 only; Letter boots from
+///   internal ROM and skips it.
+/// - Phase 7 (RF calibration) runs unconditionally and uses the
+///   factory `efuse_cal` for EDR power adjustments when available.
+fn do_bringup(
+    rev: ChipRev,
+    bd_addr: [u8; 6],
+    efuse_cal: Option<&sysmodule_efuse_api::Bank1Calibration>,
+) -> Result<(), LcpuInitError> {
     // Phase 2 first — we need LCPU halted before we mutate its RAM.
     bringup::lcpu_reset_and_halt()?;
     info!("phase 2 reset/halt done");
@@ -206,6 +234,16 @@ fn do_bringup(rev: ChipRev, bd_addr: [u8; 6]) -> Result<(), LcpuInitError> {
         return Err(LcpuInitError::PatchInstallFailed);
     }
     info!("phase 6 patches done");
+
+    // Phase 7 — RF calibration. Sets up the BLE controller's RFC
+    // command sequences, calibrates VCO + TX DC offset, and stores the
+    // resulting tables back into RFC SRAM. Without this, the BLE ROM
+    // observes "no radio scheduled" after warmup and drops the LP
+    // domain into deep sleep, from which MAILBOX1 IRQs are not a wake
+    // source — see plan file for the deep-sleep theory.
+    let mut dma_ch = dma::DmacChannel::claim_default();
+    rf_cal::bt_rf_cal(rev, &mut dma_ch, efuse_cal);
+    info!("phase 7 RF calibration done");
 
     // Unmask qid 0 on both mailboxes before LCPU starts running so the
     // warmup HCI event isn't dropped on the floor. The kernel-side IRQ
@@ -259,11 +297,12 @@ fn do_bringup(rev: ChipRev, bd_addr: [u8; 6]) -> Result<(), LcpuInitError> {
 /// inconsistent across the init() return boundary. Spinning on the
 /// hardware register sidesteps that entirely.
 fn wait_for_warmup() -> Result<(), LcpuInitError> {
-    // Hold LCPU awake once for the whole spin; MAILBOX2 lives in LPSYS
-    // and is unreachable from HCPU while LCPU is in LP sleep. The
-    // per-call wake inside `hold_lcpu_awake` is cheap once `lp_active`
-    // is true, but doing it once here keeps the spin tight.
-    bringup::hold_lcpu_awake();
+    // Hold LCPU awake for the whole function — MAILBOX2 + LPSYS-RAM
+    // access spans every step. `ack_mailbox2_irq` and `read_hci` each
+    // take their own `WakeLock`, but those are cheap refcount bumps
+    // while this outer guard is live. RAII drops it on every return
+    // path.
+    let _wake = bringup::WakeLock::new();
     let mut polls = 0u32;
     loop {
         let misr = sifli_pac::MAILBOX2.misr(0).read().0;
@@ -271,13 +310,11 @@ fn wait_for_warmup() -> Result<(), LcpuInitError> {
             break;
         }
         if polls >= WARMUP_MAX_POLLS {
-            bringup::release_lcpu_hold();
             return Err(LcpuInitError::WarmupTimeout);
         }
         polls += 1;
         cortex_m::asm::delay(WARMUP_POLL_DELAY_CYCLES);
     }
-    bringup::release_lcpu_hold();
 
     // Clear the MAILBOX2 IRQ status now that we've observed it. The
     // ipc::server! @irq closure handles subsequent IRQs after init()
@@ -326,10 +363,7 @@ fn wait_for_warmup() -> Result<(), LcpuInitError> {
             cortex_m::asm::delay(WARMUP_POLL_DELAY_CYCLES);
         }
         if got < cap {
-            warn!(
-                "warmup params short-read: got {} of {} bytes",
-                got, cap
-            );
+            warn!("warmup params short-read: got {} of {} bytes", got, cap);
         }
     }
     // FIXME: edit this when logging supports &[T]
@@ -340,8 +374,11 @@ fn wait_for_warmup() -> Result<(), LcpuInitError> {
 
 /// Best-effort cleanup after a failed bringup. Mirrors the `Drop` body
 /// minus the holder/atomic clears (init() does those after).
+///
+/// No explicit wake-hold cleanup: `WakeLock` guards drop with the stack
+/// frames they live in, so by the time we get here the refcount should
+/// already be 0.
 fn bringup_teardown() {
-    bringup::release_lcpu_hold();
     if let Err(e) = bringup::lcpu_reset_and_halt() {
         warn!("teardown reset_and_halt failed: {}", e);
     }

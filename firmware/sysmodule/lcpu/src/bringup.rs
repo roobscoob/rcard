@@ -11,6 +11,7 @@
 //! Phase 8: drop CPUWAIT — LCPU starts executing.
 
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use sifli_pac::lpsys_rcc::vals::{Hdiv, Sysclk, mux::Perisel};
 use sifli_pac::{HPSYS_AON, LPSYS_AON, LPSYS_RCC};
@@ -18,31 +19,59 @@ use sifli_pac::{HPSYS_AON, LPSYS_AON, LPSYS_RCC};
 use crate::addr;
 use crate::api::LcpuInitError;
 
-/// Assert `HPSYS_AON.ISSR.hp2lp_req` so LCPU stays out of the deep LP
-/// sleep state from which LPSYS peripherals (e.g. MAILBOX2) and shared
-/// RAM aren't reachable by HCPU. Polls `lp_active` for ack with a
-/// bounded budget — if LCPU never acknowledges we still return, and
-/// the next shared access will surface the issue as a fault.
+/// Outstanding `WakeLock` instances. Bit assertion happens on the
+/// 0→1 transition; clear on the 1→0 transition.
+static WAKE_REFCOUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Refcounted RAII guard that asserts `HPSYS_AON.ISSR.hp2lp_req` so
+/// LCPU stays out of the deep LP sleep state from which LPSYS
+/// peripherals (e.g. MAILBOX2) and shared LPSYS_RAM aren't reachable
+/// by HCPU. The first outstanding guard asserts and polls `lp_active`
+/// for ack; subsequent guards are cheap counter bumps; the last guard
+/// to drop clears the bit.
 ///
-/// Asserted once after a successful `init()` (and locally before A3
-/// post-init's LPSYS-RAM writes); released in `Drop`.
-pub fn hold_lcpu_awake() {
-    HPSYS_AON.issr().modify(|w| w.set_hp2lp_req(true));
-    let mut budget = 1_000_000u32;
-    while !HPSYS_AON.issr().read().lp_active() && budget > 0 {
-        budget -= 1;
-    }
-    if budget == 0 {
-        rcard_log::warn!(
-            "LCPU did not ack wake within budget — subsequent shared accesses may fault"
-        );
+/// Modeled on sifli-rs's `WakeLock`. Use it whenever HCPU touches
+/// LPSYS-domain registers or shared RAM:
+///
+/// ```ignore
+/// let _wake = WakeLock::new();
+/// // ...LPSYS access...
+/// // _wake drops at end of scope.
+/// ```
+///
+/// On the 0→1 transition, polls `lp_active` for ~4 ms; if LCPU never
+/// acks we still return and emit a warning. Subsequent shared accesses
+/// may then fault — surface that explicitly rather than silently spin.
+pub struct WakeLock {
+    _private: (),
+}
+
+impl WakeLock {
+    pub fn new() -> Self {
+        let prev = WAKE_REFCOUNT.fetch_add(1, Ordering::AcqRel);
+        if prev == 0 {
+            HPSYS_AON.issr().modify(|w| w.set_hp2lp_req(true));
+            let mut budget = 1_000_000u32;
+            while !HPSYS_AON.issr().read().lp_active() && budget > 0 {
+                budget -= 1;
+            }
+            if budget == 0 {
+                rcard_log::warn!(
+                    "LCPU did not ack wake within budget — subsequent shared accesses may fault"
+                );
+            }
+        }
+        Self { _private: () }
     }
 }
 
-/// Release the wake hold so LCPU can resume entering LP sleep.
-/// Idempotent — safe to call when `hp2lp_req` is already clear.
-pub fn release_lcpu_hold() {
-    HPSYS_AON.issr().modify(|w| w.set_hp2lp_req(false));
+impl Drop for WakeLock {
+    fn drop(&mut self) {
+        let prev = WAKE_REFCOUNT.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            HPSYS_AON.issr().modify(|w| w.set_hp2lp_req(false));
+        }
+    }
 }
 
 /// Generous polling budget. Each `cortex_m::asm::delay(1)` is one nop;

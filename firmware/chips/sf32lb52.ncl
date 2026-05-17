@@ -18,9 +18,6 @@ let miB = fun n => n * 1024 * 1024 in
     sram_bulk = { size = (kiB 256) - 512, mappings = [
       { address = 0x20040000, size = (kiB 256) - 512, read = true, write = true, execute = true },
     ]},
-    hcpu_tx = { size = 512, mappings = [ 
-      { address = 0x2007FE00, size = 512, read = true, write = true, execute = true },
-    ]},
   },
 
   peripherals = {
@@ -49,15 +46,24 @@ let miB = fun n => n * 1024 * 1024 in
     # not technically a peripheral, but easier to implement as one
     lpsys_sram  = { base = 0x20400000, size = 0x10000 },
     mailbox1    = { base = 0x50082000, size = 0x1000 },
-    # Aggregate the two HPSYS peripherals the lcpu sysmodule needs
-    # (MAILBOX1 @ 0x50082000 and HPSYS_AON @ 0x500C0000) into one MPU
-    # region so the task doesn't blow its 8-region budget. Hubris reserves
-    # the first MPU slot per task for a null sentinel (kern/build.rs:128),
-    # leaving 7 effective slots — lcpu needs 4 owned regions + lpsys +
-    # lpsys_sram + this, for a total of 7. The exposed window also
-    # includes USART1/2/3, GPIOs, GPTIM2, etc., but lcpu has no driver
-    # code for them, so the wider grant is harmless.
-    hpsys_ipc   = { base = 0x50082000, size = 0x3F000 },
+    # Aggregate the HPSYS peripherals the lcpu sysmodule needs (MAILBOX1
+    # @ 0x50082000, HPSYS_AON @ 0x500C0000, PMUC @ 0x500CA000) into one
+    # MPU region so the task doesn't blow its 8-region budget. Hubris
+    # reserves the first MPU slot per task for a null sentinel
+    # (kern/build.rs:128), leaving 7 effective slots — lcpu needs 4
+    # owned regions + lpsys + lpsys_sram + this, for a total of 7. The
+    # exposed window also includes USART1/2/3, GPIOs, GPTIM2, RTC, etc.,
+    # but lcpu has no driver code for them, so the wider grant is
+    # harmless.
+    #
+    # PMUC is required for rf_cal::txdc, which writes BUCK_CR1 to elevate
+    # the BUCK switching frequency during TX DC offset calibration (per
+    # sifli-rs sifli-radio/src/bluetooth/rf_cal/txdc.rs).
+    hpsys_ipc   = { base = 0x50082000, size = 0x49000 },
+
+    # certain revisions of the chip have LCPU ROM that expects the tx buffer to
+    # be at a fixed address. treat it like a peripheral for simplicity
+    hcpu_tx     = { base = 0x2007FE00, size = 512 },
     
     # old peripheral defs
     # MAILBOX2 raises CH1 IRQ when LCPU posts to HCPU.

@@ -46,11 +46,10 @@ pub fn post_init(rev: ChipRev) {
 /// hardware, and crucially so `LPSYS_AON.reserve0 = 1` actually takes
 /// effect before the ROM's next idle-loop iteration reads it.
 fn post_init_letter() {
-    bringup::hold_lcpu_awake();
+    let _wake = bringup::WakeLock::new();
     configure_mac_clock();
     setup_cfo_tracking();
     disable_ble_sleep();
-    bringup::release_lcpu_hold();
 }
 
 /// A3: write `lld_prog_delay` to `RWIP_PROG_DELAY_A3` and the full
@@ -64,7 +63,7 @@ fn post_init_letter() {
 /// `disable_ble_sleep` flag write at the end must happen while LCPU is
 /// awake so the ROM idle loop observes the new value.
 fn post_init_a3() {
-    bringup::hold_lcpu_awake();
+    let _wake = bringup::WakeLock::new();
     // `lld_prog_delay` is a u8 the ROM uses to time low-level radio scheduling.
     unsafe {
         ptr::write_volatile(addr::RWIP_PROG_DELAY_A3 as *mut u8, rom_config::LLD_PROG_DELAY);
@@ -73,7 +72,6 @@ fn post_init_a3() {
     configure_mac_clock();
     setup_cfo_tracking();
     disable_ble_sleep();
-    bringup::release_lcpu_hold();
 }
 
 /// Build a `BtRomConfig` matching the Letter pre-boot values and write

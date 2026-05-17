@@ -83,6 +83,47 @@ pub const G_ROM_CONFIG_A3: usize = 0x2040_E48C;
 /// IPC ring-buffer size (header + payload). 512 B per SDK convention.
 pub const IPC_MB_BUF_SIZE: usize = 0x200;
 
+// ── RF calibration ───────────────────────────────────────────────────
+//
+// Address constants used by the vendored `rf_cal/*` modules. Mirrors
+// sifli-rs `sifli-hal/data/sf32lb52x/sram_layout.toml` @ aa4c19c.
+
+/// BT_RFC internal SRAM base (peripheral bus address). Holds the 6 MAC
+/// command sequences (RXON/OFF, TXON/OFF, BT_TXON/OFF) and the per-channel
+/// VCO + TXDC calibration tables written by `rf_cal/rfc_tables.rs`. The
+/// MAC reads from here during TX/RX via `CU_ADDR_REG` / `CAL_ADDR_REG`
+/// offsets. Inside `lpsys` aggregate (covered by lcpu's MPU).
+///
+/// Source: sram_layout.toml banks.regions @ 0x40082000, size 0x800.
+pub const BT_RFC_MEM_BASE: u32 = 0x4008_2000;
+pub const BT_RFC_SRAM_SIZE: u32 = 0x800;
+
+/// PHY RX dump buffer source for the TXDC DMA capture. CPU direct reads
+/// of this address bus-fault — only DMA may read it. Inside `lpsys`
+/// aggregate.
+///
+/// Source: sram_layout.toml banks.regions @ 0x400C0000, size 0x4000.
+pub const PHY_RX_DUMP_ADDR: u32 = 0x400C_0000;
+
+/// LPSYS Exchange Memory start (HCPU view). The BLE MAC's link-layer
+/// scheduler stores Activity CS, TX/RX descriptors, and ADV/ACL buffers
+/// here. RF cal clears the first `EM_RF_CAL_CLEAR_SIZE` of it on
+/// completion. Inside `lpsys_sram`.
+///
+/// Source: sram_layout.toml LPSYS_EM_BASE = 0x2040_8000.
+pub const EM_START: usize = 0x2040_8000;
+
+/// Byte count the SDK `bt_rf_cal()` memsets to zero at the end of cal.
+/// The full EM is 24 KiB but only the first 20 KiB is cleared per
+/// `bf0_lcpu_init.c:155`.
+pub const EM_RF_CAL_CLEAR_SIZE: usize = 0x5000;
+
+/// EM scratch region TXDC's DMA writes captured ADC samples into.
+/// `txdc::DMA_BUFFER_ADDR` in sifli-rs aliases this. Same address as
+/// `EM_START` because the TXDC capture transiently overwrites the
+/// beginning of EM (which we then clear at end of cal anyway).
+pub const TXDC_DMA_BUFFER_ADDR: u32 = EM_START as u32;
+
 /// Pick the LCPU→HCPU mailbox CH1 ring address for the detected chip rev.
 pub const fn lcpu2hcpu_mb_ch1(rev: ChipRev) -> usize {
     match rev {

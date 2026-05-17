@@ -12,6 +12,7 @@ ipc = { path = "../../modules/ipc" }
 sysmodule_log_api = { path = "../log/api" }
 sysmodule_reactor_api = { path = "../reactor/api" }
 sysmodule_syscon_api = { path = "../syscon/api", features = ["bare-panics"] }
+sysmodule_efuse_api = { path = "../efuse/api" }
 rcard-log = { path = "../../../shared/log" }
 rcard-log-macros = { path = "../../../shared/log/macros" }
 sysmodule_lcpu_api = { path = "api" }
@@ -20,6 +21,12 @@ sifli-pac = { git = "https://github.com/OpenSiFli/sifli-pac.git", rev = "bc148a3
 userlib.workspace = true
 generated = { path = "../../modules/generated" }
 cortex-m = "0.7.7"
+
+# RFC command sequencer + RivieraWaves register defs used by rf_cal/.
+# Pulled from crates.io (the published version, no fork). sifli-rs's
+# sifli-radio crate references the same version with the same features.
+# Source: sifli-rs/sifli-radio/Cargo.toml:17 @ commit aa4c19c.
+rwbt = { version = "0.1.1", features = ["sifli", "prebuild"] }
 
 [[bin]]
 name = "sysmodule_lcpu"

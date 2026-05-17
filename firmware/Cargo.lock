@@ -978,6 +978,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rwbt"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c297324c71f3821c54506b82595cc99375e012a862d9bc0657963df0acce433"
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1439,7 +1445,9 @@ dependencies = [
  "ipc",
  "rcard-log",
  "rcard-log-macros",
+ "rwbt",
  "sifli-pac 0.2.0 (git+https://github.com/OpenSiFli/sifli-pac.git?rev=bc148a3)",
+ "sysmodule_efuse_api",
  "sysmodule_lcpu_api",
  "sysmodule_log_api",
  "sysmodule_reactor_api",
