@@ -4,7 +4,8 @@ fun ctx => {
   crate_info = import "./Cargo.toml",
   priority = lib.workgroup.app,
   depends_on = [
-    # ctx.tasks.sysmodule_bluetooth,
+    # Direct LCPU control while we debug the BLE host stack — bluetooth
+    # sysmodule is bypassed.
     ctx.tasks.sysmodule_lcpu,
     ctx.tasks.sysmodule_cap1208,
     ctx.tasks.sysmodule_compositor,

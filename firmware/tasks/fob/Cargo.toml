@@ -17,6 +17,7 @@ sysmodule_cap1208_api = { path = "../../sysmodule/cap1208/api" }
 sysmodule_compositor_api = { path = "../../sysmodule/compositor/api" }
 sysmodule_drv2603_api = { path = "../../sysmodule/drv2603/api" }
 sysmodule_lcpu_api = { path = "../../sysmodule/lcpu/api" }
+#sysmodule_bluetooth_api = { path = "../../sysmodule/bluetooth/api" }
 sysmodule_log_api = { path = "../../sysmodule/log/api" }
 sysmodule_reactor_api = { path = "../../sysmodule/reactor/api" }
 userlib.workspace = true

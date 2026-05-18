@@ -2,10 +2,8 @@
 #![no_main]
 
 use generated::slots::SLOTS;
-use once_cell::{GlobalState, OnceCell};
-use rcard_log::{info, OptionExt, ResultExt};
-use sysmodule_cap1208_api::*;
-use sysmodule_compositor_api::{BlendMode, FrameBufferInfo, ImageFormat};
+use rcard_log::{ResultExt, info};
+use sysmodule_lcpu_api::*;
 use sysmodule_reactor_api::NOTIFICATION_BIT;
 
 sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
@@ -13,285 +11,162 @@ rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
 sysmodule_lcpu_api::bind_lcpu!(Lcpu = SLOTS.sysmodule_lcpu);
-sysmodule_cap1208_api::bind_cap1208!(Cap1208 = SLOTS.sysmodule_cap1208);
-sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
-sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
-sysmodule_drv2603_api::bind_drv2603!(Haptic = SLOTS.sysmodule_drv2603);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
-const SCREEN_W: usize = 128;
-const SCREEN_H: usize = 64;
-const HALF_H: usize = SCREEN_H / 2;
-const PITCH: usize = SCREEN_W / 8;
-const FB_BYTES: usize = PITCH * SCREEN_H;
+// ── HCI command frames (H4 type byte + opcode + param_len + params) ──
 
-const NUM_CHANNELS: usize = 8;
-const BAR_STRIDE: usize = SCREEN_W / NUM_CHANNELS; // 16 px per bar
-const BAR_WIDTH: usize = BAR_STRIDE - 2; // 14 px bar, 2 px gap
+/// HCI_Reset (OGF=0x03, OCF=0x0003 → opcode 0x0C03), no params.
+const HCI_RESET: &[u8] = &[0x01, 0x03, 0x0C, 0x00];
 
-fn set_pixel(buf: &mut [u8; FB_BYTES], x: usize, y: usize) {
-    if x < SCREEN_W && y < SCREEN_H {
-        let byte = y * PITCH + x / 8;
-        buf[byte] |= 0x80 >> (x % 8);
-    }
-}
-
-// 5x7 digit bitmaps (rows top-to-bottom, MSB-left within each u8)
-const FONT_W: usize = 5;
-const FONT_H: usize = 7;
-#[rustfmt::skip]
-const DIGITS: [[u8; 7]; 11] = [
-    [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110], // 0
-    [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110], // 1
-    [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111], // 2
-    [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110], // 3
-    [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010], // 4
-    [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110], // 5
-    [0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110], // 6
-    [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000], // 7
-    [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110], // 8
-    [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110], // 9
-    [0b00000, 0b00000, 0b01110, 0b00000, 0b00000, 0b01110, 0b00000], // % (index 10)
+/// HCI_LE_Set_Advertising_Parameters (opcode 0x2006).
+/// min/max interval = 0x00A0 (= 100 ms in 0.625 ms units), ADV_IND,
+/// public address, channels 37/38/39, allow any.
+const HCI_LE_SET_ADV_PARAMS: &[u8] = &[
+    0x01, 0x06, 0x20, 0x0F, // H4 cmd, opcode lo/hi, param_len = 15
+    0xA0, 0x00, // adv_interval_min
+    0xA0, 0x00, // adv_interval_max
+    0x00, // adv_type = ADV_IND (connectable undirected)
+    0x00, // own_address_type = public
+    0x00, // peer_address_type = public
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // peer_address (unused with filter=0)
+    0x07, // channel_map = ch 37/38/39
+    0x00, // filter_policy = allow any
 ];
 
-fn draw_char(buf: &mut [u8; FB_BYTES], ch: usize, x0: usize, y0: usize) {
-    if ch > 10 {
-        return;
-    }
-    let glyph = &DIGITS[ch];
-    let mut row = 0;
-    while row < FONT_H {
-        let bits = glyph[row];
-        let mut col = 0;
-        while col < FONT_W {
-            if bits & (0b10000 >> col) != 0 {
-                set_pixel(buf, x0 + col, y0 + row);
-            }
-            col += 1;
-        }
-        row += 1;
-    }
-}
+/// HCI_LE_Set_Advertising_Data (opcode 0x2008).
+/// 10 bytes used: Flags AD + Complete Local Name "Charm". Remainder zero.
+const HCI_LE_SET_ADV_DATA: &[u8] = &[
+    0x01, 0x08, 0x20, 0x20, // H4 cmd, opcode lo/hi, param_len = 32
+    0x0A, // adv_data_length = 10
+    // AD #1: Flags (LE General Discoverable + BR/EDR not supported)
+    0x02, 0x01, 0x06,
+    // AD #2: Complete Local Name "Charm"
+    0x06, 0x09, b'C', b'h', b'a', b'r', b'm',
+    // 21 zero bytes of padding to reach the fixed 31-byte adv_data field
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
 
-fn draw_percentage(buf: &mut [u8; FB_BYTES], pct: u32) {
-    let d2 = (pct / 100) as usize;
-    let d1 = ((pct / 10) % 10) as usize;
-    let d0 = (pct % 10) as usize;
+/// HCI_LE_Set_Advertising_Enable (opcode 0x200A), enable = 0x01.
+const HCI_LE_SET_ADV_ENABLE: &[u8] = &[0x01, 0x0A, 0x20, 0x01, 0x01];
 
-    let show_hundreds = d2 > 0;
-    let num_chars = if show_hundreds { 4 } else { 3 }; // digits + %
-    let total_w = num_chars * (FONT_W + 1) - 1;
-    let x_start = (SCREEN_W - total_w) / 2;
-    let y_start = (SCREEN_H - FONT_H) / 2;
+const OP_RESET: u16 = 0x0C03;
+const OP_LE_SET_ADV_PARAMS: u16 = 0x2006;
+const OP_LE_SET_ADV_DATA: u16 = 0x2008;
+const OP_LE_SET_ADV_ENABLE: u16 = 0x200A;
 
-    let mut x = x_start;
-    if show_hundreds {
-        draw_char(buf, d2, x, y_start);
-        x += FONT_W + 1;
-    }
-    draw_char(buf, d1, x, y_start);
-    x += FONT_W + 1;
-    draw_char(buf, d0, x, y_start);
-    x += FONT_W + 1;
-    draw_char(buf, 10, x, y_start); // %
-}
-
-fn draw_bars(buf: &mut [u8; FB_BYTES], top: &[i32; 8], bottom: &[i32; 8]) {
-    buf.fill(0);
-
-    // Auto-scale: find min/max across all 16 values
-    let mut min = top[0];
-    let mut max = top[0];
+/// Scan a recv'd HCI byte stream for a Command Complete event matching
+/// `expected_opcode`. Returns the status byte if found. Handles multiple
+/// concatenated events (we've seen LCPU coalesce two CCs in a single
+/// recv when responses pile up).
+fn find_cc(buf: &[u8], expected_opcode: u16) -> Option<u8> {
     let mut i = 0;
-    while i < 8 {
-        if top[i] < min {
-            min = top[i];
+    while i + 3 <= buf.len() {
+        if buf[i] != 0x04 {
+            return None; // not an HCI Event packet; bail
         }
-        if top[i] > max {
-            max = top[i];
+        let evt_code = buf[i + 1];
+        let param_len = buf[i + 2] as usize;
+        let next = i + 3 + param_len;
+        if next > buf.len() {
+            return None;
         }
-        if bottom[i] < min {
-            min = bottom[i];
-        }
-        if bottom[i] > max {
-            max = bottom[i];
-        }
-        i += 1;
-    }
-
-    let range = max - min;
-
-    // Top half: Device A bars grow downward from row 0
-    i = 0;
-    while i < NUM_CHANNELS {
-        let h = if range > 0 {
-            (((top[7 - i] - min) as u32 * HALF_H as u32) / range as u32) as usize
-        } else {
-            1
-        };
-        let x0 = i * BAR_STRIDE + 1;
-        let mut row = 0;
-        while row < h {
-            let mut col = 0;
-            while col < BAR_WIDTH {
-                set_pixel(buf, x0 + col, row);
-                col += 1;
+        if evt_code == 0x0E && param_len >= 4 {
+            // Command Complete: num_hci_command_packets, opcode_lo, opcode_hi, status
+            let cc_opcode = u16::from_le_bytes([buf[i + 4], buf[i + 5]]);
+            if cc_opcode == expected_opcode {
+                return Some(buf[i + 6]);
             }
-            row += 1;
         }
-        i += 1;
+        i = next;
     }
+    None
+}
 
-    // Bottom half: Device B bars grow upward from row 63
-    i = 0;
-    while i < NUM_CHANNELS {
-        let h = if range > 0 {
-            (((bottom[i] - min) as u32 * HALF_H as u32) / range as u32) as usize
-        } else {
-            1
-        };
-        let x0 = i * BAR_STRIDE + 1;
-        let mut row = 0;
-        while row < h {
-            let y = SCREEN_H - 1 - row;
-            let mut col = 0;
-            while col < BAR_WIDTH {
-                set_pixel(buf, x0 + col, y);
-                col += 1;
-            }
-            row += 1;
+/// Drain whatever the reactor has queued so the queue doesn't fill up.
+/// We don't care about the notification details — the bare bit waking
+/// us is enough.
+fn drain_reactor() {
+    loop {
+        match Reactor::pull() {
+            Ok(Some(_)) => {}
+            _ => break,
         }
-        i += 1;
     }
 }
 
-const SWEEP_PERIOD_MS: u64 = 10_000;
-const SWEEP_HALF_MS: f32 = (SWEEP_PERIOD_MS / 2) as f32;
-const CLICK_DURATION_MS: u64 = 2;
-const INTERVAL_MIN_MS: f32 = 10.0;
-const INTERVAL_MAX_MS: f32 = 500.0;
+/// Send one HCI command and block until we see the matching Command
+/// Complete. Logs along the way so we can see exactly where things
+/// stall. Gives up silently on IPC errors — this is a debug hack.
+fn send_and_await(lcpu: &mut Lcpu, cmd: &[u8], expected_opcode: u16) {
+    info!("fob: sending opcode {}", expected_opcode);
+    match lcpu.send_hci(cmd) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            info!("fob: send err: {}", e);
+            return;
+        }
+        Err(e) => {
+            info!("fob: send ipc err: {}", e);
+            return;
+        }
+    }
 
-struct TouchState {
-    cap_a: Cap1208,
-    cap_b: Cap1208,
-    fb: FrameBuffer,
-    _layer: Layer,
-    buf: [u8; FB_BYTES],
-    last_click: u64,
-    clicking: bool,
-    click_start: u64,
-}
-
-static LCPU_REF: OnceCell<Lcpu> = OnceCell::new();
-
-#[ipc::notification_handler(lcpu_data)]
-fn handle_lcpu_data(_sender: u16, _code: u32) {
-    info!("got incoming lcpu packet...");
     let mut buf = [0u8; 256];
+    loop {
+        let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
+        drain_reactor();
 
-    let lcpu = LCPU_REF.get().unwrap();
-    lcpu.recv_hci(&mut buf);
-
-    info!("then we do it AGAIN");
-
-    info!("sending hci packet");
-    lcpu.send_hci(&[0x01, 0x01, 0x10, 0x00])
-        .log_expect("ipc fail")
-        .log_expect("hci send fail");
+        // Drain HCI bytes; LCPU may have written multiple events.
+        loop {
+            let n = match lcpu.recv_hci(&mut buf) {
+                Ok(n) => n as usize,
+                Err(_) => 0,
+            };
+            if n == 0 {
+                break;
+            }
+            info!("fob: recv {} bytes", n);
+            info!("fob: bytes: {}", buf[..n]);
+            if let Some(status) = find_cc(&buf[..n], expected_opcode) {
+                info!("fob: CC op={} status={}", expected_opcode, status);
+                return;
+            }
+        }
+    }
 }
 
 #[export_name = "main"]
 fn main() -> ! {
     info!("fob: awake");
 
-    let lcpu = Lcpu::init([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
-        .log_expect("ipc fail")
-        .log_expect("lcpu bringup fail");
+    let bd_addr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+    let mut lcpu = Lcpu::init(bd_addr)
+        .log_expect("lcpu init ipc")
+        .log_expect("lcpu init");
+    info!("fob: lcpu ready");
 
-    info!("sending hci packet");
-    lcpu.send_hci(&[0x01, 0x01, 0x10, 0x00])
-        .log_expect("ipc fail")
-        .log_expect("hci send fail");
+    send_and_await(&mut lcpu, HCI_RESET, OP_RESET);
+    send_and_await(&mut lcpu, HCI_LE_SET_ADV_PARAMS, OP_LE_SET_ADV_PARAMS);
+    send_and_await(&mut lcpu, HCI_LE_SET_ADV_DATA, OP_LE_SET_ADV_DATA);
+    send_and_await(&mut lcpu, HCI_LE_SET_ADV_ENABLE, OP_LE_SET_ADV_ENABLE);
 
-    LCPU_REF.set(lcpu);
+    info!("fob: advertising!");
 
-    // wirehead the lcpu task directly
-
-    // BLE init. The handle must outlive the loop below — dropping it sends
-    // IMPLICIT_DESTROY to the bluetooth sysmodule, which tears down the
-    // BluetoothResource even though the @spawn'd runner + advertiser keep
-    // running off static state. Bind it to a local that lives for the rest
-    // of main so future IPC calls (notify, stop_advertising, …) still work.
-
-    // let mut name_buf = [0u8; 32];
-    // let name = b"Charm";
-    // name_buf[..name.len()].copy_from_slice(name);
-    // let bd_addr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
-    // let _bt = match Bt::init(bd_addr, name_buf, name.len() as u8) {
-    //     Ok(Ok(bt)) => {
-    //         info!("fob: BLE initialized");
-    //         let _ = bt.start_advertising();
-    //         Some(bt)
-    //     }
-    //     Ok(Err(e)) => {
-    //         info!("fob: BLE init error: {}", e);
-    //         None
-    //     }
-    //     Err(e) => {
-    //         info!("fob: BLE IPC error: {}", e);
-    //         None
-    //     }
-    // };
-
-    // let config = Cap1208Config {
-    //     enabled_channels: 0xFF,
-    //     signal: SignalConfig::new(AnalogGain::X2, DigitalShift::X1),
-    //     sampling: SamplingConfig::fastest(Averaging::Avg4, Duration::Us640),
-    //     recalibration: RecalibrationConfig::every(RecalRate::Samples32)
-    //         .with_touch_duration(TouchRecalDuration::Disabled)
-    //         .with_below_baseline(BelowBaseline::Count32),
-    // };
-
-    // let cap_a = Cap1208::open(Device::A, config)
-    //     .log_expect("cap1208 A IPC")
-    //     .log_expect("cap1208 A open");
-
-    // let cap_b = Cap1208::open(Device::B, config)
-    //     .log_expect("cap1208 B IPC")
-    //     .log_expect("cap1208 B open");
-
-    // info!("fob: touch sensors open");
-
-    // let buf = [0u8; FB_BYTES];
-    // let info = FrameBufferInfo::new(ImageFormat::Mono, SCREEN_W as u32, SCREEN_H as u32);
-    // let fb = FrameBuffer::new(info, &buf)
-    //     .log_expect("fb IPC")
-    //     .log_expect("fb creation");
-    // let fb_id = fb.id().log_expect("fb id");
-    // let layer = Layer::new(fb_id, 0, 0, 0, BlendMode::Replace)
-    //     .log_expect("layer IPC")
-    //     .log_expect("layer creation");
-
-    // let _ = STATE.set(GlobalState::new(TouchState {
-    //     cap_a,
-    //     cap_b,
-    //     fb,
-    //     _layer: layer,
-    //     buf,
-    //     last_click: 0,
-    //     clicking: false,
-    //     click_start: 0,
-    // }));
-
-    // info!("fob: touch bar display running, starting haptic sweep");
-
+    // Idle loop: drain whatever LCPU posts so the reactor doesn't fill,
+    // and log incoming events for visibility (connect/disconnect, etc).
+    let mut buf = [0u8; 256];
     loop {
         let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
+        drain_reactor();
         loop {
-            match Reactor::pull() {
-                Ok(Some(notif)) => handle_lcpu_data(&notif),
-                _ => break,
+            let n = match lcpu.recv_hci(&mut buf) {
+                Ok(n) => n as usize,
+                Err(_) => 0,
+            };
+            if n == 0 {
+                break;
             }
+            info!("fob: post-adv recv {} bytes: {}", n, buf[..n]);
         }
     }
 }
