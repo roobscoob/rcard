@@ -227,8 +227,8 @@ mpr_struct! {
 impl AfeConfig {
     pub const fn default() -> Self {
         Self {
-            ffi: FirstFilterIterations::Samples18,
-            cdc: 16,
+            ffi: FirstFilterIterations::Samples34,
+            cdc: 63,
             cdt: ChargeDischargeTime::Us0_5,
             sfi: SecondFilterIterations::Samples10,
             esi: SampleInterval::Ms8,
@@ -370,7 +370,7 @@ mpr_struct! {
 impl Mpr121Config {
     pub const fn default_12ch() -> Self {
         Self {
-            thresholds: ThresholdConfig::new(4, 2),
+            thresholds: ThresholdConfig::new(2, 1),
             baseline: BaselineFilter::default(),
             debounce: DebounceConfig::off(),
             afe: AfeConfig::default(),
@@ -381,7 +381,7 @@ impl Mpr121Config {
 
     pub const fn auto_12ch_3v3() -> Self {
         Self {
-            thresholds: ThresholdConfig::new(4, 2),
+            thresholds: ThresholdConfig::new(2, 1),
             baseline: BaselineFilter::default(),
             debounce: DebounceConfig::off(),
             afe: AfeConfig::default(),

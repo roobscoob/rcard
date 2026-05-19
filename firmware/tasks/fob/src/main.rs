@@ -30,6 +30,11 @@ const NUM_CHANNELS: usize = 8;
 const BAR_STRIDE: usize = SCREEN_W / NUM_CHANNELS;
 const BAR_WIDTH: usize = BAR_STRIDE - 2;
 
+// false = fixed scale (bars clip at MAX_DELTA, default)
+// true  = auto scale (tallest bar always fills half-screen)
+const AUTO_SCALE: bool = false;
+const MAX_DELTA: i32 = 5;
+
 fn set_pixel(buf: &mut [u8; FB_BYTES], x: usize, y: usize) {
     if x < SCREEN_W && y < SCREEN_H {
         let byte = y * PITCH + x / 8;
@@ -125,10 +130,12 @@ fn draw_bars(
         i += 1;
     }
 
+    let scale = if AUTO_SCALE { max_delta } else { MAX_DELTA };
+
     // Top half: Device B bars grow downward from row 0
     i = 0;
     while i < NUM_CHANNELS {
-        let h = ((bottom_delta[i] as u32 * HALF_H as u32) / max_delta as u32) as usize;
+        let h = ((bottom_delta[i].min(scale) as u32 * HALF_H as u32) / scale as u32) as usize;
         let x0 = i * BAR_STRIDE + 1;
         let mut row = 0;
         while row < h {
@@ -145,7 +152,7 @@ fn draw_bars(
     // Bottom half: Device A bars grow upward from row 63, reversed
     i = 0;
     while i < NUM_CHANNELS {
-        let h = ((top_delta[NUM_CHANNELS - 1 - i] as u32 * HALF_H as u32) / max_delta as u32) as usize;
+        let h = ((top_delta[NUM_CHANNELS - 1 - i].min(scale) as u32 * HALF_H as u32) / scale as u32) as usize;
         let x0 = i * BAR_STRIDE + 1;
         let mut row = 0;
         while row < h {
@@ -176,6 +183,7 @@ struct TouchState {
     last_click: u64,
     clicking: bool,
     click_start: u64,
+    log_counter: u8,
 }
 
 static STATE: OnceCell<GlobalState<TouchState>> = OnceCell::new();
@@ -231,6 +239,21 @@ fn handle_present(_sender: u16, _code: u32) {
                 _ => return,
             };
 
+            s.log_counter = s.log_counter.wrapping_add(1);
+            if s.log_counter % 8 == 0 {
+                info!("capA filt: {} {} {} {} {} {} {} {}",
+                    top[4], top[5], top[6], top[7], top[8], top[9], top[10], top[11]);
+                info!("capA base: {} {} {} {} {} {} {} {}",
+                    top_bl[4], top_bl[5], top_bl[6], top_bl[7],
+                    top_bl[8], top_bl[9], top_bl[10], top_bl[11]);
+                info!("capB filt: {} {} {} {} {} {} {} {}",
+                    bottom[4], bottom[5], bottom[6], bottom[7],
+                    bottom[8], bottom[9], bottom[10], bottom[11]);
+                info!("capB base: {} {} {} {} {} {} {} {}",
+                    bottom_bl[4], bottom_bl[5], bottom_bl[6], bottom_bl[7],
+                    bottom_bl[8], bottom_bl[9], bottom_bl[10], bottom_bl[11]);
+            }
+
             draw_bars(&mut s.buf, &top, &top_bl, &bottom, &bottom_bl);
             draw_percentage(&mut s.buf, (rate * 100.0) as u32);
             let _ = s.fb.write(&s.buf);
@@ -279,6 +302,7 @@ fn main() -> ! {
         last_click: 0,
         clicking: false,
         click_start: 0,
+        log_counter: 0,
     }));
 
     info!("fob: touch bar display running, starting haptic sweep");
