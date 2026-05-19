@@ -227,11 +227,11 @@ mpr_struct! {
 impl AfeConfig {
     pub const fn default() -> Self {
         Self {
-            ffi: FirstFilterIterations::Samples6,
-            cdc: 16,
+            ffi: FirstFilterIterations::Samples34,
+            cdc: 63,
             cdt: ChargeDischargeTime::Us0_5,
-            sfi: SecondFilterIterations::Samples4,
-            esi: SampleInterval::Ms16,
+            sfi: SecondFilterIterations::Samples10,
+            esi: SampleInterval::Ms8,
         }
     }
 }
@@ -336,13 +336,15 @@ impl AutoConfig {
 
     /// Standard auto-config for a given supply voltage.
     /// USL = (VDD − 0.7) / VDD × 256, TL = USL × 0.9, LSL = USL × 0.65
+    /// ARE (auto-reconfig) is disabled: disconnected/OOR electrodes are left
+    /// as-is after the initial search rather than triggering continuous retries.
     pub const fn for_vdd_mv(vdd_mv: u16) -> Self {
         let usl = ((vdd_mv as u32 - 700) * 256 / vdd_mv as u32) as u8;
         let tl = (usl as u16 * 9 / 10) as u8;
         let lsl = (usl as u16 * 65 / 100) as u8;
         Self {
             enabled: 1,
-            reconfig_enabled: 1,
+            reconfig_enabled: 0,
             skip_charge_time: 0,
             retry: AutoConfigRetry::Retry2,
             upper_limit: usl,
@@ -368,7 +370,7 @@ mpr_struct! {
 impl Mpr121Config {
     pub const fn default_12ch() -> Self {
         Self {
-            thresholds: ThresholdConfig::new(12, 6),
+            thresholds: ThresholdConfig::new(2, 1),
             baseline: BaselineFilter::default(),
             debounce: DebounceConfig::off(),
             afe: AfeConfig::default(),
@@ -379,7 +381,7 @@ impl Mpr121Config {
 
     pub const fn auto_12ch_3v3() -> Self {
         Self {
-            thresholds: ThresholdConfig::new(12, 6),
+            thresholds: ThresholdConfig::new(2, 1),
             baseline: BaselineFilter::default(),
             debounce: DebounceConfig::off(),
             afe: AfeConfig::default(),

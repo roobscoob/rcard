@@ -431,6 +431,61 @@ fn main() -> ! {
     usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: VDD18 LDO enabled\r\n");
 
+    // HAL_PMU_Init equivalent for SF32LB52X (SDK: bf0_hal_pmu.c:1346-1379).
+    // The SDK calls this on every non-standby boot from HAL_Init().  We have
+    // no standby path so we always run it.  Two writes are load-bearing for
+    // from-dead-battery charging:
+    //   - AON_LDO.VBAT_LDO_SET_VOUT=6 (3.3V): the SDK drops this to 3V
+    //     (code 0) before entering hibernate to cut leakage; without the
+    //     restore the VBAT rail stays under-spec and the charger misbehaves.
+    //   - WER.LOWBAT: tells the PMUC to power the chip down if VCC sags
+    //     below the low-battery threshold, so the charger can work
+    //     uninterrupted instead of the chip brownout-resetting in a loop.
+    unsafe {
+        // PMUC base address (register.h:400, sf32lb52x).
+        // Offsets come from the PMUC_TypeDef struct layout in pmuc.h.
+        #[inline(always)]
+        unsafe fn pmuc_rmw(offset: u32, mask: u32, val: u32) {
+            let p = (0x500c_a000u32 + offset) as *mut u32;
+            p.write_volatile((p.read_volatile() & !mask) | val);
+        }
+
+        // VRET_CR.VBIT = 1  (bits [5:2], offset 0x14)
+        pmuc_rmw(0x14, 0x3C, 1 << 2);
+
+        // BUCK_CR2 (offset 0x30):
+        //   Enable all buck mode-transition paths: H2M[0] H2L[1] M2L[2] L2M[3]
+        pmuc_rmw(0x30, 0x0F, 0x0F);
+        //   M2H_CNT[7:4]=7, L2H_CNT[11:8]=7, L2M_CNT[15:12]=7
+        pmuc_rmw(0x30, 0xFFF0, (7 << 4) | (7 << 8) | (7 << 12));
+        //   SET_VOUT_L[27:24] = 6
+        pmuc_rmw(0x30, 0x0F00_0000, 6 << 24);
+
+        // AON_LDO (offset 0x28):
+        //   VBAT_LDO_SET_VOUT[3:0] = 6 (3.3V), VBAT_POR_TH[6:4] = 0
+        pmuc_rmw(0x28, 0x7F, 6);
+
+        // WER.LOWBAT (offset 0x04, bit 7): auto power-down on low VCC
+        pmuc_rmw(0x04, 1 << 7, 1 << 7);
+
+        // HPSYS_LDO.DLY[15:10] = 1  (offset 0x4C)
+        pmuc_rmw(0x4C, 0xFC00, 1 << 10);
+        // LPSYS_LDO.DLY[15:10] = 1  (offset 0x50)
+        pmuc_rmw(0x50, 0xFC00, 1 << 10);
+        // HPSYS_SWR.DLY[6:4] = 3    (offset 0x54)
+        pmuc_rmw(0x54, 0x70, 3 << 4);
+        // LPSYS_SWR.DLY[6:4] = 3    (offset 0x58)
+        pmuc_rmw(0x58, 0x70, 3 << 4);
+
+        // HXT_CR3.DLY[9:4] = 0x3F   (offset 0x70)
+        // SDK note: "XT48 ready flag is set after waiting for 2ms,
+        // default 1ms is not enough" — must be set before clock_setup()
+        // starts HXT48.
+        pmuc_rmw(0x70, 0x3F0, 0x3F << 4);
+    }
+    usart1_write_str(TICK_ZERO);
+    usart1_write_str("kernel: PMU init done\r\n");
+
     unsafe { apply_pin_config() };
 
     let cycles_per_ms = clock_setup();
