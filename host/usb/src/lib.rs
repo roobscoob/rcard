@@ -152,14 +152,9 @@ impl Usb {
             }
         };
 
-        let host_iface = dev
-            .claim_interface(HOST_DRIVEN_INTERFACE)
-            .wait()
-            .map_err(ConnectError::Claim)?;
-        let fob_iface = dev
-            .claim_interface(FOB_DRIVEN_INTERFACE)
-            .wait()
-            .map_err(ConnectError::Claim)?;
+        // On hotplug the OS may not have set the active configuration yet,
+        // so the interfaces aren't claimable immediately. Retry with backoff.
+        let (host_iface, fob_iface) = claim_interfaces_with_retry(&dev)?;
 
         let host_in_addr = find_bulk_endpoint_address(&dev, HOST_DRIVEN_INTERFACE, false)
             .ok_or(ConnectError::NoEndpoints)?;
@@ -495,6 +490,31 @@ async fn host_reader(
 }
 
 // ── Endpoint discovery ───────────────────────────────────────────────────
+
+fn claim_interfaces_with_retry(
+    dev: &nusb::Device,
+) -> Result<(nusb::Interface, nusb::Interface), ConnectError> {
+    let backoffs = [0, 50, 100, 200];
+    let mut last_err = None;
+    for (i, &ms) in backoffs.iter().enumerate() {
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        match dev.claim_interface(HOST_DRIVEN_INTERFACE).wait() {
+            Ok(host) => match dev.claim_interface(FOB_DRIVEN_INTERFACE).wait() {
+                Ok(fob) => {
+                    if i > 0 {
+                        eprintln!("[usb] claimed interfaces after {i} retries");
+                    }
+                    return Ok((host, fob));
+                }
+                Err(e) => last_err = Some(e),
+            },
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(ConnectError::Claim(last_err.unwrap()))
+}
 
 /// Find the address of the bulk OUT (`out=true`) or bulk IN endpoint on
 /// a given interface of the device's active configuration.
