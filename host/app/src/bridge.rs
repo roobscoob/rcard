@@ -48,7 +48,7 @@ pub enum Command {
         firmware_dir: PathBuf,
         config: String,
         board: String,
-        layout: String,
+        images: Vec<tfw::config::ImageSpec>,
         out: PathBuf,
     },
     /// Make an IPC call to a device.
@@ -789,7 +789,7 @@ pub async fn run(
                 firmware_dir,
                 config,
                 board,
-                layout,
+                images,
                 out,
             } => {
                 let build_tx = event_tx.clone();
@@ -1007,7 +1007,7 @@ pub async fn run(
                         &firmware_dir,
                         &config,
                         &board,
-                        &layout,
+                        &images,
                         &out,
                         Some(&on_event),
                         None,

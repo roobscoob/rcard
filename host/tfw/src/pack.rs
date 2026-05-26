@@ -10,7 +10,6 @@ use zip::write::SimpleFileOptions;
 use crate::build_metadata::BuildMetadata;
 use crate::compile::CompileArtifact;
 use crate::config::AppConfig;
-use crate::layout::Layout;
 use crate::link::PlaceLayout;
 
 // ── ftab / sec_configuration (SiFli SF32LB52) ────────────────────────────────
@@ -110,14 +109,14 @@ const _: () = assert!(FTAB_SIZE >= size_of::<SecConfiguration>());
 /// Crypto fields are left as erased-flash (0xFF) and image flags=0 —
 /// `dfu_boot_img_in_flash` treats that as the plaintext path (no AES, no
 /// signature verification).
-fn build_ftab(
+///
+/// Called by the host app at flash time — NOT during the build.
+pub fn build_ftab(
     ftab_base: u32,
     loader_flash_src: u32,
     loader_xip_dest: u32,
     loader_size: u32,
-    places_a_base: u32,
-    places_a_size: u32,
-    places_b: Option<(u32, u32)>,
+    images: &[(usize, u32, u32)], // (ftab_slot, flash_addr, size)
 ) -> Vec<u8> {
     // Start with "erased flash" everywhere, then overwrite only the fields
     // the BOOTROM actually reads. Matches original semantics of
@@ -145,22 +144,16 @@ fn build_ftab(
         flags: 0,
     };
 
-    // ftab[FTAB_PLACES_SLOT_A]: slot A places.bin location.
-    sec.ftab[FTAB_PLACES_SLOT_A] = FlashTable {
-        base: places_a_base,
-        size: places_a_size,
-        xip_base: 0,
-        flags: 0,
-    };
-
-    // ftab[FTAB_PLACES_SLOT_B]: slot B places.bin location (if A/B enabled).
-    if let Some((b_base, b_size)) = places_b {
-        sec.ftab[FTAB_PLACES_SLOT_B] = FlashTable {
-            base: b_base,
-            size: b_size,
-            xip_base: 0,
-            flags: 0,
-        };
+    // Firmware image entries — one per image.
+    for &(slot, base, size) in images {
+        if slot < DFU_FLASH_PARTITION {
+            sec.ftab[slot] = FlashTable {
+                base,
+                size,
+                xip_base: 0,
+                flags: 0,
+            };
+        }
     }
 
     // imgs[BL]: only length/blksize/flags are meaningful. key/sig/ver stay
@@ -189,101 +182,57 @@ fn build_ftab(
     buf
 }
 
-/// Build the ftab binary from the config's boot section.
-///
-/// The bootloader is linked into SRAM (its `code` region lives in `bulk`),
-/// but its bytes are physically packed inside `places.bin` on flash. To
-/// take the BOOTROM's copy-then-jump path we need both addresses:
-///
-///   loader_xip_dest = layout.placed[bootloader.code].base   (SRAM linker addr)
-///   loader_flash_src = places_flash_addr                    (place hosting places.bin)
-///                    + place_layouts[bulk].file_offset      (where bulk's blob starts in the file)
-///                    + (bootloader_alloc.base - bulk_blob_base)
-///                                                            (bootloader's offset within the blob)
-fn build_ftab_from_config(
-    config: &AppConfig,
-    layout: &Layout,
-    place_layouts: &BTreeMap<String, PlaceLayout>,
-    bootloader_bin_size: u32,
-    places_a_size: u32,
-    places_b_size: Option<u32>,
-) -> Option<Vec<u8>> {
-    let boot = config.boot.as_ref()?;
 
-    let ftab_place = &boot.ftab;
-    let ftab_offset = ftab_place.offset.unwrap_or(0);
-    let flash_base = ftab_place
-        .mappings
-        .first()
-        .map(|m| m.address)
-        .unwrap_or(0x12000000) as u32;
-    let ftab_flash_addr = flash_base + ftab_offset as u32;
+// ── Flash-time metadata ─────────────────────────────────────────────────────
 
-    // Slot A flash address.
-    let image_a = &boot.image;
-    let image_a_flash_base = image_a
-        .mappings
-        .first()
-        .map(|m| m.address)
-        .unwrap_or(0x12000000) as u32;
-    let places_a_flash_addr = image_a_flash_base + image_a.offset.unwrap_or(0) as u32;
+/// Metadata needed to construct the ftab at flash time. Serialized as
+/// `flash-info.json` in the archive. The host app reads this, combines
+/// it with device state, and calls `build_ftab()` to produce the binary.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FlashInfo {
+    /// Flash address of the boot/ftab partition.
+    pub ftab_base: u32,
+    /// Bootloader's byte offset within each places.bin file. The flash
+    /// source address is `image_flash_addr + bootloader_file_offset`.
+    pub bootloader_file_offset: u32,
+    /// SRAM address the BOOTROM copies the bootloader to.
+    pub bootloader_sram_dest: u32,
+    /// Bootloader binary size in bytes.
+    pub bootloader_size: u32,
+    /// Per-image flash info.
+    pub images: Vec<ImageFlashInfo>,
+}
 
-    // Slot B flash address (if A/B enabled).
-    let places_b = boot.image_b.as_ref().and_then(|image_b| {
-        let b_size = places_b_size?;
-        let b_flash_base = image_b
-            .mappings
-            .first()
-            .map(|m| m.address)
-            .unwrap_or(0x12000000) as u32;
-        let b_flash_addr = b_flash_base + image_b.offset.unwrap_or(0) as u32;
-        Some((b_flash_addr, b_size))
-    });
-
-    // SRAM destination: the bootloader's linker base.
-    let bootloader_alloc = layout
-        .placed
-        .get(&("bootloader".to_string(), "code".to_string()))?;
-    let loader_xip_dest = bootloader_alloc.base as u32;
-
-    // Flash source: walk back through the link.rs packing to find where
-    // the bootloader's bytes physically landed in places.bin.
-    let bl_place_name = crate::layout::find_place_name(config, bootloader_alloc.base)?;
-    let pl = place_layouts.get(&bl_place_name)?;
-    let loader_flash_src = (places_a_flash_addr as u64
-        + pl.file_offset as u64
-        + (bootloader_alloc.base - pl.blob_base)) as u32;
-
-    Some(build_ftab(
-        ftab_flash_addr,
-        loader_flash_src,
-        loader_xip_dest,
-        bootloader_bin_size,
-        places_a_flash_addr,
-        places_a_size,
-        places_b,
-    ))
+/// Per-image flash metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImageFlashInfo {
+    /// Image name (matches archive filename: first = "places.bin",
+    /// rest = "places_{name}.bin").
+    pub name: String,
+    /// Flash address of the partition hosting this image.
+    pub flash_addr: u32,
+    /// Default ftab slot for this image (14 for A, 15 for B).
+    pub ftab_slot: usize,
 }
 
 /// Pack the build output into a `.tfw` archive.
 ///
 /// The archive contains:
-/// - `places.bin` — the firmware image (partition table + RAM-loadable segments,
-///   including the bootloader's XIP segment)
-/// - `ftab.bin` — the SiFli partition table (if boot config exists)
+/// - `places.bin`, `places_{name}.bin` — per-image firmware binaries
+/// - `flash-info.json` — metadata for ftab construction at flash time
 /// - `renode_platform.repl` — emulator platform description
 /// - `config.json` — full app config for host tools
-/// - `elf/kernel`, `elf/bootloader`, `elf/task/*` — ELFs for debugging
+/// - `elf/{image_name}/kernel`, `elf/{image_name}/task/*` — per-image ELFs
 /// - `log-metadata.json` — log metadata for structured log decoding
 /// - `ipc-metadata.json` — IPC resource / interface / server definitions
+///
+/// Each entry in `images` is (spec, config, bin_path, place_layouts, artifacts).
+/// The ftab is NOT included — it is generated at flash time by the host
+/// app, which can merge device state with the new firmware's partition info.
 pub fn pack(
     config: &AppConfig,
-    layout: &Layout,
-    artifacts: &[CompileArtifact],
-    places_bin: &Path,
-    place_layouts: &BTreeMap<String, PlaceLayout>,
-    places_b_bin: Option<&Path>,
-    bootloader_size: u32,
+    images: &[(&crate::config::ImageSpec, &AppConfig, &Path, &BTreeMap<String, PlaceLayout>, &[CompileArtifact])],
+    flash_info: Option<&FlashInfo>,
     log_metadata: Option<&Path>,
     ipc_metadata: Option<&Path>,
     build_metadata: Option<&BuildMetadata>,
@@ -297,35 +246,24 @@ pub fn pack(
     let mut zip = ZipWriter::new(file);
     let opts = SimpleFileOptions::default();
 
-    // places.bin (slot A)
-    let places_data = std::fs::read(places_bin).map_err(PackError::Io)?;
-    let places_a_size: u32 = places_data
-        .len()
-        .try_into()
-        .map_err(|_| PackError::Other("places.bin size exceeds u32".into()))?;
-    zip.start_file("places.bin", opts).map_err(PackError::Zip)?;
-    zip.write_all(&places_data).map_err(PackError::Io)?;
+    // flash-info.json
+    if let Some(fi) = flash_info {
+        let json = serde_json::to_string_pretty(fi)
+            .map_err(|e| PackError::Other(format!("serialize flash info: {e}")))?;
+        zip.start_file("flash-info.json", opts).map_err(PackError::Zip)?;
+        zip.write_all(json.as_bytes()).map_err(PackError::Io)?;
+    }
 
-    // places_b.bin (slot B, if A/B enabled)
-    let places_b_size: Option<u32> = if let Some(b_path) = places_b_bin {
-        let b_data = std::fs::read(b_path).map_err(PackError::Io)?;
-        let b_size: u32 = b_data
-            .len()
-            .try_into()
-            .map_err(|_| PackError::Other("places_b.bin size exceeds u32".into()))?;
-        zip.start_file("places_b.bin", opts).map_err(PackError::Zip)?;
-        zip.write_all(&b_data).map_err(PackError::Io)?;
-        Some(b_size)
-    } else {
-        None
-    };
-
-    // ftab.bin (if boot config exists)
-    if let Some(ftab) =
-        build_ftab_from_config(config, layout, place_layouts, bootloader_size, places_a_size, places_b_size)
-    {
-        zip.start_file("ftab.bin", opts).map_err(PackError::Zip)?;
-        zip.write_all(&ftab).map_err(PackError::Io)?;
+    // Write all image binaries.
+    for (i, (spec, _img_config, bin_path, _place_layouts, _artifacts)) in images.iter().enumerate() {
+        let data = std::fs::read(bin_path).map_err(PackError::Io)?;
+        let archive_name = if i == 0 {
+            "places.bin".to_string()
+        } else {
+            format!("places_{}.bin", spec.name)
+        };
+        zip.start_file(&archive_name, opts).map_err(PackError::Zip)?;
+        zip.write_all(&data).map_err(PackError::Io)?;
     }
 
     // renode_platform.repl
@@ -342,17 +280,25 @@ pub fn pack(
     zip.write_all(config_json.as_bytes())
         .map_err(PackError::Io)?;
 
-    // Task, kernel, and bootloader ELFs
-    for artifact in artifacts {
-        let archive_name = match artifact.kind {
-            crate::compile::ArtifactKind::Kernel => "elf/kernel".to_string(),
-            crate::compile::ArtifactKind::Bootloader => "elf/bootloader".to_string(),
-            crate::compile::ArtifactKind::Task => format!("elf/task/{}", artifact.crate_name),
-        };
-        let data = std::fs::read(&artifact.elf_path).map_err(PackError::Io)?;
-        zip.start_file(&archive_name, opts)
-            .map_err(PackError::Zip)?;
-        zip.write_all(&data).map_err(PackError::Io)?;
+    // Per-image ELFs: elf/{image_name}/kernel, elf/{image_name}/task/foo
+    for (spec, _img_config, _bin_path, _place_layouts, artifacts) in images {
+        for artifact in *artifacts {
+            let archive_name = match artifact.kind {
+                crate::compile::ArtifactKind::Kernel => {
+                    format!("elf/{}/kernel", spec.name)
+                }
+                crate::compile::ArtifactKind::Bootloader => {
+                    format!("elf/{}/bootloader", spec.name)
+                }
+                crate::compile::ArtifactKind::Task => {
+                    format!("elf/{}/task/{}", spec.name, artifact.crate_name)
+                }
+            };
+            let data = std::fs::read(&artifact.elf_path).map_err(PackError::Io)?;
+            zip.start_file(&archive_name, opts)
+                .map_err(PackError::Zip)?;
+            zip.write_all(&data).map_err(PackError::Io)?;
+        }
     }
 
     // Log metadata

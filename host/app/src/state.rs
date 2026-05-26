@@ -280,7 +280,7 @@ impl AdapterHandle {
 pub struct BuildConfig {
     pub config: String,
     pub board: String,
-    pub layout: String,
+    pub images: Vec<tfw::config::ImageSpec>,
 }
 
 /// Current status of a build. Coarse-grained — drives the sidebar button
@@ -898,7 +898,10 @@ impl BuildHandle {
             config: BuildConfig {
                 config: config_stem,
                 board,
-                layout: layout_name,
+                images: vec![tfw::config::ImageSpec {
+                    name: layout_name,
+                    layout_ncl: String::new(),
+                }],
             },
             name: Some(app_name),
             status: BuildStatus::Succeeded {
@@ -1088,7 +1091,7 @@ pub struct AppState {
     pub build_layouts: Vec<String>,
     pub selected_config: usize,
     pub selected_board: usize,
-    pub selected_layout: usize,
+    pub selected_layouts: Vec<bool>,
 
     // File drop drag state — tracks a pane being dragged from an external file hover.
     pub file_drag: Option<FileDragState>,
@@ -1149,7 +1152,7 @@ impl AppState {
             build_layouts,
             selected_config: 0,
             selected_board: 0,
-            selected_layout: 0,
+            selected_layouts: Vec::new(),
             file_drag: None,
             cmd_tx,
             event_rx,
@@ -1357,7 +1360,7 @@ impl AppState {
         self.build_layouts = discover_ncl_names(&self.firmware_dir, "layouts");
         self.selected_config = 0;
         self.selected_board = 0;
-        self.selected_layout = 0;
+        self.selected_layouts = vec![false; self.build_layouts.len()];
     }
 
     /// Import a .tfw file into the firmware database.
@@ -2317,18 +2320,39 @@ impl AppState {
     pub fn start_build(&mut self) {
         let config_name = self.build_configs.get(self.selected_config).cloned();
         let board_name = self.build_boards.get(self.selected_board).cloned();
-        let layout_name = self.build_layouts.get(self.selected_layout).cloned();
 
-        let (Some(config), Some(board), Some(layout)) = (config_name, board_name, layout_name)
+        let (Some(config), Some(board)) = (config_name, board_name)
         else {
             return;
         };
+
+        // Collect selected layouts into image specs.
+        let mut images: Vec<tfw::config::ImageSpec> = Vec::new();
+        for (i, selected) in self.selected_layouts.iter().enumerate() {
+            if *selected {
+                if let Some(name) = self.build_layouts.get(i) {
+                    images.push(tfw::config::ImageSpec {
+                        name: name.clone(),
+                        layout_ncl: format!("layouts/{name}.ncl"),
+                    });
+                }
+            }
+        }
+
+        if images.is_empty() {
+            return;
+        }
+
+        let layout_desc = images.iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let build_id = self.next_build_id();
         let build_config = BuildConfig {
             config: format!("apps/{config}.ncl"),
             board: format!("boards/{board}.ncl"),
-            layout: format!("layouts/{layout}.ncl"),
+            images: images.clone(),
         };
 
         self.builds.insert(
@@ -2347,7 +2371,7 @@ impl AppState {
                 resources: Vec::new(),
                 image: ImageProgress::None,
                 log: vec![format!(
-                    "Building {config} (board={board}, layout={layout})"
+                    "Building {config} (board={board}, images=[{layout_desc}])"
                 )],
                 started_at: std::time::Instant::now(),
                 finished_at: None,
@@ -2385,7 +2409,7 @@ impl AppState {
             firmware_dir: self.firmware_dir.clone(),
             config: format!("apps/{config}.ncl"),
             board: format!("boards/{board}.ncl"),
-            layout: format!("layouts/{layout}.ncl"),
+            images,
             out: out_path,
         });
     }
@@ -2498,8 +2522,9 @@ fn discover_ncl_names(firmware_dir: &Path, subdir: &str) -> Vec<String> {
 /// Reads the current firmware from both flash slots (firmware_a,
 /// firmware_b), uses `select_firmware` to find the active slot, then
 /// writes the new firmware to the *inactive* slot — keeping the
-/// active one as a fallback. The ftab is written last so the flash
-/// commit is atomic from the BOOTROM's perspective.
+/// active one as a fallback. The ftab is constructed at flash time
+/// from `flash-info.json` metadata so it reflects the actual device
+/// state rather than a build-time snapshot.
 async fn run_flash(
     device_id: DeviceId,
     archive_bytes: Vec<u8>,
@@ -2545,10 +2570,19 @@ async fn run_flash(
         fail("archive missing places.bin".into());
         return;
     };
-    let places_b = read_entry(&mut archive, "places_b.bin");
-    let Some(ftab) = read_entry(&mut archive, "ftab.bin") else {
-        fail("archive missing ftab.bin".into());
-        return;
+    // Second image: try places_{name}.bin for each image in flash-info.
+    let flash_info_bytes = read_entry(&mut archive, "flash-info.json");
+    let flash_info: Option<tfw::pack::FlashInfo> = flash_info_bytes.as_ref().and_then(|b| {
+        serde_json::from_slice(b).ok()
+    });
+
+    // Find the second image's places binary by name from flash-info.
+    let places_b = if let Some(ref fi) = flash_info {
+        fi.images.get(1).and_then(|img| {
+            read_entry(&mut archive, &format!("places_{}.bin", img.name))
+        })
+    } else {
+        None
     };
     drop(archive);
 
@@ -2572,7 +2606,7 @@ async fn run_flash(
                     if let Some(ref data) = places_b {
                         ("firmware_b", data.as_slice())
                     } else {
-                        eprintln!("[flash] no places_b.bin in archive, writing slot A instead");
+                        eprintln!("[flash] no slot B image in archive, writing slot A instead");
                         ("firmware_a", places_a.as_slice())
                     }
                 }
@@ -2591,7 +2625,7 @@ async fn run_flash(
             if let Some(ref data) = places_b {
                 ("firmware_b", data.as_slice())
             } else {
-                eprintln!("[flash] no places_b.bin in archive, writing slot A");
+                eprintln!("[flash] no slot B image in archive, writing slot A");
                 ("firmware_a", places_a.as_slice())
             }
         }
@@ -2612,17 +2646,57 @@ async fn run_flash(
         fail(format!("{target_partition}: {e}"));
         return;
     }
-    if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, "boot", &ftab).await {
-        eprintln!("[flash] boot partition FAILED: {e}");
-        fail(format!("boot partition: {e}"));
-        return;
+
+    // Construct the ftab at flash time using archive metadata + device state.
+    if let Some(ref fi) = flash_info {
+        let target_image = fi.images.iter()
+            .find(|img| {
+                (target_partition == "firmware_a" && img.ftab_slot == tfw::pack::FTAB_PLACES_SLOT_A)
+                || (target_partition == "firmware_b" && img.ftab_slot == tfw::pack::FTAB_PLACES_SLOT_B)
+            });
+
+        // Build ftab entries: the image we just flashed + any other
+        // images from the archive (they should also be on the device).
+        let mut ftab_entries: Vec<(usize, u32, u32)> = Vec::new();
+        for img in &fi.images {
+            let size = if img.ftab_slot == tfw::pack::FTAB_PLACES_SLOT_A {
+                places_a.len() as u32
+            } else if let Some(ref pb) = places_b {
+                pb.len() as u32
+            } else {
+                continue;
+            };
+            ftab_entries.push((img.ftab_slot, img.flash_addr, size));
+        }
+
+        let loader_flash_src = target_image
+            .map(|img| img.flash_addr + fi.bootloader_file_offset)
+            .unwrap_or(fi.images[0].flash_addr + fi.bootloader_file_offset);
+
+        let ftab = tfw::pack::build_ftab(
+            fi.ftab_base,
+            loader_flash_src,
+            fi.bootloader_sram_dest,
+            fi.bootloader_size,
+            &ftab_entries,
+        );
+
+        if let Err(e) = flash_partition(device_id, &registry, &cmd_tx, "boot", &ftab).await {
+            eprintln!("[flash] boot partition FAILED: {e}");
+            fail(format!("boot partition: {e}"));
+            return;
+        }
+        eprintln!(
+            "[flash] DONE — wrote {target_partition} ({} bytes) + boot ({} bytes)",
+            target_data.len(),
+            ftab.len(),
+        );
+    } else {
+        eprintln!(
+            "[flash] DONE — wrote {target_partition} ({} bytes), no flash-info for ftab",
+            target_data.len(),
+        );
     }
-    eprintln!(
-        "[flash] DONE — wrote {} to {target_partition} ({} bytes) + boot ({} bytes)",
-        if target_partition == "firmware_a" { "places.bin" } else { "places_b.bin" },
-        target_data.len(),
-        ftab.len(),
-    );
 
     // Reset the device so it boots into the newly flashed firmware.
     if let Ok(encoded) = registry.encode_call(

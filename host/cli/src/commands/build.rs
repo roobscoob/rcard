@@ -1091,6 +1091,23 @@ pub async fn run(
     out: PathBuf,
     format: Option<OutputFormat>,
 ) {
+    // Parse layout as image specs. Supports either:
+    // - Legacy single layout: "layouts/prod.ncl"
+    // - Multi-image: "a:layouts/prod_a.ncl,b:layouts/prod_b.ncl"
+    let images: Vec<tfw::config::ImageSpec> = if layout.contains(':') {
+        layout.split(',').map(|entry| {
+            let parts: Vec<&str> = entry.splitn(2, ':').collect();
+            tfw::config::ImageSpec {
+                name: parts[0].to_string(),
+                layout_ncl: parts[1].to_string(),
+            }
+        }).collect()
+    } else {
+        vec![tfw::config::ImageSpec {
+            name: "default".into(),
+            layout_ncl: layout.clone(),
+        }]
+    };
     let app = config
         .strip_suffix(".ncl")
         .unwrap_or(&config)
@@ -1117,7 +1134,7 @@ pub async fn run(
             &firmware_dir,
             &config,
             &board,
-            &layout,
+            &images,
             &out,
             Some(&on_event),
             None,

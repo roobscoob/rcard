@@ -7,13 +7,13 @@ fn firmware_dir() -> &'static Path {
 #[test]
 fn emit_config_json() {
     let config = tfw::config::load(
-        firmware_dir(), "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl",
     ).expect("failed to load config");
 
     let out_path = std::env::temp_dir().join("tfw_codegen_test").join("config.json");
     let _ = std::fs::remove_dir_all(out_path.parent().unwrap());
 
-    tfw::codegen::emit(&config, &out_path).expect("codegen failed");
+    tfw::codegen::emit(&config, "test-build-id", &out_path).expect("codegen failed");
 
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();

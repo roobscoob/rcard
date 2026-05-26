@@ -134,20 +134,14 @@ pub type Reservations = BTreeMap<u64, u64>;
 /// are tiny in practice (few segments, few partitions).
 pub const PLCB_TRAILER_RESERVATION: u64 = 1024;
 
-/// Compute trailer reservation for the place that hosts `places.bin`.
-/// The host place is chosen by `boot.image` in the app's ncl config.
-/// Returns an empty map when no boot config is set (e.g. RAM-boot).
-pub fn compute_reservations(config: &AppConfig) -> Reservations {
+/// Compute trailer reservation for each place that hosts a
+/// `places.bin`. One reservation per image's `code_generic` place.
+/// Returns an empty map when `image_places` is empty.
+pub fn compute_reservations(image_places: &[&Place]) -> Reservations {
     let mut out = BTreeMap::new();
-    if let Some(boot) = config.boot.as_ref() {
-        let host = &boot.image;
-        if resolve_cpu_address(host, false).is_some() {
-            out.insert(place_key(host), PLCB_TRAILER_RESERVATION);
-        }
-        if let Some(host_b) = &boot.image_b {
-            if resolve_cpu_address(host_b, false).is_some() {
-                out.insert(place_key(host_b), PLCB_TRAILER_RESERVATION);
-            }
+    for place in image_places {
+        if resolve_cpu_address(place, false).is_some() {
+            out.insert(place_key(place), PLCB_TRAILER_RESERVATION);
         }
     }
     out

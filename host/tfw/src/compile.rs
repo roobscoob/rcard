@@ -19,23 +19,44 @@ pub struct CompileArtifact {
     pub kind: ArtifactKind,
 }
 
-/// Three-phase build:
-/// 1. Cargo build with partial linking (-r)
-/// 2. Re-link for sizing → resolve deferred regions
-/// 3. Re-link at final addresses
-///
-/// Emits `Build(Organizing)` and `Build(CompilingApp)` at the appropriate
-/// points so the event stream reflects the real pipeline structure.
-pub fn compile_all(
+/// Output of the shared compilation phase. Contains partial objects
+/// and measured sizes that are reused across all image builds.
+pub struct SharedCompilation {
+    /// Partial (relocatable) object paths, keyed by crate name.
+    pub partial_objects: BTreeMap<String, PathBuf>,
+    /// Measured region sizes from the generous-address link pass.
+    pub measured_sizes: BTreeMap<RegionKey, u64>,
+    /// Bootloader artifact (if present). Bootloader is image-independent
+    /// because it reads ftab at runtime.
+    pub bootloader_artifact: Option<CompileArtifact>,
+    /// Cached state for downstream phases.
+    pub linker: PathBuf,
+    pub manifests: BTreeMap<String, PathBuf>,
+    pub task_names: Vec<String>,
+    pub hubris_tasks: String,
+    pub kernel_partial_link_script: PathBuf,
+}
+
+/// Output of a per-image build. Contains all artifacts needed to
+/// assemble one firmware image (places.bin).
+pub struct ImageBuild {
+    pub name: String,
+    pub layout: Layout,
+    pub config: AppConfig,
+    pub artifacts: Vec<CompileArtifact>,
+}
+
+/// Shared compilation: build all task partial objects and measure sizes.
+/// Also builds the bootloader (image-independent). The kernel is NOT
+/// built here — it needs per-image KCONFIG.
+pub fn compile_tasks_shared(
     firmware_dir: &Path,
     config: &AppConfig,
-    layout: &mut Layout,
-    reservations: &layout::Reservations,
     linker_dir: &Path,
     work_dir: &Path,
     emit: crate::build::EventFn<'_>,
-) -> Result<Vec<CompileArtifact>, CompileError> {
-    use crate::build::{BuildEvent, BuildState, CrateEvent, CrateKind, CrateState, ResourceUpdate};
+) -> Result<SharedCompilation, CompileError> {
+    use crate::build::{BuildEvent, CrateEvent, CrateKind, CrateState, ResourceUpdate};
 
     let target = &config.target;
     let all_tasks = layout::collect_tasks(config);
@@ -45,16 +66,13 @@ pub fn compile_all(
 
     let partial_dir = work_dir.join("partial");
     let sizing_dir = work_dir.join("sizing");
-    let final_dir = work_dir.join("final");
     std::fs::create_dir_all(&partial_dir).map_err(CompileError::Io)?;
     std::fs::create_dir_all(&sizing_dir).map_err(CompileError::Io)?;
-    std::fs::create_dir_all(&final_dir).map_err(CompileError::Io)?;
 
     let linker = find_linker()?;
     let manifests = resolve_workspace_manifests(firmware_dir)?;
     let config_json = work_dir.join("config.json");
 
-    // Helper to emit a crate state transition.
     let emit_crate = |name: &str, kind: CrateKind, state: CrateState| {
         emit(BuildEvent::Crate {
             name: name.to_string(),
@@ -63,7 +81,6 @@ pub fn compile_all(
         });
     };
 
-    // Helper to emit a crate event.
     let emit_crate_event = |name: &str, kind: CrateKind, event: CrateEvent| {
         emit(BuildEvent::Crate {
             name: name.to_string(),
@@ -102,13 +119,10 @@ pub fn compile_all(
         if artifact.exists() {
             std::fs::copy(&artifact, partial_dir.join(crate_name)).map_err(CompileError::Io)?;
         }
-        // Cargo done for this crate — flip out of Building so the
-        // UI stops showing "building…" while siblings are still
-        // compiling. Measuring happens in its own batched pass below.
         emit_crate(crate_name, CrateKind::Task, CrateState::Compiled);
     }
 
-    // ── Measuring: Re-link for sizing → resolve deferred ─────────────
+    // ── Measuring: Re-link for sizing ────────────────────────────────
 
     let mut measured: BTreeMap<RegionKey, u64> = BTreeMap::new();
 
@@ -141,40 +155,160 @@ pub fn compile_all(
         let sizes = measure_region_sizes(&sizing_elf, &chunk_map)?;
         for (region_name, size) in sizes {
             let key = (task_name.to_string(), region_name.clone());
-            if layout.deferred.contains_key(&key) {
-                emit_crate_event(task_name, CrateKind::Task, CrateEvent::Sized {
-                    region: region_name.clone(),
-                    size,
-                });
-                measured.insert(key, size);
-            }
+            emit_crate_event(task_name, CrateKind::Task, CrateEvent::Sized {
+                region: region_name.clone(),
+                size,
+            });
+            measured.insert(key, size);
         }
     }
 
-    // Resolve task deferred regions from measurements.
-    layout
-        .resolve_deferred(&measured, reservations)
-        .map_err(|e| CompileError::Other(format!("resolve layout: {e}")))?;
+    // ── Bootloader (shared — image-independent) ─────────────────────
 
-    // ── Organizing ───────────────────────────────────────────────────
-    // Signal that the layout has been re-solved with actual sizes.
+    let mut _bootloader_artifact = None;
+    if let Some(bl) = &config.bootloader {
+        let bl_kconfig = generate_bootloader_kconfig(config)?;
+        let bl_crate = &bl.crate_info.package.name;
+        let bl_manifest = find_manifest(&manifests, bl_crate)?;
+        let bl_linker_dir = linker_dir.join("bootloader");
+        let bl_task = bl_to_fake_task(bl);
+        let bl_partial_link_script = write_bootloader_partial_link_script(work_dir)?;
+
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Building);
+        cargo_build_partial(
+            &bl_manifest,
+            bl_crate,
+            target,
+            &bl_partial_link_script,
+            work_dir,
+            &hubris_tasks,
+            &[],
+            Some(&bl_kconfig),
+            &config_json,
+            bl_crate,
+            CrateKind::Bootloader,
+            emit,
+        )?;
+        let bl_partial_src = firmware_dir
+            .join("target")
+            .join(target)
+            .join("release")
+            .join(bl_crate);
+        let bl_partial = partial_dir.join(bl_crate);
+        if bl_partial_src.exists() {
+            std::fs::copy(&bl_partial_src, &bl_partial).map_err(CompileError::Io)?;
+        }
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Compiled);
+
+        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Measuring);
+        let (bl_sizing_memory, bl_chunk_map) = generate_generous_memory_x(&bl_task);
+        let bl_sizing_dir = sizing_dir.join(format!("{bl_crate}_mem"));
+        std::fs::create_dir_all(&bl_sizing_dir).map_err(CompileError::Io)?;
+        std::fs::write(bl_sizing_dir.join("memory.x"), &bl_sizing_memory)
+            .map_err(CompileError::Io)?;
+
+        let bl_sizing_elf = sizing_dir.join(bl_crate);
+        run_linker(
+            &linker,
+            &bl_partial,
+            &bl_sizing_elf,
+            &bl_linker_dir.join("link.x"),
+            &bl_sizing_dir,
+        )?;
+
+        let bl_sizes = measure_region_sizes(&bl_sizing_elf, &bl_chunk_map)?;
+        for (region_name, size) in &bl_sizes {
+            emit_crate_event(bl_crate, CrateKind::Bootloader, CrateEvent::Sized {
+                region: region_name.clone(),
+                size: *size,
+            });
+            measured.insert(("bootloader".to_string(), region_name.clone()), *size);
+        }
+
+        _bootloader_artifact = Some((bl_crate.to_string(), bl_partial, bl_linker_dir, bl_task));
+    }
+
+    let mut partial_objects = BTreeMap::new();
+    for &name in &task_names {
+        let path = partial_dir.join(name);
+        if path.exists() {
+            partial_objects.insert(name.to_string(), path);
+        }
+    }
+
+    Ok(SharedCompilation {
+        partial_objects,
+        measured_sizes: measured,
+        bootloader_artifact: None, // linked per-image below
+        linker,
+        manifests,
+        task_names: task_names.iter().map(|s| s.to_string()).collect(),
+        hubris_tasks,
+        kernel_partial_link_script,
+    })
+}
+
+/// Per-image build: resolve layout, link tasks at final addresses,
+/// build kernel with image-specific KCONFIG.
+pub fn build_image(
+    image_name: &str,
+    firmware_dir: &Path,
+    config: &AppConfig,
+    layout: &mut Layout,
+    reservations: &layout::Reservations,
+    shared: &SharedCompilation,
+    linker_dir: &Path,
+    work_dir: &Path,
+    emit: crate::build::EventFn<'_>,
+) -> Result<Vec<CompileArtifact>, CompileError> {
+    use crate::build::{BuildEvent, BuildState, CrateEvent, CrateKind, CrateState, ResourceUpdate};
+
+    let target = &config.target;
+    let all_tasks = layout::collect_tasks(config);
+    let task_names: Vec<&str> = layout::ordered_task_names(&all_tasks);
+
+    let img_work_dir = work_dir.join(format!("image_{image_name}"));
+    let final_dir = img_work_dir.join("final");
+    std::fs::create_dir_all(&final_dir).map_err(CompileError::Io)?;
+
+    let config_json = work_dir.join("config.json");
+
+    let emit_crate = |name: &str, kind: CrateKind, state: CrateState| {
+        emit(BuildEvent::Crate {
+            name: name.to_string(),
+            kind,
+            update: ResourceUpdate::State(state),
+        });
+    };
+
+    let emit_crate_event = |name: &str, kind: CrateKind, event: CrateEvent| {
+        emit(BuildEvent::Crate {
+            name: name.to_string(),
+            kind,
+            update: ResourceUpdate::Event(event),
+        });
+    };
+
+    // ── Resolve deferred regions from shared measurements ────────────
+
+    layout
+        .resolve_deferred(&shared.measured_sizes, reservations)
+        .map_err(|e| CompileError::Other(format!("resolve layout: {e}")))?;
 
     emit(BuildEvent::Build(BuildState::Organizing {
         regions_placed: layout.placed.len(),
     }));
-
-    // Emit Memory events for newly placed deferred regions.
     crate::build::emit_memory_allocations(&layout.placed, config, emit);
 
-    // ── Linking: Re-link at final addresses ──────────────────────────
+    // ── Link tasks at final (image-specific) addresses ──────────────
 
     let mut artifacts = Vec::new();
 
     for &task_name in &task_names {
-        let partial_obj = partial_dir.join(task_name);
-        if !partial_obj.exists() {
-            continue;
-        }
+        let partial_obj = match shared.partial_objects.get(task_name) {
+            Some(p) => p,
+            None => continue,
+        };
 
         emit_crate(task_name, CrateKind::Task, CrateState::Linking);
 
@@ -182,14 +316,14 @@ pub fn compile_all(
         let final_elf = final_dir.join(task_name);
 
         let final_memory = generate_final_memory_x(task_name, task, layout);
-        let final_mem_dir = work_dir.join("final_mem").join(task_name);
+        let final_mem_dir = img_work_dir.join("final_mem").join(task_name);
         std::fs::create_dir_all(&final_mem_dir).map_err(CompileError::Io)?;
         std::fs::write(final_mem_dir.join("memory.x"), &final_memory).map_err(CompileError::Io)?;
 
         let link_script = linker_dir.join(task_name).join("link.x");
         run_linker(
-            &linker,
-            &partial_obj,
+            &shared.linker,
+            partial_obj,
             &final_elf,
             &link_script,
             &final_mem_dir,
@@ -204,26 +338,46 @@ pub fn compile_all(
         });
     }
 
-    // ── Compile App: Kernel ──────────────────────────────────────────
+    // ── Build kernel with image-specific KCONFIG ────────────────────
 
     emit(BuildEvent::Build(BuildState::CompilingApp));
 
     let kconfig = generate_kconfig(layout, &task_names, &all_tasks, config)?;
 
     let kernel_crate = &config.kernel.crate_info.package.name;
-    let kernel_manifest = find_manifest(&manifests, kernel_crate)?;
-    let kernel_dir = linker_dir.join("kernel");
-    let kernel_task = config_to_fake_task(config);
+    let kernel_manifest = find_manifest(&shared.manifests, kernel_crate)?;
+    let kernel_dir = linker_dir.join(format!("kernel_{image_name}"));
+    std::fs::create_dir_all(&kernel_dir).map_err(CompileError::Io)?;
 
-    // Building
+    // Copy device.x from the shared linker dir
+    let shared_kernel_dir = linker_dir.join("kernel");
+    if shared_kernel_dir.join("device.x").exists() {
+        std::fs::copy(
+            shared_kernel_dir.join("device.x"),
+            kernel_dir.join("device.x"),
+        ).map_err(CompileError::Io)?;
+    }
+    if shared_kernel_dir.join("link.x").exists() {
+        std::fs::copy(
+            shared_kernel_dir.join("link.x"),
+            kernel_dir.join("link.x"),
+        ).map_err(CompileError::Io)?;
+    }
+
+    let kernel_task = config_to_fake_task(config);
+    let partial_dir = work_dir.join("partial");
+    let sizing_dir = img_work_dir.join("sizing");
+    std::fs::create_dir_all(&sizing_dir).map_err(CompileError::Io)?;
+
+    // Building (full cargo build — KCONFIG differs per image)
     emit_crate(kernel_crate, CrateKind::Kernel, CrateState::Building);
     cargo_build_partial(
         &kernel_manifest,
         kernel_crate,
         target,
-        &kernel_partial_link_script,
+        &shared.kernel_partial_link_script,
         work_dir,
-        &hubris_tasks,
+        &shared.hubris_tasks,
         &[],
         Some(&kconfig),
         &config_json,
@@ -236,7 +390,7 @@ pub fn compile_all(
         .join(target)
         .join("release")
         .join(kernel_crate);
-    let kernel_partial = partial_dir.join(kernel_crate);
+    let kernel_partial = partial_dir.join(format!("{kernel_crate}_{image_name}"));
     if kernel_partial_src.exists() {
         std::fs::copy(&kernel_partial_src, &kernel_partial).map_err(CompileError::Io)?;
     }
@@ -250,12 +404,16 @@ pub fn compile_all(
     std::fs::write(kernel_sizing_dir.join("memory.x"), &kernel_sizing_memory)
         .map_err(CompileError::Io)?;
 
-    let device_x_src = kernel_dir.join("device.x");
-    std::fs::copy(&device_x_src, kernel_sizing_dir.join("device.x")).map_err(CompileError::Io)?;
+    if kernel_dir.join("device.x").exists() {
+        std::fs::copy(
+            kernel_dir.join("device.x"),
+            kernel_sizing_dir.join("device.x"),
+        ).map_err(CompileError::Io)?;
+    }
 
     let kernel_sizing_elf = sizing_dir.join(kernel_crate);
     run_linker(
-        &linker,
+        &shared.linker,
         &kernel_partial,
         &kernel_sizing_elf,
         &kernel_dir.join("link.x"),
@@ -284,7 +442,7 @@ pub fn compile_all(
 
     let kernel_final_elf = final_dir.join(kernel_crate);
     run_linker(
-        &linker,
+        &shared.linker,
         &kernel_partial,
         &kernel_final_elf,
         &kernel_dir.join("link.x"),
@@ -299,96 +457,52 @@ pub fn compile_all(
         kind: ArtifactKind::Kernel,
     });
 
-    // ── Compile App: Bootloader (optional) ───────────────────────────
+    // ── Bootloader: link at image-specific addresses ────────────────
+    // The bootloader reads ftab at runtime, but its code region is
+    // placed by the layout solver which may differ per image.
 
     if let Some(bl) = &config.bootloader {
-        let bl_kconfig = generate_bootloader_kconfig(config)?;
         let bl_crate = &bl.crate_info.package.name;
-        let bl_manifest = find_manifest(&manifests, bl_crate)?;
-        let bl_linker_dir = linker_dir.join("bootloader");
-        let bl_task = bl_to_fake_task(bl);
-        let bl_partial_link_script = write_bootloader_partial_link_script(work_dir)?;
+        let bl_partial = work_dir.join("partial").join(bl_crate);
+        if bl_partial.exists() {
+            let bl_linker_dir = linker_dir.join("bootloader");
+            let bl_task = bl_to_fake_task(bl);
 
-        // Building
-        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Building);
-        cargo_build_partial(
-            &bl_manifest,
-            bl_crate,
-            target,
-            &bl_partial_link_script,
-            work_dir,
-            &hubris_tasks,
-            &[],
-            Some(&bl_kconfig),
-            &config_json,
-            bl_crate,
-            CrateKind::Bootloader,
-            emit,
-        )?;
-        let bl_partial_src = firmware_dir
-            .join("target")
-            .join(target)
-            .join("release")
-            .join(bl_crate);
-        let bl_partial = partial_dir.join(bl_crate);
-        if bl_partial_src.exists() {
-            std::fs::copy(&bl_partial_src, &bl_partial).map_err(CompileError::Io)?;
-        }
-        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Compiled);
+            // Resolve bootloader deferred with shared measurements
+            let bl_measured: BTreeMap<RegionKey, u64> = shared.measured_sizes.iter()
+                .filter(|((owner, _), _)| owner == "bootloader")
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            if !bl_measured.is_empty() {
+                layout
+                    .resolve_bootloader_deferred(&bl_measured, reservations)
+                    .map_err(|e| CompileError::Other(format!("resolve bootloader layout: {e}")))?;
+                crate::build::emit_memory_allocations(&layout.placed, config, emit);
+            }
 
-        // Measuring
-        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Measuring);
-        let (bl_sizing_memory, bl_chunk_map) = generate_generous_memory_x(&bl_task);
-        let bl_sizing_dir = sizing_dir.join(format!("{bl_crate}_mem"));
-        std::fs::create_dir_all(&bl_sizing_dir).map_err(CompileError::Io)?;
-        std::fs::write(bl_sizing_dir.join("memory.x"), &bl_sizing_memory)
-            .map_err(CompileError::Io)?;
+            emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Linking);
+            let bl_memory = generate_final_memory_x("bootloader", &bl_task, layout);
+            let bl_mem_dir = img_work_dir.join("bootloader_mem");
+            std::fs::create_dir_all(&bl_mem_dir).map_err(CompileError::Io)?;
+            std::fs::write(bl_mem_dir.join("memory.x"), &bl_memory).map_err(CompileError::Io)?;
 
-        let bl_sizing_elf = sizing_dir.join(bl_crate);
-        run_linker(
-            &linker,
-            &bl_partial,
-            &bl_sizing_elf,
-            &bl_linker_dir.join("link.x"),
-            &bl_sizing_dir,
-        )?;
+            let bl_final_elf = final_dir.join(bl_crate);
+            run_linker(
+                &shared.linker,
+                &bl_partial,
+                &bl_final_elf,
+                &bl_linker_dir.join("link.x"),
+                &bl_mem_dir,
+            )?;
 
-        let bl_sizes = measure_region_sizes(&bl_sizing_elf, &bl_chunk_map)?;
-        let mut bl_measured: BTreeMap<RegionKey, u64> = BTreeMap::new();
-        for (region_name, size) in &bl_sizes {
-            emit_crate_event(bl_crate, CrateKind::Bootloader, CrateEvent::Sized {
-                region: region_name.clone(),
-                size: *size,
+            emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Linked);
+
+            artifacts.push(CompileArtifact {
+                crate_name: bl_crate.to_string(),
+                elf_path: bl_final_elf,
+                kind: ArtifactKind::Bootloader,
             });
-            bl_measured.insert(("bootloader".to_string(), region_name.clone()), *size);
         }
-
-        layout
-            .resolve_bootloader_deferred(&bl_measured, reservations)
-            .map_err(|e| CompileError::Other(format!("resolve bootloader layout: {e}")))?;
-        crate::build::emit_memory_allocations(&layout.placed, config, emit);
-
-        // Linking
-        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Linking);
-        let bl_memory = generate_final_memory_x("bootloader", &bl_task, layout);
-        std::fs::write(bl_linker_dir.join("memory.x"), &bl_memory).map_err(CompileError::Io)?;
-
-        let bl_final_elf = final_dir.join(bl_crate);
-        run_linker(
-            &linker,
-            &bl_partial,
-            &bl_final_elf,
-            &bl_linker_dir.join("link.x"),
-            &bl_linker_dir,
-        )?;
-
-        emit_crate(bl_crate, CrateKind::Bootloader, CrateState::Linked);
-
-        artifacts.push(CompileArtifact {
-            crate_name: bl_crate.to_string(),
-            elf_path: bl_final_elf,
-            kind: ArtifactKind::Bootloader,
-        });
     }
 
     Ok(artifacts)
@@ -413,21 +527,21 @@ fn bl_to_fake_task(bl: &crate::config::BootloaderConfig) -> TaskConfig {
 
 /// Generate the bootloader's KCONFIG: firmware partition flash address and size.
 fn generate_bootloader_kconfig(config: &AppConfig) -> Result<String, CompileError> {
-    // The bootloader needs to know where places.bin lives in flash.
-    // Pulled from `boot.image` in the app's ncl config.
-    let boot = config.boot.as_ref()
+    // The bootloader reads ftab at runtime and doesn't use these
+    // compile-time values, but its build.rs expects HUBRIS_KCONFIG.
+    // Derive the firmware partition address from code_generic.
+    let code_place = config.places.get("code_generic")
         .ok_or_else(|| CompileError::Other(
-            "bootloader requires a `boot` config with `image` set".into()
+            "bootloader requires a `code_generic` place in the layout".into()
         ))?;
-    let fw_place = &boot.image;
-    let fw_offset = fw_place.offset.unwrap_or(0);
-    let flash_base = fw_place.mappings.iter()
+    let fw_offset = code_place.offset.unwrap_or(0);
+    let flash_base = code_place.mappings.iter()
         .find(|m| m.execute)
-        .or_else(|| fw_place.mappings.first())
+        .or_else(|| code_place.mappings.first())
         .map(|m| m.address)
         .unwrap_or(0x12000000);
     let fw_addr = flash_base + fw_offset;
-    let fw_size = fw_place.size;
+    let fw_size = code_place.size;
     Ok(format!("{fw_addr:#010x}_u32,{fw_size:#x}_u32"))
 }
 
@@ -1059,160 +1173,12 @@ fn find_manifest(
         })
 }
 
-// ── Slot B re-linking ────────────────────────────────────────────────────────
-
-/// Re-link tasks whose code falls in `image_a`'s address range at
-/// `image_b`'s addresses instead.  RAM-resident tasks (kernel,
-/// bootloader, tasks in bulk/fast/scratch) are returned unchanged.
-///
-/// Only the linker is re-invoked — cargo build artifacts are reused
-/// from `work_dir/partial/`, so the cost is one `run_linker` call per
-/// affected task (~1s each).
-pub fn relink_for_slot_b(
-    config: &AppConfig,
-    layout: &Layout,
-    artifacts: &[CompileArtifact],
-    linker_dir: &Path,
-    work_dir: &Path,
-    emit: crate::build::EventFn<'_>,
-) -> Result<Vec<CompileArtifact>, CompileError> {
-    use crate::build::{BuildEvent, CrateKind, CrateState, ResourceUpdate};
-
-    let boot = config.boot.as_ref()
-        .ok_or_else(|| CompileError::Other("slot B re-link requires boot config".into()))?;
-    let image_b = boot.image_b.as_ref()
-        .ok_or_else(|| CompileError::Other("slot B re-link requires boot.image_b".into()))?;
-
-    let host_a = &boot.image;
-    let a_base = layout::resolve_cpu_address(host_a, true)
-        .or_else(|| layout::resolve_cpu_address(host_a, false))
-        .ok_or_else(|| CompileError::Other("image_a has no CPU mapping".into()))?;
-    let a_end = a_base + host_a.size;
-
-    let b_base = layout::resolve_cpu_address(image_b, true)
-        .or_else(|| layout::resolve_cpu_address(image_b, false))
-        .ok_or_else(|| CompileError::Other("image_b has no CPU mapping".into()))?;
-    let delta = b_base as i64 - a_base as i64;
-
-    let linker = find_linker()?;
-    let partial_dir = work_dir.join("partial");
-    let final_b_dir = work_dir.join("final_b");
-    std::fs::create_dir_all(&final_b_dir).map_err(CompileError::Io)?;
-
-    let all_tasks = layout::collect_tasks(config);
-
-    let mut out = Vec::with_capacity(artifacts.len());
-
-    for artifact in artifacts {
-        if artifact.kind != ArtifactKind::Task {
-            out.push(CompileArtifact {
-                crate_name: artifact.crate_name.clone(),
-                elf_path: artifact.elf_path.clone(),
-                kind: artifact.kind,
-            });
-            continue;
-        }
-
-        let code_key = (artifact.crate_name.clone(), "code".to_string());
-        let code_alloc = layout.placed.get(&code_key);
-        let in_host_range = code_alloc
-            .is_some_and(|a| a.base >= a_base && a.base < a_end);
-
-        if !in_host_range {
-            out.push(CompileArtifact {
-                crate_name: artifact.crate_name.clone(),
-                elf_path: artifact.elf_path.clone(),
-                kind: artifact.kind,
-            });
-            continue;
-        }
-
-        let task_name = &artifact.crate_name;
-
-        emit(BuildEvent::Crate {
-            name: task_name.clone(),
-            kind: CrateKind::Task,
-            update: ResourceUpdate::State(CrateState::Linking),
-        });
-
-        let task = all_tasks.get(task_name.as_str())
-            .ok_or_else(|| CompileError::Other(
-                format!("task {task_name} not found in config"),
-            ))?;
-
-        let memory_x = generate_slot_b_memory_x(
-            task_name, task, layout,
-            (a_base, a_end), delta,
-        );
-        let mem_dir = final_b_dir.join(format!("{task_name}_mem"));
-        std::fs::create_dir_all(&mem_dir).map_err(CompileError::Io)?;
-        std::fs::write(mem_dir.join("memory.x"), &memory_x)
-            .map_err(CompileError::Io)?;
-
-        let partial_obj = partial_dir.join(task_name);
-        let final_elf = final_b_dir.join(task_name);
-        let link_script = linker_dir.join(task_name).join("link.x");
-
-        run_linker(&linker, &partial_obj, &final_elf, &link_script, &mem_dir)?;
-
-        emit(BuildEvent::Crate {
-            name: task_name.clone(),
-            kind: CrateKind::Task,
-            update: ResourceUpdate::State(CrateState::Linked),
-        });
-
-        out.push(CompileArtifact {
-            crate_name: task_name.clone(),
-            elf_path: final_elf,
-            kind: ArtifactKind::Task,
-        });
-    }
-
-    Ok(out)
-}
-
-/// Generate `memory.x` for slot B: identical to the slot A layout
-/// except allocations in the host place (firmware_a) are shifted by
-/// `delta` bytes to land in firmware_b's address range.
-fn generate_slot_b_memory_x(
-    task_name: &str,
-    task: &TaskConfig,
-    layout: &Layout,
-    host_range: (u64, u64),
-    delta: i64,
-) -> String {
-    use std::fmt::Write;
-    let mut out = String::from("MEMORY\n{\n");
-
-    for (region_name, _req) in &task.regions {
-        let key = (task_name.to_string(), region_name.clone());
-        let linker_name = match region_name.as_str() {
-            "code" => "FLASH",
-            "data" => "RAM",
-            "stack" => "STACK",
-            other => &other.to_uppercase(),
-        };
-        let attrs = if region_name == "code" { "rx" } else { "rw" };
-
-        if let Some(alloc) = layout.placed.get(&key) {
-            let base = if alloc.base >= host_range.0 && alloc.base < host_range.1 {
-                (alloc.base as i64 + delta) as u64
-            } else {
-                alloc.base
-            };
-            writeln!(
-                out,
-                "  {linker_name} ({attrs}) : ORIGIN = {base:#010x}, LENGTH = {:#x}",
-                alloc.size
-            )
-            .unwrap();
-        }
-    }
-
-    out.push_str("}\n");
-    out
-}
-
+// ── Slot B re-linking (REMOVED) ─────────────────────────────────────────────
+//
+// The old `relink_for_slot_b` and `generate_slot_b_memory_x` functions
+// have been replaced by the multi-image build pipeline. Each image now
+// gets its own layout solve, kernel build, and link pass via
+// `build_image()`. See the `ImageSpec` type in config.rs.
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
     #[error("IO error: {0}")]

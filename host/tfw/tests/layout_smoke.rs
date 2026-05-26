@@ -7,10 +7,10 @@ fn firmware_dir() -> &'static Path {
 #[test]
 fn solve_fob_layout() {
     let config = tfw::config::load(
-        firmware_dir(), "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl",
     ).expect("failed to load config");
 
-    let layout = tfw::layout::solve(&config).expect("layout failed");
+    let layout = tfw::layout::solve(&config, &std::collections::BTreeMap::new()).expect("layout failed");
 
     // Kernel stack placed
     let kernel_stack = &layout.placed[&("kernel".to_string(), "stack".to_string())];
@@ -37,10 +37,10 @@ fn solve_fob_layout() {
 #[test]
 fn allocations_dont_overlap() {
     let config = tfw::config::load(
-        firmware_dir(), "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl",
     ).expect("failed to load config");
 
-    let layout = tfw::layout::solve(&config).expect("layout failed");
+    let layout = tfw::layout::solve(&config, &std::collections::BTreeMap::new()).expect("layout failed");
 
     // Group by base address range and check no overlaps
     let mut ranges: Vec<(u64, u64, String)> = layout
@@ -65,10 +65,10 @@ fn allocations_dont_overlap() {
 #[test]
 fn only_reachable_tasks_are_allocated() {
     let config = tfw::config::load(
-        firmware_dir(), "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl",
     ).expect("failed to load config");
 
-    let layout = tfw::layout::solve(&config).expect("layout failed");
+    let layout = tfw::layout::solve(&config, &std::collections::BTreeMap::new()).expect("layout failed");
     let names = layout.task_names();
     assert!(names.contains("fob"));
     assert!(names.contains("sysmodule_log"));

@@ -137,20 +137,21 @@ fn build_section(ui: &mut egui::Ui, state: &mut AppState) {
         });
     }
 
-    // Layout picker.
+    // Image layout picker (multi-select).
     if !state.build_layouts.is_empty() {
+        if state.selected_layouts.len() != state.build_layouts.len() {
+            state.selected_layouts = vec![false; state.build_layouts.len()];
+        }
         ui.horizontal(|ui| {
             ui.colored_label(theme::TEXT_SECONDARY, format!("{}", icon::LAYOUT));
-            ui.label("Layout");
-            egui::ComboBox::from_id_salt("build_layout")
-                .width(100.0)
-                .show_index(
-                    ui,
-                    &mut state.selected_layout,
-                    state.build_layouts.len(),
-                    |i| state.build_layouts.get(i).cloned().unwrap_or_default(),
-                );
+            ui.label("Images");
         });
+        for (i, name) in state.build_layouts.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.checkbox(&mut state.selected_layouts[i], name.as_str());
+            });
+        }
     }
 
     ui.add_space(6.0);

@@ -7,10 +7,10 @@ fn firmware_dir() -> &'static Path {
 #[test]
 fn load_fob_config() {
     let config = tfw::config::load(
-        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl",
     ).expect("failed to load fob config");
 
-    assert_eq!(config.name, "rcard");
+    assert_eq!(config.name, "Charm Production");
     assert_eq!(config.target, "thumbv8m.main-none-eabihf");
 
     // Memory devices
@@ -26,17 +26,18 @@ fn load_fob_config() {
     assert!(config.places.contains_key("psram"));
     // Places from layout — flash partitions.
     assert!(config.places.contains_key("boot"));
-    assert!(config.places.contains_key("firmware"));
-    assert!(config.places.contains_key("xip_rom"));
+    assert!(config.places.contains_key("firmware_a"));
+    assert!(config.places.contains_key("firmware_b"));
+    assert!(config.places.contains_key("code_generic"));
     assert!(config.places.contains_key("logs"));
     assert!(config.places.contains_key("fs_main"));
 
     // Unmapped places — storage partitions have no CPU exec window.
     assert!(config.places["logs"].unmapped);
-    assert!(config.places["firmware"].unmapped);
+    assert!(config.places["firmware_a"].unmapped);
     assert!(config.places["boot"].unmapped);
-    // xip_rom is the opt-in XIP place — keeps its CPU mappings.
-    assert!(!config.places["xip_rom"].unmapped);
+    // code_generic is the XIP place — keeps its CPU mappings.
+    assert!(!config.places["code_generic"].unmapped);
 
     // Bootloader
     let bl = config.bootloader.as_ref().expect("bootloader should be present");
@@ -44,28 +45,22 @@ fn load_fob_config() {
     assert!(bl.regions.contains_key("code"));
     assert!(bl.regions.contains_key("stack"));
 
-    // Boot config has ftab placement and image placement
+    // Boot config has ftab placement
     let boot = config.boot.as_ref().expect("boot config should exist");
     assert!(boot.ftab.offset.is_some());
-    assert!(boot.image.offset.is_some());
-    // `boot.image` resolves to the `firmware` flash partition. Sanity-check
-    // via the CPU mapping (the only stable identifier not subject to
-    // `stamp_place_names`, which only stamps top-level/region places).
-    assert_eq!(boot.image.offset, config.places["firmware"].offset);
-    assert_eq!(boot.image.size, config.places["firmware"].size);
 
     // Kernel
     assert_eq!(config.kernel.crate_info.package.name, "kernel-sf32lb52");
 
     // Task regions carry inline places
     let fob = config.entries.iter().find(|t| t.crate_info.package.name == "fob").unwrap();
-    assert!(!fob.regions["code"].place.mappings.is_empty());
+    assert!(fob.regions["code"].place.as_ref().unwrap().mappings.len() > 0);
 }
 
 #[test]
 fn load_stub_config() {
     let config = tfw::config::load(
-        firmware_dir(), "apps/stub.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/stub.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl",
     ).expect("failed to load stub config");
 
     let entry_crates: Vec<&str> = config

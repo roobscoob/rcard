@@ -139,22 +139,58 @@ impl Usb {
                 serial: serial.to_string(),
             })?;
 
-        let dev = dev_info.open().wait().map_err(ConnectError::Open)?;
+        // Open + claim with retry. On hotplug the OS composite driver
+        // (AppleUSBComposite on macOS, usbccgp on Windows) may not have
+        // finished creating interface sub-devices yet. Critically, on
+        // macOS nusb's open() takes exclusive device access which can
+        // block the composite driver from probing — so we must DROP the
+        // device handle between attempts to let the OS finish.
+        let backoffs_ms = [0, 250, 500, 1000];
+        let mut last_err = None;
+        let (dev, identity, host_iface, fob_iface) = 'retry: {
+            for (attempt, &ms) in backoffs_ms.iter().enumerate() {
+                if ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
 
-        let identity = match dev
-            .get_descriptor(0x0F, 0, 0, std::time::Duration::from_millis(500))
-            .wait()
-        {
-            Ok(bos_bytes) => parse_rcard_identity(&bos_bytes),
-            Err(e) => {
-                eprintln!("[usb] BOS read failed (non-fatal): {e}");
-                None
+                let dev = match dev_info.open().wait() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        last_err = Some(ConnectError::Open(e));
+                        continue;
+                    }
+                };
+
+                let identity = match dev
+                    .get_descriptor(0x0F, 0, 0, std::time::Duration::from_millis(500))
+                    .wait()
+                {
+                    Ok(bos_bytes) => parse_rcard_identity(&bos_bytes),
+                    Err(e) => {
+                        eprintln!("[usb] BOS read failed (non-fatal): {e}");
+                        None
+                    }
+                };
+
+                match try_claim_interfaces(&dev) {
+                    Ok((host, fob)) => {
+                        if attempt > 0 {
+                            eprintln!("[usb] claimed interfaces after {attempt} retries");
+                        }
+                        break 'retry (dev, identity, host, fob);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[usb] claim attempt {attempt} failed: {e} \
+                             (dropping device handle to let OS composite driver finish)"
+                        );
+                        last_err = Some(ConnectError::Claim(e));
+                        drop(dev);
+                    }
+                }
             }
+            return Err(last_err.unwrap());
         };
-
-        // On hotplug the OS may not have set the active configuration yet,
-        // so the interfaces aren't claimable immediately. Retry with backoff.
-        let (host_iface, fob_iface) = claim_interfaces_with_retry(&dev)?;
 
         let host_in_addr = find_bulk_endpoint_address(&dev, HOST_DRIVEN_INTERFACE, false)
             .ok_or(ConnectError::NoEndpoints)?;
@@ -491,29 +527,10 @@ async fn host_reader(
 
 // ── Endpoint discovery ───────────────────────────────────────────────────
 
-fn claim_interfaces_with_retry(
-    dev: &nusb::Device,
-) -> Result<(nusb::Interface, nusb::Interface), ConnectError> {
-    let backoffs = [0, 50, 100, 200];
-    let mut last_err = None;
-    for (i, &ms) in backoffs.iter().enumerate() {
-        if ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
-        match dev.claim_interface(HOST_DRIVEN_INTERFACE).wait() {
-            Ok(host) => match dev.claim_interface(FOB_DRIVEN_INTERFACE).wait() {
-                Ok(fob) => {
-                    if i > 0 {
-                        eprintln!("[usb] claimed interfaces after {i} retries");
-                    }
-                    return Ok((host, fob));
-                }
-                Err(e) => last_err = Some(e),
-            },
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(ConnectError::Claim(last_err.unwrap()))
+fn try_claim_interfaces(dev: &nusb::Device) -> Result<(nusb::Interface, nusb::Interface), nusb::Error> {
+    let host = dev.claim_interface(HOST_DRIVEN_INTERFACE).wait()?;
+    let fob = dev.claim_interface(FOB_DRIVEN_INTERFACE).wait()?;
+    Ok((host, fob))
 }
 
 /// Find the address of the bulk OUT (`out=true`) or bulk IN endpoint on

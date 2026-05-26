@@ -25,7 +25,10 @@ fn main() {
         &firmware_dir,
         "apps/stub.ncl",
         "boards/bentoboard.ncl",
-        "layouts/ramboot.ncl",
+        &[tfw::config::ImageSpec {
+            name: "stub".into(),
+            layout_ncl: "layouts/ramboot.ncl".into(),
+        }],
         &stub_tfw,
         Some(&|event| {
             use tfw::build::*;

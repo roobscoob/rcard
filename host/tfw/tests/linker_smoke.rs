@@ -7,9 +7,9 @@ fn firmware_dir() -> &'static Path {
 #[test]
 fn generate_linker_scripts() {
     let config = tfw::config::load(
-        firmware_dir(), "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl",
+        firmware_dir(), "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl",
     ).expect("failed to load config");
-    let layout = tfw::layout::solve(&config).expect("layout failed");
+    let layout = tfw::layout::solve(&config, &std::collections::BTreeMap::new()).expect("layout failed");
 
     let out_dir = std::env::temp_dir().join("tfw_linker_test");
     let _ = std::fs::remove_dir_all(&out_dir);

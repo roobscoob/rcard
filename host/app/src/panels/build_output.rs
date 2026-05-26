@@ -408,13 +408,11 @@ fn hero(ui: &mut egui::Ui, build: &BuildHandle) -> PanelAction {
                     .add_with_background_ui(
                         |_, _| {},
                         |tui, _| {
-                            // Config/board/layout chips
-                            for (glyph, value) in [
-                                (icon::FILE_CODE, build.config.config.as_str()),
-                                (icon::CPU, build.config.board.as_str()),
-                                (icon::LAYOUT, build.config.layout.as_str()),
-                            ] {
-                                hero_chip(tui, glyph, value);
+                            // Config/board/images chips
+                            hero_chip(tui, icon::FILE_CODE, build.config.config.as_str());
+                            hero_chip(tui, icon::CPU, build.config.board.as_str());
+                            for img in &build.config.images {
+                                hero_chip(tui, icon::LAYOUT, &img.name);
                             }
                             // UUID chip
                             if let Some(uuid) = &build.uuid {

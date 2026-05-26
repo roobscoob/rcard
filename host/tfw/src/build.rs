@@ -332,13 +332,13 @@ fn noop(_: BuildEvent) {}
 
 // ── Build pipeline ──────────────────────────────────────────────────────────
 
-/// Full build pipeline: plan → compile tasks → organize → compile app →
-/// extract metadata → pack.
+/// Full build pipeline: plan → compile tasks (shared) → per-image
+/// build (solve + link + kernel) → extract metadata → pack.
 pub fn build(
     firmware_dir: &Path,
     root_ncl: &str,
     board_ncl: &str,
-    layout_ncl: &str,
+    images: &[crate::config::ImageSpec],
     out_path: &Path,
     on_event: Option<EventFn<'_>>,
     work_dir: Option<&Path>,
@@ -431,13 +431,22 @@ pub fn build(
     let config_json_path = work_dir.join("config.json");
 
     // ── Plan ───────────────────────────────────────────────────────────
-    // Evaluate Nickel config, solve initial layout, generate linker
-    // scripts and codegen source.
+    // Evaluate Nickel config per image, using the first image's config
+    // as the canonical one for shared phases.
 
     emit(BuildEvent::Build(BuildState::Planning));
 
-    let config = crate::config::load(firmware_dir, root_ncl, board_ncl, layout_ncl)
-        .map_err(BuildError::Config)?;
+    assert!(!images.is_empty(), "at least one image must be specified");
+
+    let mut image_configs: Vec<(crate::config::ImageSpec, crate::config::AppConfig)> =
+        Vec::with_capacity(images.len());
+    for img in images {
+        let cfg = crate::config::load(firmware_dir, root_ncl, board_ncl, &img.layout_ncl)
+            .map_err(BuildError::Config)?;
+        image_configs.push((img.clone(), cfg));
+    }
+
+    let config = &image_configs[0].1;
 
     // Generate the build's identity up-front so it can be bundled
     // with the resolved-layout broadcast.
@@ -520,34 +529,70 @@ pub fn build(
         tasks: resolved_tasks,
     }));
 
-    let reservations = crate::layout::compute_reservations(&config);
-    let mut layout = crate::layout::solve(&config, &reservations).map_err(BuildError::Layout)?;
+    // Compute reservations from all images' code_generic places.
+    let image_code_places: Vec<&crate::config::Place> = image_configs.iter()
+        .filter_map(|(_, cfg)| cfg.places.get("code_generic"))
+        .collect();
+    let reservations = crate::layout::compute_reservations(&image_code_places);
 
-    // Emit Memory events for fixed-size allocations placed during initial solve.
-    emit_memory_allocations(&layout.placed, &config, emit);
+    // Use the first image's config for initial layout solve, linker
+    // script generation, and codegen. These are used for the shared
+    // task compilation phase.
+    let initial_layout = crate::layout::solve(config, &reservations).map_err(BuildError::Layout)?;
+    emit_memory_allocations(&initial_layout.placed, config, emit);
 
-    crate::linker::generate(&config, &layout, &linker_dir).map_err(BuildError::Linker)?;
+    crate::linker::generate(config, &initial_layout, &linker_dir).map_err(BuildError::Linker)?;
+    crate::codegen::emit(config, &build_id, &config_json_path).map_err(BuildError::Codegen)?;
 
-    crate::codegen::emit(&config, &build_id, &config_json_path).map_err(BuildError::Codegen)?;
-
-    // ── Compile tasks ──────────────────────────────────────────────────
-    // Build all task crates through build/measure/link passes.
+    // ── Compile tasks (shared) ────────────────────────────────────────
+    // Build all task partial objects and measure sizes. This phase is
+    // layout-independent — partial objects and sizes are reused across
+    // all image builds.
 
     emit(BuildEvent::Build(BuildState::CompilingTasks));
 
-    let artifacts = crate::compile::compile_all(
+    let shared = crate::compile::compile_tasks_shared(
         firmware_dir,
-        &config,
-        &mut layout,
-        &reservations,
+        config,
         &linker_dir,
         &work_dir,
         emit,
     )
     .map_err(BuildError::Compile)?;
 
-    // Organizing and CompilingApp events are emitted inside compile_all
-    // at the correct pipeline boundaries.
+    // ── Per-image builds ──────────────────────────────────────────────
+    // For each image: solve layout, link tasks, build kernel with
+    // image-specific KCONFIG, produce artifacts.
+
+    let mut image_builds: Vec<crate::compile::ImageBuild> = Vec::new();
+
+    for (img_spec, img_config) in &image_configs {
+        let mut img_layout = crate::layout::solve(img_config, &reservations)
+            .map_err(BuildError::Layout)?;
+
+        let artifacts = crate::compile::build_image(
+            &img_spec.name,
+            firmware_dir,
+            img_config,
+            &mut img_layout,
+            &reservations,
+            &shared,
+            &linker_dir,
+            &work_dir,
+            emit,
+        )
+        .map_err(BuildError::Compile)?;
+
+        image_builds.push(crate::compile::ImageBuild {
+            name: img_spec.name.clone(),
+            layout: img_layout,
+            config: img_config.clone(),
+            artifacts,
+        });
+    }
+
+    // Use first image's artifacts for metadata extraction.
+    let artifacts = &image_builds[0].artifacts;
 
     // ── Extract metadata ───────────────────────────────────────────────
     // Scrape log/IPC metadata from ELFs, run the schema dumper.
@@ -623,46 +668,37 @@ pub fn build(
     crate::ipc_metadata::emit(&ipc_bundle, &ipc_metadata_path).map_err(BuildError::IpcMetadata)?;
 
     // ── Pack ───────────────────────────────────────────────────────────
-    // Assemble the firmware image and write the archive.
+    // Link each image's artifacts into a places.bin, then assemble the
+    // archive with ftab and metadata.
 
     emit(BuildEvent::Build(BuildState::Packing));
 
-    // ── Link slot A ───────────────────────────────────────────────
-    let (final_bin, place_layouts) =
-        crate::link::link_image(&artifacts, &config, &layout, &img_dir, "places.bin", None, emit)
-            .map_err(BuildError::Link)?;
+    let mut linked_images: Vec<(String, std::path::PathBuf, BTreeMap<String, crate::link::PlaceLayout>)> = Vec::new();
 
-    let bootloader_size = artifacts
-        .iter()
-        .find(|a| a.kind == crate::compile::ArtifactKind::Bootloader)
-        .map(|bl_art| crate::link::measure_flat_binary_size(bl_art))
-        .transpose()
-        .map_err(BuildError::Link)?
-        .unwrap_or(0);
-
-    let bin_size = std::fs::metadata(&final_bin).map(|m| m.len()).unwrap_or(0);
-    emit(BuildEvent::Image(ResourceUpdate::State(
-        ImageState::Assembled { size: bin_size },
-    )));
-
-    // ── Link slot B (if A/B enabled) ──────────────────────────────
-    let final_bin_b: Option<std::path::PathBuf> = if config.boot.as_ref()
-        .and_then(|b| b.image_b.as_ref()).is_some()
-    {
-        let b_artifacts = crate::compile::relink_for_slot_b(
-            &config, &layout, &artifacts, &linker_dir, &work_dir, emit,
-        ).map_err(BuildError::Compile)?;
-
-        let image_b = config.boot.as_ref().unwrap().image_b.as_ref().unwrap();
-        let (b_bin, _b_place_layouts) = crate::link::link_image(
-            &b_artifacts, &config, &layout, &img_dir,
-            "places_b.bin", Some(image_b), emit,
+    for (i, ib) in image_builds.iter().enumerate() {
+        let filename = if i == 0 {
+            "places.bin".to_string()
+        } else {
+            format!("places_{}.bin", ib.name)
+        };
+        let code_place = ib.config.places.get("code_generic");
+        let (bin_path, place_layouts) = crate::link::link_image(
+            &ib.artifacts, &ib.config, &ib.layout, &img_dir,
+            &filename, code_place, emit,
         ).map_err(BuildError::Link)?;
 
-        Some(b_bin)
-    } else {
-        None
-    };
+        let bin_size = std::fs::metadata(&bin_path).map(|m| m.len()).unwrap_or(0);
+        emit(BuildEvent::Image(ResourceUpdate::State(
+            ImageState::Assembled { size: bin_size },
+        )));
+
+        linked_images.push((ib.name.clone(), bin_path, place_layouts));
+    }
+
+    let layout_ncl_display = images.iter()
+        .map(|i| i.layout_ncl.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
 
     let mut build_meta = crate::build_metadata::BuildMetadata::from_build(
         &build_id,
@@ -670,23 +706,35 @@ pub fn build(
         root_ncl,
         config.version.as_deref(),
         board_ncl,
-        layout_ncl,
+        &layout_ncl_display,
         firmware_dir,
     );
-    // Stamp duration + solved allocations so tooling reading this .tfw
-    // later can render a faithful memory map and timing without having
-    // to re-solve.
     build_meta.build_duration_ms = Some(build_started.elapsed().as_millis() as u64);
     build_meta.allocations = collected_allocs.borrow().clone();
     build_meta.cargo_messages = collected_messages.borrow().clone();
+
+    // Build image info for pack: (spec, config, bin_path, place_layouts, artifacts)
+    let pack_images: Vec<_> = images.iter()
+        .zip(image_configs.iter())
+        .zip(linked_images.iter())
+        .zip(image_builds.iter())
+        .map(|(((spec, (_, cfg)), (_, bin_path, place_layouts)), ib)| {
+            (spec, cfg, bin_path.as_path(), place_layouts, ib.artifacts.as_slice())
+        })
+        .collect();
+
+    // Compute flash-info metadata for ftab construction at flash time.
+    let flash_info = compute_flash_info(
+        config,
+        &image_configs,
+        &image_builds,
+        &linked_images,
+    );
+
     crate::pack::pack(
-        &config,
-        &layout,
-        &artifacts,
-        &final_bin,
-        &place_layouts,
-        final_bin_b.as_deref(),
-        bootloader_size,
+        config,
+        &pack_images,
+        flash_info.as_ref(),
         Some(&log_metadata_path),
         Some(&ipc_metadata_path),
         Some(&build_meta),
@@ -783,6 +831,79 @@ pub fn emit_memory_allocations(
             }),
         });
     }
+}
+
+// ── Flash-info computation ──────────────────────────────────────────────────
+
+/// Compute the flash metadata needed for ftab construction at flash time.
+/// Returns `None` if no boot config exists (RAM-only builds).
+fn compute_flash_info(
+    config: &AppConfig,
+    image_configs: &[(crate::config::ImageSpec, AppConfig)],
+    image_builds: &[crate::compile::ImageBuild],
+    linked_images: &[(String, std::path::PathBuf, BTreeMap<String, crate::link::PlaceLayout>)],
+) -> Option<crate::pack::FlashInfo> {
+    let boot = config.boot.as_ref()?;
+
+    let ftab_place = &boot.ftab;
+    let ftab_offset = ftab_place.offset.unwrap_or(0);
+    let flash_base = ftab_place
+        .mappings
+        .first()
+        .map(|m| m.address)
+        .unwrap_or(0x12000000) as u32;
+    let ftab_base = flash_base + ftab_offset as u32;
+
+    // Bootloader location within places.bin: use the first image's layout.
+    let first_build = &image_builds[0];
+    let bootloader_alloc = first_build.layout.placed
+        .get(&("bootloader".to_string(), "code".to_string()))?;
+    let loader_sram_dest = bootloader_alloc.base as u32;
+
+    let first_config = &image_configs[0].1;
+    let first_code_place = first_config.places.get("code_generic")?;
+    let first_flash_base = first_code_place
+        .mappings
+        .first()
+        .map(|m| m.address)
+        .unwrap_or(0x12000000) as u32;
+    let first_flash_addr = first_flash_base + first_code_place.offset.unwrap_or(0) as u32;
+
+    let (_, _, ref first_place_layouts) = linked_images[0];
+    let bl_place_name = crate::layout::find_place_name(first_config, bootloader_alloc.base)?;
+    let pl = first_place_layouts.get(&bl_place_name)?;
+    let bl_flash_src = (first_flash_addr as u64
+        + pl.file_offset as u64
+        + (bootloader_alloc.base - pl.blob_base)) as u32;
+    let bl_file_offset = bl_flash_src - first_flash_addr;
+
+    let bl_artifact = first_build.artifacts.iter()
+        .find(|a| a.kind == crate::compile::ArtifactKind::Bootloader)?;
+    let bl_size = crate::link::measure_flat_binary_size(bl_artifact).ok()?;
+
+    let mut image_infos = Vec::new();
+    for (i, (_spec, img_config)) in image_configs.iter().enumerate() {
+        let code_place = img_config.places.get("code_generic")?;
+        let img_flash_base = code_place
+            .mappings
+            .first()
+            .map(|m| m.address)
+            .unwrap_or(0x12000000) as u32;
+        let img_flash_addr = img_flash_base + code_place.offset.unwrap_or(0) as u32;
+        image_infos.push(crate::pack::ImageFlashInfo {
+            name: linked_images[i].0.clone(),
+            flash_addr: img_flash_addr,
+            ftab_slot: crate::pack::FTAB_PLACES_SLOT_A + i,
+        });
+    }
+
+    Some(crate::pack::FlashInfo {
+        ftab_base,
+        bootloader_file_offset: bl_file_offset,
+        bootloader_sram_dest: loader_sram_dest,
+        bootloader_size: bl_size,
+        images: image_infos,
+    })
 }
 
 // ── Error types ─────────────────────────────────────────────────────────────

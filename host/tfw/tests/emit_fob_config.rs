@@ -6,9 +6,9 @@ fn emit_fob_config_json() {
     let work_dir = fw.join(".work");
     std::fs::create_dir_all(&work_dir).unwrap();
 
-    let config = tfw::config::load(fw, "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl")
+    let config = tfw::config::load(fw, "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl")
         .expect("config load failed");
 
     let config_json = work_dir.join("config.json");
-    tfw::codegen::emit(&config, &config_json).expect("codegen failed");
+    tfw::codegen::emit(&config, "test-build-id", &config_json).expect("codegen failed");
 }

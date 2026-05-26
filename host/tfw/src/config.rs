@@ -6,7 +6,7 @@ use serde::Deserialize;
 // -- Top-level config --
 
 /// Deserialized from the root .ncl file (e.g. fob.ncl, stub.ncl).
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct AppConfig {
     pub name: String,
     #[serde(default)]
@@ -97,26 +97,30 @@ pub struct Place {
 
 // -- Boot config --
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct BootConfig {
     /// Place where the ftab (partition table) is written. The ftab's
     /// boot target is derived from the bootloader's code region
     /// placement in the layout.
     pub ftab: Place,
-    /// Place where slot A's `places.bin` lives. The bootloader needs
-    /// its flash address and size to locate the image at boot.
-    pub image: Place,
-    /// Place where slot B's `places.bin` lives. When present, enables
-    /// A/B firmware partitioning: the build produces two images linked
-    /// at different flash addresses, and the bootloader selects the
-    /// best slot at boot.
-    #[serde(default)]
-    pub image_b: Option<Place>,
+}
+
+// -- Image specification (build-time, not from Nickel) --
+
+/// One firmware image to produce. Each image targets a different flash
+/// partition (via its layout's `code_generic` place).
+#[derive(Debug, Clone)]
+pub struct ImageSpec {
+    /// Short identifier used in filenames and events (e.g. "a", "b").
+    pub name: String,
+    /// Path to the layout .ncl file for this image, relative to the
+    /// firmware directory.
+    pub layout_ncl: String,
 }
 
 // -- Bootloader --
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct BootloaderConfig {
     pub crate_info: CrateInfo,
     #[serde(default)]
@@ -125,7 +129,7 @@ pub struct BootloaderConfig {
 
 // -- Kernel --
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct KernelConfig {
     pub crate_info: CrateInfo,
     #[serde(default)]
@@ -134,7 +138,7 @@ pub struct KernelConfig {
 
 // -- Tasks (recursive) --
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct TaskConfig {
     pub crate_info: CrateInfo,
     pub priority: u32,
@@ -202,7 +206,7 @@ pub struct RegionRequest {
 
 // -- Peripherals --
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct PeripheralDef {
     pub base: u64,
     pub size: u64,
@@ -212,7 +216,7 @@ pub struct PeripheralDef {
     pub renode: Option<RenodeModel>,
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct RenodeModel {
     pub model: String,
     #[serde(default)]
@@ -221,7 +225,7 @@ pub struct RenodeModel {
 
 // -- Notifications --
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct NotificationGroup {
     pub min_priority: u32,
     pub max_priority: u32,
@@ -229,12 +233,12 @@ pub struct NotificationGroup {
 
 // -- Filesystems --
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct FilesystemConfig {
     pub mounts: Vec<FsMount>,
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct FsMount {
     pub name: String,
     pub source: String,

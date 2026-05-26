@@ -17,17 +17,7 @@ fun args =>
     places = args.places,
     memory = args.board.memory,
     peripheral_map = args.board.peripheral_map,
-    boot =
-      if std.record.has_field "firmware_b" args.places then
-        {
-          ftab = args.places.boot,
-          image = args.places.firmware_a,
-          image_b = args.places.firmware_b,
-        }
-      else if std.record.has_field "firmware_a" args.places then
-        { ftab = args.places.boot, image = args.places.firmware_a }
-      else
-        { ftab = args.places.boot, image = args.places.firmware },
+    boot = { ftab = args.places.boot },
 
     notifications = {
       logs         = { min_priority = 0,  max_priority = 10 },

@@ -11,12 +11,12 @@ fn full_pipeline_config_to_linker() {
     std::fs::create_dir_all(&work_dir).unwrap();
 
     // 1. Config
-    let config = tfw::config::load(fw, "fob.ncl", "boards/bentoboard.ncl", "layouts/prod.ncl")
+    let config = tfw::config::load(fw, "apps/fob.ncl", "boards/bentoboard.ncl", "layouts/prod_a.ncl")
         .expect("config failed");
-    assert_eq!(config.name, "rcard");
+    assert_eq!(config.name, "Charm Production");
 
     // 2. Layout
-    let layout = tfw::layout::solve(&config).expect("layout failed");
+    let layout = tfw::layout::solve(&config, &std::collections::BTreeMap::new()).expect("layout failed");
     assert!(!layout.placed.is_empty());
 
     // 3. Linker scripts
@@ -30,7 +30,7 @@ fn full_pipeline_config_to_linker() {
 
     // 4. Codegen JSON
     let config_json = work_dir.join("config.json");
-    tfw::codegen::emit(&config, &config_json).expect("codegen failed");
+    tfw::codegen::emit(&config, "test-build-id", &config_json).expect("codegen failed");
 
     // Verify config.json
     let json: serde_json::Value =

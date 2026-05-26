@@ -31,10 +31,9 @@ pub struct PlaceLayout {
 /// `filename` controls the output name (e.g. `"places.bin"` or
 /// `"places_b.bin"`).
 ///
-/// `image_place` overrides `config.boot.image` for XIP host-range
-/// detection. Pass `None` to use the config default (slot A). For
-/// slot B, pass `Some(&boot.image_b)` so that re-linked segments at
-/// firmware_b addresses are recognised as host-resident.
+/// `image_place` is the image's `code_generic` place, used for XIP
+/// host-range detection. Pass `None` for RAM-only images with no
+/// flash-resident code.
 ///
 /// Returns the path to the written file plus a `place_name → PlaceLayout`
 /// map so downstream consumers (notably `pack::build_ftab_from_config`)
@@ -57,11 +56,10 @@ pub fn link_image(
     // Build a lookup: (cpu_base, cpu_end) → place_name for all CPU-mapped places.
     let mut place_ranges = build_place_ranges(config);
 
-    // When linking for a non-default slot (e.g. slot B), add the
-    // image place's address range so re-linked segments are mapped.
-    let image_place_ref = image_place.or(config.boot.as_ref().map(|b| &b.image));
+    // Add the image place's address range so segments are mapped.
+    let image_place_ref = image_place;
     if let Some(ip) = image_place {
-        let ip_name = ip.name.clone().unwrap_or_else(|| "image_b".into());
+        let ip_name = ip.name.clone().unwrap_or_else(|| "code_generic".into());
         let offset = ip.offset.unwrap_or(0);
         for mapping in &ip.mappings {
             let start = mapping.address + offset;
@@ -143,8 +141,7 @@ pub fn link_image(
     }
 
     // CPU address range of the flash region hosting places.bin, derived
-    // from the image place (defaulting to boot.image for slot A, or
-    // the explicit override for slot B). Segments whose addresses fall
+    // from the image's code_generic place. Segments whose addresses fall
     // within [host_base, host_end) are host-resident: they get
     // file_offset = (paddr - host_base) so their bytes land at their
     // linker addresses on flash and run XIP. Segments outside this
