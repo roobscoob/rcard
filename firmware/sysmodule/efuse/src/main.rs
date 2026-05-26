@@ -86,6 +86,13 @@ impl Efuse for EfuseImpl {
         }
         Ok(bank_to_bytes(read_bank(bank_id)?))
     }
+
+    fn read_calibration(_meta: ipc::Meta) -> Result<Bank1Calibration, EfuseError> {
+        // Bank1 carries the factory calibration table; see
+        // sysmodule_efuse_api::Bank1Calibration for field origins.
+        let words = read_bank(1)?;
+        Ok(Bank1Calibration::decode(&words))
+    }
 }
 
 #[panic_handler]

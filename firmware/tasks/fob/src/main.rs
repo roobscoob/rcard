@@ -12,13 +12,17 @@ sysmodule_log_api::bind_log!(Log = SLOTS.sysmodule_log);
 rcard_log::bind_logger!(Log);
 sysmodule_log_api::panic_handler!(to Log);
 
-sysmodule_bluetooth_api::bind_bluetooth!(Bt = SLOTS.sysmodule_bluetooth);
+// Direct LCPU control for the BLE bring-up — the bluetooth sysmodule is
+// bypassed while we drive HCI from here.
+sysmodule_lcpu_api::bind_lcpu!(Lcpu = SLOTS.sysmodule_lcpu);
 sysmodule_mpr121_api::bind_mpr121!(Mpr121 = SLOTS.sysmodule_mpr121);
 sysmodule_compositor_api::bind_frame_buffer!(FrameBuffer = SLOTS.sysmodule_compositor);
 sysmodule_compositor_api::bind_layer!(Layer = SLOTS.sysmodule_compositor);
 sysmodule_drv2603_api::bind_drv2603!(Haptic = SLOTS.sysmodule_drv2603);
 sysmodule_power_api::bind_power!(Power = SLOTS.sysmodule_power);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
+
+// ── Capacitive-touch bar display ──────────────────────────────────────
 
 const SCREEN_W: usize = 128;
 const SCREEN_H: usize = 64;
@@ -261,16 +265,142 @@ fn handle_present(_sender: u16, _code: u32) {
         .log_expect("reentrant touch state access");
 }
 
+// ── BLE HCI bring-up ──────────────────────────────────────────────────
+//
+// HCI command frames (H4 type byte + opcode + param_len + params).
+
+/// HCI_Reset (OGF=0x03, OCF=0x0003 → opcode 0x0C03), no params.
+const HCI_RESET: &[u8] = &[0x01, 0x03, 0x0C, 0x00];
+
+/// HCI_LE_Set_Advertising_Parameters (opcode 0x2006).
+/// min/max interval = 0x00A0 (= 100 ms in 0.625 ms units), ADV_IND,
+/// public address, channels 37/38/39, allow any.
+const HCI_LE_SET_ADV_PARAMS: &[u8] = &[
+    0x01, 0x06, 0x20, 0x0F, // H4 cmd, opcode lo/hi, param_len = 15
+    0xA0, 0x00, // adv_interval_min
+    0xA0, 0x00, // adv_interval_max
+    0x00, // adv_type = ADV_IND (connectable undirected)
+    0x00, // own_address_type = public
+    0x00, // peer_address_type = public
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // peer_address (unused with filter=0)
+    0x07, // channel_map = ch 37/38/39
+    0x00, // filter_policy = allow any
+];
+
+/// HCI_LE_Set_Advertising_Data (opcode 0x2008).
+/// 10 bytes used: Flags AD + Complete Local Name "Charm". Remainder zero.
+const HCI_LE_SET_ADV_DATA: &[u8] = &[
+    0x01, 0x08, 0x20, 0x20, // H4 cmd, opcode lo/hi, param_len = 32
+    0x0A, // adv_data_length = 10
+    // AD #1: Flags (LE General Discoverable + BR/EDR not supported)
+    0x02, 0x01, 0x06,
+    // AD #2: Complete Local Name "Charm"
+    0x06, 0x09, b'C', b'h', b'a', b'r', b'm',
+    // 21 zero bytes of padding to reach the fixed 31-byte adv_data field
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+/// HCI_LE_Set_Advertising_Enable (opcode 0x200A), enable = 0x01.
+const HCI_LE_SET_ADV_ENABLE: &[u8] = &[0x01, 0x0A, 0x20, 0x01, 0x01];
+
+const OP_RESET: u16 = 0x0C03;
+const OP_LE_SET_ADV_PARAMS: u16 = 0x2006;
+const OP_LE_SET_ADV_DATA: u16 = 0x2008;
+const OP_LE_SET_ADV_ENABLE: u16 = 0x200A;
+
+/// Scan a recv'd HCI byte stream for a Command Complete event matching
+/// `expected_opcode`. Returns the status byte if found. Handles multiple
+/// concatenated events (we've seen LCPU coalesce two CCs in a single
+/// recv when responses pile up).
+fn find_cc(buf: &[u8], expected_opcode: u16) -> Option<u8> {
+    let mut i = 0;
+    while i + 3 <= buf.len() {
+        if buf[i] != 0x04 {
+            return None; // not an HCI Event packet; bail
+        }
+        let evt_code = buf[i + 1];
+        let param_len = buf[i + 2] as usize;
+        let next = i + 3 + param_len;
+        if next > buf.len() {
+            return None;
+        }
+        if evt_code == 0x0E && param_len >= 4 {
+            // Command Complete: num_hci_command_packets, opcode_lo, opcode_hi, status
+            let cc_opcode = u16::from_le_bytes([buf[i + 4], buf[i + 5]]);
+            if cc_opcode == expected_opcode {
+                return Some(buf[i + 6]);
+            }
+        }
+        i = next;
+    }
+    None
+}
+
+/// Drain whatever the reactor has queued so the queue doesn't fill up.
+/// We don't care about the notification details — the bare bit waking
+/// us is enough.
+fn drain_reactor() {
+    loop {
+        match Reactor::pull() {
+            Ok(Some(_)) => {}
+            _ => break,
+        }
+    }
+}
+
+/// Send one HCI command and block until we see the matching Command
+/// Complete. Logs along the way so we can see exactly where things
+/// stall. Gives up silently on IPC errors — this is a debug hack.
+fn send_and_await(lcpu: &mut Lcpu, cmd: &[u8], expected_opcode: u16) {
+    info!("fob: sending opcode {}", expected_opcode);
+    match lcpu.send_hci(cmd) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            info!("fob: send err: {}", e);
+            return;
+        }
+        Err(e) => {
+            info!("fob: send ipc err: {}", e);
+            return;
+        }
+    }
+
+    let mut buf = [0u8; 256];
+    loop {
+        let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
+        drain_reactor();
+
+        // Drain HCI bytes; LCPU may have written multiple events.
+        loop {
+            let n = match lcpu.recv_hci(&mut buf) {
+                Ok(n) => n as usize,
+                Err(_) => 0,
+            };
+            if n == 0 {
+                break;
+            }
+            info!("fob: recv {} bytes", n);
+            info!("fob: bytes: {}", buf[..n]);
+            if let Some(status) = find_cc(&buf[..n], expected_opcode) {
+                info!("fob: CC op={} status={}", expected_opcode, status);
+                return;
+            }
+        }
+    }
+}
+
 #[export_name = "main"]
 fn main() -> ! {
     info!("fob: awake");
 
+    // ── Power / charging ──
     match Power::charger_force_start() {
         Ok(Ok(())) => info!("fob: force charging enabled"),
         Ok(Err(e)) => info!("fob: force charge failed: {}", e),
         Err(e) => info!("fob: force charge IPC failed: {}", e),
     }
 
+    // ── Capacitive touch + framebuffer + haptics ──
     let config = Mpr121Config::auto_12ch_3v3();
 
     let touch_a = Mpr121::open(Device::A, config)
@@ -307,8 +437,45 @@ fn main() -> ! {
 
     info!("fob: touch bar display running, starting haptic sweep");
 
+    // ── BLE bring-up: drive the LCPU directly and start advertising ──
+    // The reactor queue (incl. `present`) is drained and discarded inside
+    // send_and_await while we block on each Command Complete, so the touch
+    // display simply doesn't refresh for the brief bring-up window.
+    let bd_addr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+    let mut lcpu = Lcpu::init(bd_addr)
+        .log_expect("lcpu init ipc")
+        .log_expect("lcpu init");
+    info!("fob: lcpu ready");
+
+    send_and_await(&mut lcpu, HCI_RESET, OP_RESET);
+    send_and_await(&mut lcpu, HCI_LE_SET_ADV_PARAMS, OP_LE_SET_ADV_PARAMS);
+    send_and_await(&mut lcpu, HCI_LE_SET_ADV_DATA, OP_LE_SET_ADV_DATA);
+    send_and_await(&mut lcpu, HCI_LE_SET_ADV_ENABLE, OP_LE_SET_ADV_ENABLE);
+
+    info!("fob: advertising!");
+
+    // ── Unified service loop ──
+    // A single notification bit wakes us for both the compositor's
+    // `present` and the LCPU's `lcpu_data`. Each wake we drain any HCI
+    // bytes the LCPU posted, then dispatch queued reactor notifications.
+    // `handle_present` self-filters to the `present` group (its macro
+    // guard skips `lcpu_data`), so the touch bars redraw on present and
+    // HCI events are logged on lcpu_data.
+    let mut hci_buf = [0u8; 256];
     loop {
         let _ = userlib::sys_recv_notification(NOTIFICATION_BIT);
+
+        loop {
+            let n = match lcpu.recv_hci(&mut hci_buf) {
+                Ok(n) => n as usize,
+                Err(_) => 0,
+            };
+            if n == 0 {
+                break;
+            }
+            info!("fob: hci recv {} bytes: {}", n, hci_buf[..n]);
+        }
+
         loop {
             match Reactor::pull() {
                 Ok(Some(notif)) => handle_present(&notif),

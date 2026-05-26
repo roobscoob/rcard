@@ -18,7 +18,8 @@ fun memory =>
     # RAM targets — where code and data run at runtime.
     scratch = memory.sram_fast_dctm,    # 128K · exec · NOT retained across standby
     fast    = memory.sram_fast,         # 128K · exec · retained across standby
-    bulk    = memory.sram_bulk,         # 256K · exec · retained across standby — default code/data
+    # subtract 512b for hcpu_tx
+    bulk    = memory.sram_bulk,         # 255.5K · exec · retained across standby — default code/data
     psram   = memory.mpi1,              # 8M   · exec · not retained — framebuf, bulk spill, XIP-OK
 
     # Flash partitions — storage only (no CPU-mapped exec window exposed).

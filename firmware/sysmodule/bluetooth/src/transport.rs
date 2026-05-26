@@ -1,6 +1,7 @@
 //! bt-hci async Transport over the sysmodule_lcpu IPC interface.
 
-use bt_hci::{ControllerToHostPacket, FromHciBytes, FromHciBytesError, HostToControllerPacket};
+use bt_hci::{ControllerToHostPacket, FromHciBytes, FromHciBytesError, HostToControllerPacket, WriteHci};
+use bt_hci::transport::WithIndicator;
 use ipc::executor::Signal;
 
 pub static HCI_RX_SIGNAL: Signal<()> = Signal::new();
@@ -54,16 +55,24 @@ impl bt_hci::transport::Transport for HciTransport {
         }
     }
 
-    async fn write<T: HostToControllerPacket + ?Sized>(
+    async fn write<T: HostToControllerPacket>(
         &self,
         val: &T,
     ) -> Result<(), Self::Error> {
+        // H4-frame the packet: prepend the PacketKind indicator byte so the
+        // LCPU controller knows whether to interpret the payload as Cmd /
+        // ACL / SCO / Event / ISO. Without this prefix, even a well-formed
+        // HCI_Reset is silently dropped by the controller and no Command
+        // Complete event comes back, hanging trouble's runner.
         let mut buf = [0u8; 256];
-        let n = val.size();
+        let wrapped = WithIndicator::new(val);
+        let n = wrapped.size();
         if n > buf.len() {
             return Err(HciError::WriteTooLarge);
         }
-        val.write_hci(&mut buf[..n]).map_err(|_| HciError::WriteTooLarge)?;
+        wrapped
+            .write_hci(&mut buf[..n])
+            .map_err(|_| HciError::WriteTooLarge)?;
         crate::lcpu_send_hci(&buf[..n]).map_err(|_| HciError::SendFailed)?;
         Ok(())
     }

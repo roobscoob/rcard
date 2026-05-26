@@ -13,6 +13,7 @@ fun ctx => {
     ctx.tasks.sysmodule_reactor,
     ctx.tasks.sysmodule_lcpu,
   ],
+  uses_notifications = ["lcpu_data"],
   regions = {
     code  = { place = ctx.places.bulk },
     # trouble futures are large — 16 KiB stack

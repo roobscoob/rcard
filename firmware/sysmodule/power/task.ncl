@@ -8,7 +8,7 @@ fun ctx => {
     ctx.tasks.sysmodule_efuse,
     ctx.tasks.sysmodule_reactor,
   ],
-  uses_peripherals = ["pmuc"],
+  uses_peripherals = ["pmuc", "hpsys_cfg"],
   pushes_notifications = ["power_event"],
   regions = {
     code  = { place = ctx.places.code_generic, execute = true },

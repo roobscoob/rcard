@@ -8,6 +8,7 @@ generated = { path = "../../modules/generated" }
 ipc = { path = "../../modules/ipc", features = ["bare-panics"] }
 kipc.workspace = true
 once-cell = { path = "../../modules/once_cell" }
+sifli-pac = { version = "0.2", features = ["sf32lb52x"] }
 sysmodule_efuse_api = { path = "../efuse/api", features = ["bare-panics"] }
 sysmodule_rand_api = { path = "../rand/api", features = ["bare-panics"] }
 sysmodule_device_api = { path = "api", features = ["bare-panics"] }

@@ -7,6 +7,7 @@ fun ctx => {
     ctx.tasks.sysmodule_efuse,
     ctx.tasks.sysmodule_rand,
   ],
+  uses_peripherals = ["hpsys_cfg"],
   regions = {
     code  = { place = ctx.places.code_generic, execute = true },
     stack = { place = ctx.places.fast, size = 1024 },
