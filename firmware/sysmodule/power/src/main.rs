@@ -4,6 +4,9 @@
 mod charger;
 mod irq;
 
+use core::future::Future as _;
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use generated::notifications;
 use generated::slots::SLOTS;
 use once_cell::OnceCell;
@@ -18,6 +21,25 @@ sysmodule_efuse_api::bind_efuse!(Efuse = SLOTS.sysmodule_efuse);
 sysmodule_reactor_api::bind_reactor!(Reactor = SLOTS.sysmodule_reactor);
 
 static CAL: OnceCell<charger::ChargerCalibration> = OnceCell::new();
+
+/// PA24 — LED (green, active-high)
+const LED_BIT: u32 = 1 << 24;
+
+static CHARGING: AtomicBool = AtomicBool::new(false);
+static CHARGE_CHANGED: ipc::executor::Signal<()> = ipc::executor::Signal::new();
+
+fn gpio() -> sifli_pac::hpsys_gpio::HpsysGpio {
+    sifli_pac::HPSYS_GPIO
+}
+
+fn set_led(on: bool) {
+    let g = gpio();
+    if on {
+        g.dosr0().write(|w| w.0 = LED_BIT);
+    } else {
+        g.docr0().write(|w| w.0 = LED_BIT);
+    }
+}
 
 struct PowerImpl;
 
@@ -93,10 +115,57 @@ fn main() -> ! {
         }
     }
 
-    ipc::server! {
+    // Enable LED output. Start LED off; signal if VBUS is already present
+    // so the blink task picks up the initial state on its first poll.
+    gpio().doesr0().write(|w| w.0 = LED_BIT);
+    set_led(false);
+    {
+        let status = charger::read_status(sifli_pac::PMUC);
+        if status.vbus_present {
+            // Charger is already connected: disable the LOWBAT auto-hibernate
+            // trigger so a depleted cell doesn't cause an immediate re-hibernate
+            // while VBUS is powering the system through the charger rail.
+            sifli_pac::PMUC.wer().modify(|w| w.set_lowbat(false));
+            if CAL.get().is_some() {
+                CHARGING.store(true, Ordering::Relaxed);
+                CHARGE_CHANGED.signal(());
+            }
+        } else {
+            // Running on battery with no VBUS: lower the AON LDO from 3.3 V
+            // (code 6) to 3.0 V (code 0).  If LOWBAT fires and the hardware
+            // auto-hibernates, the LDO is already in the low-leakage state
+            // that HAL_PMU_EnterHibernate would have set in software.  The
+            // kernel restores code 6 on every boot before charger init runs,
+            // so charging accuracy is unaffected.
+            sifli_pac::PMUC.aon_ldo().modify(|w| w.set_vbat_ldo_set_vout(0));
+        }
+    }
+
+    ipc::async_server! {
         Power: PowerImpl,
         @irq(pmuc_irq) => || {
             if let Some(event) = irq::handle_charger_irq(sifli_pac::PMUC) {
+                match event {
+                    ChargerEvent::VbusConnected => {
+                        // Restore AON LDO to 3.3 V before the charger engages.
+                        sifli_pac::PMUC.aon_ldo().modify(|w| w.set_vbat_ldo_set_vout(6));
+                        sifli_pac::PMUC.wer().modify(|w| w.set_lowbat(false));
+                        CHARGING.store(true, Ordering::Relaxed);
+                        CHARGE_CHANGED.signal(());
+                    }
+                    ChargerEvent::VbusDisconnected => {
+                        // Drop AON LDO to 3.0 V to reduce hibernate leakage.
+                        sifli_pac::PMUC.aon_ldo().modify(|w| w.set_vbat_ldo_set_vout(0));
+                        sifli_pac::PMUC.wer().modify(|w| w.set_lowbat(true));
+                        CHARGING.store(false, Ordering::Relaxed);
+                        CHARGE_CHANGED.signal(());
+                    }
+                    ChargerEvent::ChargingComplete => {
+                        CHARGING.store(false, Ordering::Relaxed);
+                        CHARGE_CHANGED.signal(());
+                    }
+                    _ => {}
+                }
                 let _ = Reactor::refresh(
                     notifications::GROUP_ID_POWER_EVENT,
                     event as u32,
@@ -105,5 +174,20 @@ fn main() -> ! {
                 );
             }
         },
+        @spawn => [
+            async {
+                loop {
+                    if CHARGING.load(Ordering::Relaxed) {
+                        set_led(true);
+                        embassy_time::Timer::after_millis(500).await;
+                        set_led(false);
+                        embassy_time::Timer::after_millis(500).await;
+                    } else {
+                        set_led(false);
+                        CHARGE_CHANGED.wait().await;
+                    }
+                }
+            }
+        ],
     }
 }

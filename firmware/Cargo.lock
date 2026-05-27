@@ -1587,6 +1587,7 @@ dependencies = [
 name = "sysmodule_power"
 version = "0.1.0"
 dependencies = [
+ "embassy-time",
  "generated",
  "ipc",
  "once-cell",

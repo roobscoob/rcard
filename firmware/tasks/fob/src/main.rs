@@ -194,11 +194,6 @@ fn handle_present(_sender: u16, _code: u32) {
         .get()
         .log_expect("touch state not initialized")
         .with(|s| {
-            match Power::charger_status() {
-                Ok(status) => info!("charger: {} vbus={}", status.state, status.vbus_present),
-                Err(e) => info!("charger status failed: {}", e),
-            }
-
             let now = userlib::sys_get_timer().now;
 
             // Triangle wave 0→1→0 over SWEEP_PERIOD_MS controls click rate

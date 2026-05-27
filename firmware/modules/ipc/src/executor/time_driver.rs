@@ -110,6 +110,17 @@ impl embassy_time_driver::Driver for HubrisTimeDriver {
 
 embassy_time_driver::time_driver_impl!(static DRIVER: HubrisTimeDriver = HubrisTimeDriver::new());
 
+/// Returns the earliest deadline currently registered with the driver,
+/// or `None` if no alarms are pending. Used by `arm_kernel_timer`.
+pub fn earliest_pending() -> Option<u64> {
+    DRIVER
+        .entries_mut()
+        .iter()
+        .filter(|e| e.waker.is_some())
+        .map(|e| e.deadline)
+        .min()
+}
+
 /// Called from the macro-generated run loop when TIMER_BIT fires.
 /// Expires all due timers and re-arms the kernel timer.
 pub fn on_timer_tick() {

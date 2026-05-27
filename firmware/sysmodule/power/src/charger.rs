@@ -133,6 +133,15 @@ pub(crate) fn init_charger(pmuc: sifli_pac::pmuc::Pmuc, cal: &ChargerCalibration
         w.set_bm_eoc(bm_eoc);
         w.set_range_eoc(range_eoc);
     });
+
+    // Step 9: enable charger — starts normal Pre-CC/CC/CV/EOC state machine
+    // when VBUS is present.  Without this the charger stays in Off/Idle
+    // regardless of VBUS, and nothing charges until force_ctrl is asserted
+    // by the fob task (which may not start in time on a depleted battery).
+    pmuc.chg_cr1().modify(|w| {
+        w.set_en(true);
+        w.set_loop_en(true);
+    });
 }
 
 // ── Force-charge mode (§14) ─────────────────────────────────────────────────

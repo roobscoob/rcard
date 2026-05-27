@@ -139,15 +139,15 @@ pub unsafe fn apply_pin_config() {
                                       // PA19 -> usart1 tx (FSEL=4, pull=none)
     rmw(0x5000_3080, 0x7F, 0x04);
     rmw(0x5000_B058, 0x3F, 0x13); // PINR: usart1 tx = PA19
-                                  // PA24 -> spi1 dio (FSEL=2, pull=down)
-    rmw(0x5000_3094, 0x7F, 0x12);
+                                  // PA24 -> led gpio out (FSEL=0, pull=down)
+    rmw(0x5000_3094, 0x7F, 0x10);
     // PA25 -> i2s1 sdo (FSEL=3, pull=down)
     rmw(0x5000_3098, 0x7F, 0x13);
     // PA26 -> rfid_wake gpio in (FSEL=0, pull=up, IE)
     rmw(0x5000_309C, 0x7F, 0x70);
     // PA27 -> touch_int gpio in (FSEL=0, pull=up, IE)
     rmw(0x5000_30A0, 0x7F, 0x70);
-    // PA28 -> ws2812_en gpio out (FSEL=0, pull=down)
+    // PA28 -> unused gpio out (FSEL=0, pull=down)
     rmw(0x5000_30A4, 0x7F, 0x10);
     // PA30 -> i2c3 scl (FSEL=4 = PA_I2C_UART, pull=up, IE)
     rmw(0x5000_30AC, 0x7F, 0x74);
@@ -438,9 +438,19 @@ fn main() -> ! {
     //   - AON_LDO.VBAT_LDO_SET_VOUT=6 (3.3V): the SDK drops this to 3V
     //     (code 0) before entering hibernate to cut leakage; without the
     //     restore the VBAT rail stays under-spec and the charger misbehaves.
-    //   - WER.LOWBAT: tells the PMUC to power the chip down if VCC sags
-    //     below the low-battery threshold, so the charger can work
-    //     uninterrupted instead of the chip brownout-resetting in a loop.
+    //   - WER.CHG: wakes the chip from a LOWBAT hibernate when a charger
+    //     event fires (including VBUS connect), so plugging in USB always
+    //     recovers a dead board. This must be set before WER.LOWBAT so it
+    //     is in place if LOWBAT hibernates the chip before the power
+    //     sysmodule runs.
+    //   - WER.LOWBAT: auto-hibernate on low VCC — but only when VBUS is
+    //     absent. The VBAT_LDO (3.3V) needs ~200 mV headroom, so the
+    //     LOWBAT threshold is roughly 3.5 V. When VBUS is present the chip
+    //     is powered from the USB rail, not VBAT, so VCC stays stable even
+    //     with a depleted cell. Enabling LOWBAT in that case causes an
+    //     immediate hibernate loop (LOWBAT fires during boot before the
+    //     power sysmodule can clear it), which stops charging and kills
+    //     the board. The power sysmodule manages LOWBAT from this point.
     unsafe {
         // PMUC base address (register.h:400, sf32lb52x).
         // Offsets come from the PMUC_TypeDef struct layout in pmuc.h.
@@ -465,8 +475,28 @@ fn main() -> ! {
         //   VBAT_LDO_SET_VOUT[3:0] = 6 (3.3V), VBAT_POR_TH[6:4] = 0
         pmuc_rmw(0x28, 0x7F, 6);
 
-        // WER.LOWBAT (offset 0x04, bit 7): auto power-down on low VCC
-        pmuc_rmw(0x04, 1 << 7, 1 << 7);
+        // WER.CHG (offset 0x04, bit 8): wake from hibernate on charger event.
+        // Set unconditionally — must be in place before any LOWBAT hibernate
+        // so that VBUS connect can revive the board regardless of whether the
+        // power sysmodule has had a chance to run init_charger yet.
+        pmuc_rmw(0x04, 1 << 8, 1 << 8);
+
+        // WER.LOWBAT (offset 0x04, bit 7): hibernate on low VCC.
+        // CHG_SR (offset 0x48) bit 0 = VBUS_RDY_OUT.
+        // When waking from a LOWBAT hibernate with VBUS present, the AON
+        // register file retains its pre-hibernate state, so WER.LOWBAT is
+        // still set.  VBAT is still at or below the LOWBAT threshold, so the
+        // comparator fires again immediately — re-hibernating the chip before
+        // the power sysmodule can clear it — creating an endless boot loop
+        // that prevents charging.  Actively clear LOWBAT here when VBUS is
+        // present so the power sysmodule inherits a clean slate.
+        let vbus_present =
+            (0x500c_a048u32 as *const u32).read_volatile() & 1 != 0;
+        if vbus_present {
+            pmuc_rmw(0x04, 1 << 7, 0);          // clear LOWBAT — VBUS powers system
+        } else {
+            pmuc_rmw(0x04, 1 << 7, 1 << 7);     // set LOWBAT — protect against low VBAT
+        }
 
         // HPSYS_LDO.DLY[15:10] = 1  (offset 0x4C)
         pmuc_rmw(0x4C, 0xFC00, 1 << 10);
@@ -485,6 +515,10 @@ fn main() -> ! {
     }
     usart1_write_str(TICK_ZERO);
     usart1_write_str("kernel: PMU init done\r\n");
+    {
+        let wer = unsafe { (0x500c_a004u32 as *const u32).read_volatile() };
+        usart1_write_u32_hex("kernel: WER=0x", wer);
+    }
 
     unsafe { apply_pin_config() };
 

@@ -8,7 +8,8 @@ default = ["bare-panics"]
 bare-panics = ["ipc/bare-panics"]
 
 [dependencies]
-ipc = { path = "../../modules/ipc" }
+ipc = { path = "../../modules/ipc", features = ["executor"] }
+embassy-time = { version = "0.5", default-features = false, features = ["tick-hz-1_000"] }
 sysmodule_power_api = { path = "api", features = ["bare-panics"] }
 sysmodule_log_api = { path = "../log/api" }
 sysmodule_efuse_api = { path = "../efuse/api", features = ["bare-panics"] }

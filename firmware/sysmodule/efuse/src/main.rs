@@ -15,6 +15,12 @@ const CR: *mut u32 = EFUSEC_BASE as *mut u32; // +0x00
 const SR: *mut u32 = (EFUSEC_BASE + 0x08) as *mut u32; // +0x08
 const BANK_DATA: *const u32 = (EFUSEC_BASE + 0x30) as *const u32; // bank0 word0
 
+// PMUC.HPSYS_VOUT (0x500CA000 + 0x94): bits [3:0] = vout.
+// The eFuse array requires an elevated supply for reliable read margin.
+// Boost vout by +3 (clamped to 0xF) before reading and restore after,
+// matching the Zephyr otp_sifli_efuse driver sequence.
+const PMUC_HPSYS_VOUT: *mut u32 = 0x500C_A094 as *mut u32;
+
 const CR_EN: u32 = 1 << 0;
 // CR.MODE is bit 1, 0 = READ; we always issue READs so we leave it 0.
 const CR_BANKSEL_SHIFT: u32 = 2;
@@ -33,6 +39,15 @@ fn read_bank(bank: u8) -> Result<[u32; 8], EfuseError> {
     let bank = bank as u32 & 0x3;
 
     unsafe {
+        // Boost HPSYS_VOUT by +3 (clamped to 0xF) for read margin, then
+        // wait ~20 µs for the LDO to settle before initiating the read.
+        let orig_vout = read_volatile(PMUC_HPSYS_VOUT);
+        let boosted_vout = (orig_vout & !0xF) | (((orig_vout & 0xF) + 3).min(0xF));
+        write_volatile(PMUC_HPSYS_VOUT, boosted_vout);
+        for _ in 0..10_000u32 {
+            core::arch::asm!("nop");
+        }
+
         // BANKSEL = bank, MODE = READ (0), EN = 1 (self-clearing, kicks
         // off the read).
         write_volatile(CR, (bank << CR_BANKSEL_SHIFT) | CR_EN);
@@ -42,6 +57,7 @@ fn read_bank(bank: u8) -> Result<[u32; 8], EfuseError> {
         while read_volatile(SR) & SR_DONE == 0 {
             polls += 1;
             if polls >= POLL_LIMIT {
+                write_volatile(PMUC_HPSYS_VOUT, orig_vout);
                 return Err(EfuseError::Timeout);
             }
         }
@@ -57,6 +73,8 @@ fn read_bank(bank: u8) -> Result<[u32; 8], EfuseError> {
             out[i] = read_volatile(base.add(i));
             i += 1;
         }
+
+        write_volatile(PMUC_HPSYS_VOUT, orig_vout);
         Ok(out)
     }
 }

@@ -48,11 +48,17 @@ impl<const N: usize> TimerQueue<N> {
         fired
     }
 
-    /// Arm the kernel timer to the earliest pending deadline.
-    /// If no deadlines are pending, disarms the timer.
+    /// Arm the kernel timer to the earliest pending deadline across both
+    /// this queue and the embassy-time driver. Only disarms if neither
+    /// has a pending deadline.
     pub fn arm_kernel_timer(&self) {
         let d = self.deadlines.get();
-        let earliest = d.iter().filter_map(|s| *s).min();
+        let queue_earliest = d.iter().filter_map(|s| *s).min();
+        let driver_earliest = super::time_driver::earliest_pending();
+        let earliest = match (queue_earliest, driver_earliest) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         userlib::sys_set_timer(earliest, TIMER_BIT);
     }
 }
