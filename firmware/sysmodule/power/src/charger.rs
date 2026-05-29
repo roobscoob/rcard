@@ -122,9 +122,9 @@ pub(crate) fn init_charger(pmuc: sifli_pac::pmuc::Pmuc, cal: &ChargerCalibration
     });
     reset_pulse(pmuc);
 
-    // Step 7: set CC current (65 mA)
+    // Step 7: set CC current (~90 mA; hardware steps are 81/91, encodes to 91)
     pmuc.chg_cr1().modify(|w| {
-        w.set_cc_ictrl(encode_cc_current(65));
+        w.set_cc_ictrl(encode_cc_current(91));
     });
 
     // Step 8: set EOC (10% of CC)

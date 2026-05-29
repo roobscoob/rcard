@@ -117,6 +117,7 @@ pub enum PowerError {
     ChargerNotCalibrated = 1,
     InvalidParameter = 2,
     EfuseReadFailed = 3,
+    BatteryTooLow = 4,
 }
 
 // ── IPC trait ───────────────────────────────────────────────────────────────

@@ -24,9 +24,13 @@ let miB = fun n => n * 1024 * 1024 in
     usart1      = { base = 0x50084000, size = 0x1000, irqs = { irq = 59 }, renode = { model = "UART.STM32F7_USART", properties = { frequency = 240000000 } } },
     usart2      = { base = 0x50085000, size = 0x1000, irqs = { irq = 74 }, renode = { model = "UART.STM32F7_USART", properties = { frequency = 240000000 } } },
     usart3      = { base = 0x50086000, size = 0x1000, irqs = { irq = 95 }, renode = { model = "UART.STM32F7_USART", properties = { frequency = 240000000 } } },
+    gpadc       = { base = 0x50087000, size = 0x1000, irqs = { irq = 65 } },
     mpi1        = { base = 0x50041000, size = 0x1000, renode = { model = "SPI.SF32LB52_MPI" } },
     mpi2        = { base = 0x50042000, size = 0x1000, renode = { model = "SPI.SF32LB52_MPI" } },
     hpsys_rcc   = { base = 0x50000000, size = 0x1000, renode = { model = "Miscellaneous.SF32LB52_HPSYS_RCC" } },
+    # Aggregate: covers hpsys_rcc (0x50000000) + pinctrl (0x50003000) + hpsys_cfg (0x5000B000).
+    # Use this when a task needs both RCC and CFG to stay within the 8-region MPU limit.
+    hpsys_rcc_cfg = { base = 0x50000000, size = 0xC000 },
     gpios       = { base = 0x500A0000, size = 0x1000, irqs = { irq = 84 } },
     pinctrl     = { base = 0x50003000, size = 0x1000 },
     hpsys_cfg   = { base = 0x5000B000, size = 0x1000 },

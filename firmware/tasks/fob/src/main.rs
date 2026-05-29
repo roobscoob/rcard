@@ -236,17 +236,17 @@ fn handle_present(_sender: u16, _code: u32) {
 
             s.log_counter = s.log_counter.wrapping_add(1);
             if s.log_counter % 8 == 0 {
-                info!("capA filt: {} {} {} {} {} {} {} {}",
-                    top[4], top[5], top[6], top[7], top[8], top[9], top[10], top[11]);
-                info!("capA base: {} {} {} {} {} {} {} {}",
-                    top_bl[4], top_bl[5], top_bl[6], top_bl[7],
-                    top_bl[8], top_bl[9], top_bl[10], top_bl[11]);
-                info!("capB filt: {} {} {} {} {} {} {} {}",
-                    bottom[4], bottom[5], bottom[6], bottom[7],
-                    bottom[8], bottom[9], bottom[10], bottom[11]);
-                info!("capB base: {} {} {} {} {} {} {} {}",
-                    bottom_bl[4], bottom_bl[5], bottom_bl[6], bottom_bl[7],
-                    bottom_bl[8], bottom_bl[9], bottom_bl[10], bottom_bl[11]);
+                //info!("capA filt: {} {} {} {} {} {} {} {}",
+                //    top[4], top[5], top[6], top[7], top[8], top[9], top[10], top[11]);
+               // info!("capA base: {} {} {} {} {} {} {} {}",
+                //    top_bl[4], top_bl[5], top_bl[6], top_bl[7],
+               //     top_bl[8], top_bl[9], top_bl[10], top_bl[11]);
+               // info!("capB filt: {} {} {} {} {} {} {} {}",
+               //     bottom[4], bottom[5], bottom[6], bottom[7],
+               //     bottom[8], bottom[9], bottom[10], bottom[11]);
+               // info!("capB base: {} {} {} {} {} {} {} {}",
+               //     bottom_bl[4], bottom_bl[5], bottom_bl[6], bottom_bl[7],
+               //     bottom_bl[8], bottom_bl[9], bottom_bl[10], bottom_bl[11]);
             }
 
             draw_bars(&mut s.buf, &top, &top_bl, &bottom, &bottom_bl);

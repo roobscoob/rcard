@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod battery;
 mod charger;
 mod irq;
 
@@ -27,6 +28,7 @@ const LED_BIT: u32 = 1 << 24;
 
 static CHARGING: AtomicBool = AtomicBool::new(false);
 static CHARGE_CHANGED: ipc::executor::Signal<()> = ipc::executor::Signal::new();
+static BATTERY_ADEQUATE: AtomicBool = AtomicBool::new(false);
 
 fn gpio() -> sifli_pac::hpsys_gpio::HpsysGpio {
     sifli_pac::HPSYS_GPIO
@@ -48,10 +50,16 @@ impl Power for PowerImpl {
         rcard_log::info!("enable_ldo: {}", ldo);
         let pmuc = sifli_pac::PMUC;
         match ldo {
-            Ldo::Vdd33Ldo2 => pmuc.peri_ldo().modify(|w| {
-                w.set_en_vdd33_ldo2(true);
-                w.set_vdd33_ldo2_pd(false);
-            }),
+            Ldo::Vdd33Ldo2 => {
+                if !BATTERY_ADEQUATE.load(Ordering::Relaxed) {
+                    rcard_log::warn!("enable_ldo: Vdd33Ldo2 blocked (battery too low)");
+                    return Err(PowerError::BatteryTooLow);
+                }
+                pmuc.peri_ldo().modify(|w| {
+                    w.set_en_vdd33_ldo2(true);
+                    w.set_vdd33_ldo2_pd(false);
+                });
+            }
             Ldo::Vdd33Ldo3 => pmuc.peri_ldo().modify(|w| {
                 w.set_en_vdd33_ldo3(true);
                 w.set_vdd33_ldo3_pd(false);
@@ -126,6 +134,9 @@ fn main() -> ! {
             // trigger so a depleted cell doesn't cause an immediate re-hibernate
             // while VBUS is powering the system through the charger rail.
             sifli_pac::PMUC.wer().modify(|w| w.set_lowbat(false));
+            // VBUS is present — the charger rail is powering the system, so
+            // the display charge pump cannot cause a brownout. Allow Vdd33Ldo2.
+            BATTERY_ADEQUATE.store(true, Ordering::Relaxed);
             if CAL.get().is_some() {
                 CHARGING.store(true, Ordering::Relaxed);
                 CHARGE_CHANGED.signal(());
@@ -138,6 +149,24 @@ fn main() -> ! {
             // kernel restores code 6 on every boot before charger init runs,
             // so charging accuracy is unaffected.
             sifli_pac::PMUC.aon_ldo().modify(|w| w.set_vbat_ldo_set_vout(0));
+            // Check SoC before allowing the Vdd33Ldo2 rail up. The display
+            // charge pump lives on that rail and causes a brownout loop on a
+            // depleted cell. Gate it here, before the async server starts, so
+            // the answer is already set when mpr121 first calls enable_ldo.
+            match battery::read_vbat_mv_blocking() {
+                Some(mv) => {
+                    let pct = battery::percent_from_curve(&battery::DISCHARGE_CURVE, mv);
+                    rcard_log::info!("battery: {}mV {}% at boot", mv, pct);
+                    if pct >= 50 {
+                        BATTERY_ADEQUATE.store(true, Ordering::Relaxed);
+                    } else {
+                        rcard_log::warn!("battery: SoC below 50%, Vdd33Ldo2 blocked");
+                    }
+                }
+                None => {
+                    rcard_log::warn!("battery: GPADC read failed at boot, Vdd33Ldo2 blocked");
+                }
+            }
         }
     }
 
@@ -182,9 +211,34 @@ fn main() -> ! {
                         embassy_time::Timer::after_millis(500).await;
                         set_led(false);
                         embassy_time::Timer::after_millis(500).await;
+                    } else if !BATTERY_ADEQUATE.load(Ordering::Relaxed) {
+                        // Low battery: brief flash every 3s so the device is
+                        // visibly alive without being mistaken for charging.
+                        set_led(true);
+                        embassy_time::Timer::after_millis(100).await;
+                        set_led(false);
+                        embassy_time::Timer::after_millis(2900).await;
                     } else {
                         set_led(false);
                         CHARGE_CHANGED.wait().await;
+                    }
+                }
+            },
+            async {
+                let mut calc = battery::BatteryCalculator::new(50, 30, 3, 80, 20);
+                loop {
+                    embassy_time::Timer::after_millis(30_000).await;
+                    if let Some(vbat_mv) = battery::read_vbat_mv().await {
+                        let charging = CHARGING.load(Ordering::Relaxed);
+                        let pct = calc.update(
+                            vbat_mv,
+                            charging,
+                            &battery::CHARGE_CURVE,
+                            &battery::DISCHARGE_CURVE,
+                        );
+                        rcard_log::info!("battery: {}mV {}% charging={}", vbat_mv, pct, charging);
+                    } else {
+                        rcard_log::warn!("battery: GPADC read timed out");
                     }
                 }
             }
