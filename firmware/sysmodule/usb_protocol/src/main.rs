@@ -92,11 +92,16 @@ fn setup_usb() {
     let bus = SETUP_BUFS
         .with(|bufs| {
             const MSOS_VENDOR_CODE: u8 = 0x01;
+            // Function subsets sit directly under the root set (allowed for
+            // single-configuration devices). We deliberately avoid a
+            // Configuration Subset: its header field is a 0-based config
+            // *index*, not bConfigurationValue, and getting that wrong makes
+            // Windows silently skip the nested function subsets so no WinUSB
+            // compatible ID reaches the interfaces. bFirstInterface 0/1 match
+            // HOST_DRIVEN_INTERFACE / FOB_DRIVEN_INTERFACE on the host side.
             let msos_set = Msos20DescriptorSet::new(&mut bufs.msos)
-                .with_configuration(1, |c| {
-                    c.with_function(0, |f| f.compatible_id("WINUSB", ""))
-                        .with_function(1, |f| f.compatible_id("WINUSB", ""))
-                })
+                .with_function(0, |f| f.compatible_id("WINUSB", ""))
+                .with_function(1, |f| f.compatible_id("WINUSB", ""))
                 .build()
                 .log_unwrap();
 
