@@ -19,7 +19,9 @@ fn rcard_identity_capability(
     uid: &[u8; 16],
     session_id: &[u8; 16],
 ) -> [u8; rcard_usb_proto::messages::RCARD_IDENTITY_CAP_SIZE] {
-    use rcard_usb_proto::messages::{AWAKE_FIELD_SIZE, RCARD_IDENTITY_CAP_SIZE, RCARD_IDENTITY_UUID};
+    use rcard_usb_proto::messages::{
+        AWAKE_FIELD_SIZE, RCARD_IDENTITY_CAP_SIZE, RCARD_IDENTITY_UUID,
+    };
     let build_id = generated::build_info::BUILD_ID_BYTES;
     let mut buf = [0u8; RCARD_IDENTITY_CAP_SIZE];
     let mut i = 0;
@@ -91,7 +93,10 @@ fn setup_usb() {
         .with(|bufs| {
             const MSOS_VENDOR_CODE: u8 = 0x01;
             let msos_set = Msos20DescriptorSet::new(&mut bufs.msos)
-                .compatible_id("WINUSB", "")
+                .with_configuration(1, |c| {
+                    c.with_function(0, |f| f.compatible_id("WINUSB", ""))
+                        .with_function(1, |f| f.compatible_id("WINUSB", ""))
+                })
                 .build()
                 .log_unwrap();
 
